@@ -1,0 +1,23 @@
+{
+  "name": "cursor-team-usage",
+  "version": "0.1.0",
+  "description": "团队主管查看多名个人版 Cursor 成员用量与额度的本地看板",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/poiig/cursor-usage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/poiig/cursor-usage/issues"
+  },
+  "homepage": "https://github.com/poiig/cursor-usage#readme",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/unit.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

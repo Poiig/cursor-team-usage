@@ -1,0 +1,24 @@
+# Cursor Team Usage — 模板 compose
+# 用法：
+#   docker compose up -d --build
+#   浏览器打开 http://localhost:3780
+#
+# 注意：会话 Token 等同登录态。默认仅映射本机端口；若暴露到局域网/公网请自行加反向代理与访问控制。
+
+services:
+  cursor-team-usage:
+    build: .
+    image: cursor-team-usage:latest
+    container_name: cursor-team-usage
+    restart: unless-stopped
+    ports:
+      - "3780:3780"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3780"
+      # TZ: "Asia/Shanghai"
+    volumes:
+      # 持久化成员名册与会话 Token
+      - ./data:/app/data
+    # 可选：限制仅本机访问（取消下行注释，并改 ports 为 "127.0.0.1:3780:3780"）
+    # network_mode: bridge
