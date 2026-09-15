@@ -4,12 +4,12 @@
   "description": "团队主管查看多名个人版 Cursor 成员用量与额度的本地看板",
   "repository": {
     "type": "git",
-    "url": "https://github.com/poiig/cursor-usage.git"
+    "url": "https://github.com/Poiig/cursor-usage.git"
   },
   "bugs": {
-    "url": "https://github.com/poiig/cursor-usage/issues"
+    "url": "https://github.com/Poiig/cursor-usage/issues"
   },
-  "homepage": "https://github.com/poiig/cursor-usage#readme",
+  "homepage": "https://github.com/Poiig/cursor-usage#readme",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
