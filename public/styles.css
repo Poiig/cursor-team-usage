@@ -865,3 +865,96 @@ code {
     transition: none !important;
   }
 }
+
+/* 隐私开关、设置页、官方同款请求表 */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted, #9aa4b2);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  accent-color: #4daafc;
+}
+
+.list-refresh-hint {
+  margin: 0 0 12px;
+  padding: 0 2px;
+}
+
+.settings-card {
+  margin-top: 12px;
+  padding: 18px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  max-width: 520px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-label {
+  font-weight: 600;
+}
+
+.settings-actions {
+  margin-top: 16px;
+}
+
+.usage-section {
+  margin-top: 28px;
+}
+
+.usage-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.usage-hint {
+  margin: 8px 0 12px;
+  font-size: 13px;
+}
+
+.usage-table-wrap {
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+.usage-table th {
+  color: #9aa4b2;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.usage-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.usage-table td:nth-child(4),
+.usage-table td:nth-child(5) {
+  font-variant-numeric: tabular-nums;
+}
+

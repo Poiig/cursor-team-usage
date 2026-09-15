@@ -19,6 +19,9 @@ import {
   mergePlanMeters,
   buildOpenUsagePanelLines,
   aggregateSpendPeriods,
+  usageKindLabel,
+  usageCostLabel,
+  eventTotalTokens,
 } from '../src/cursor-api.js';
 
 test('normalizeManualToken 接受 cookie / name=value / 裸 JWT', () => {
@@ -165,4 +168,22 @@ test('buildOpenUsagePanelLines 含百分比与花费块', () => {
     ['Total usage', 'Cursor Models', 'Other Models', 'Grok Bot usage'],
   );
   assert.equal(lines.some((l) => l.type === 'spend-row'), true);
+});
+
+test('usageKindLabel / usageCostLabel 对齐官方 Type·Cost 文案', () => {
+  assert.equal(usageKindLabel('USAGE_EVENT_KIND_INCLUDED_IN_PRO_PLUS'), 'Included');
+  assert.equal(usageKindLabel('USAGE_EVENT_KIND_FREE'), 'Free');
+  assert.equal(usageKindLabel('USAGE_EVENT_KIND_USAGE_BASED'), 'On-Demand');
+  assert.equal(
+    usageCostLabel({ kind: 'USAGE_EVENT_KIND_INCLUDED_IN_PRO_PLUS', chargedCents: 22 }),
+    'Included',
+  );
+  assert.equal(
+    usageCostLabel({ kind: 'USAGE_EVENT_KIND_USAGE_BASED', chargedCents: 150 }),
+    '$1.50',
+  );
+  assert.equal(
+    eventTotalTokens({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 880 }),
+    1000,
+  );
 });

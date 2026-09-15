@@ -7,7 +7,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchMemberSnapshot } from './cursor-api.js';
+import { fetchMemberSnapshot, fetchMemberUsageEvents } from './cursor-api.js';
 import { probeLocalCursorSession, resolveLocalCursorSession } from './local-session.js';
 import {
   addMember,
@@ -16,6 +16,7 @@ import {
   getMemberInternal,
   listMembers,
   saveSyncResult,
+  toPublicMember,
   updateMember,
 } from './store.js';
 
@@ -59,7 +60,7 @@ function sendJson(res, status, data) {
 }
 
 /**
- * 从已缓存快照汇总团队级指标，避免列表接口再打 cursor.com。
+ * 从已缓存快照汇总全部账号指标，避免列表接口再打 cursor.com。
  * @param {Awaited<ReturnType<typeof listMembers>>} members
  */
 function buildTeamSummary(members) {
@@ -208,21 +209,60 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 201, { member: refreshed });
     }
 
-    const memberMatch = pathname.match(/^\/api\/members\/([^/]+)(\/refresh)?$/);
+    if (method === 'GET' && pathname === '/api/export/accounts') {
+      // 本机备份：含完整 Token，仅供可信环境导出再导入。
+      const members = await getAllMembersInternal();
+      return sendJson(res, 200, {
+        app: 'cursor-team-usage',
+        exportedAt: new Date().toISOString(),
+        members: members.map((m) => ({
+          displayName: m.displayName,
+          email: m.email ?? m.lastSnapshot?.email ?? null,
+          userId: m.userId,
+          sessionToken: m.cookieValue,
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
+        })),
+      });
+    }
+
+    const memberMatch = pathname.match(
+      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events)?$/,
+    );
     if (memberMatch) {
       const id = decodeURIComponent(memberMatch[1]);
-      const isRefresh = Boolean(memberMatch[2]);
+      const suffix = memberMatch[2] || '';
 
-      if (method === 'POST' && isRefresh) {
+      if (method === 'GET' && !suffix) {
+        const member = await getMemberInternal(id);
+        if (!member) throw new Error('成员不存在');
+        return sendJson(res, 200, { member: toPublicMember(member) });
+      }
+
+      if (method === 'GET' && suffix === '/usage-events') {
+        const member = await getMemberInternal(id);
+        if (!member) throw new Error('成员不存在');
+        const days = Number(url.searchParams.get('days') || 7);
+        const page = Number(url.searchParams.get('page') || 1);
+        const pageSize = Number(url.searchParams.get('pageSize') || 50);
+        const data = await fetchMemberUsageEvents(member.cookieValue, {
+          days,
+          page,
+          pageSize,
+        });
+        return sendJson(res, 200, data);
+      }
+
+      if (method === 'POST' && suffix === '/refresh') {
         const member = await refreshOne(id);
         return sendJson(res, 200, { member });
       }
-      if (method === 'PUT' && !isRefresh) {
+      if (method === 'PUT' && !suffix) {
         const body = await readBody(req);
         const member = await updateMember(id, body);
         return sendJson(res, 200, { member });
       }
-      if (method === 'DELETE' && !isRefresh) {
+      if (method === 'DELETE' && !suffix) {
         await deleteMember(id);
         return sendJson(res, 200, { ok: true });
       }
@@ -255,6 +295,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Cursor Team Usage → http://${HOST}:${PORT}`);
-  console.log('个人版模式：每位成员需提供 WorkosCursorSessionToken');
+  console.log(`cursor-team-usage → http://${HOST}:${PORT}`);
+  console.log('多账号模式：每个账号一份 WorkosCursorSessionToken');
 });

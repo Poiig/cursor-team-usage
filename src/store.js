@@ -1,6 +1,6 @@
 /**
  * 成员名册持久化：本地 JSON，仅本机进程读写。
- * Token 落盘是为了主管刷新时无需反复粘贴；部署时务必只绑 loopback。
+ * Token 落盘是为了刷新时无需反复粘贴；部署时务必只绑 loopback。
  */
 
 import { randomUUID } from 'node:crypto';

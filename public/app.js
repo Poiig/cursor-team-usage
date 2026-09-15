@@ -1,6 +1,20 @@
 /**
- * 多账号看板：紧凑列表、额度进度条与账号详情图表。
+ * 多账号列表：紧凑卡片、隐私模式、导出；详情跳转独立页面。
  */
+
+import {
+  accountIdentity,
+  api,
+  createToast,
+  daysUntil,
+  downloadText,
+  escapeHtml,
+  formatTokens,
+  loadSettings,
+  money,
+  saveSettings,
+  setBusy,
+} from './shared.js';
 
 const els = {
   summary: document.getElementById('summary'),
@@ -14,30 +28,27 @@ const els = {
   searchInput: document.getElementById('searchInput'),
   filterStatus: document.getElementById('filterStatus'),
   sortBy: document.getElementById('sortBy'),
-  autoRefresh: document.getElementById('autoRefresh'),
+  privacyMode: document.getElementById('privacyMode'),
   autoRefreshHint: document.getElementById('autoRefreshHint'),
+  settingAutoRefresh: document.getElementById('settingAutoRefresh'),
   tabAccounts: document.getElementById('tabAccounts'),
+  tabSettings: document.getElementById('tabSettings'),
   tabHelp: document.getElementById('tabHelp'),
-  tabDetail: document.getElementById('tabDetail'),
-  detailTitle: document.getElementById('detailTitle'),
-  detailSub: document.getElementById('detailSub'),
-  detailMeters: document.getElementById('detailMeters'),
-  chartSpend: document.getElementById('chartSpend'),
-  chartTokens: document.getElementById('chartTokens'),
-  chartModels: document.getElementById('chartModels'),
-  btnBackList: document.getElementById('btnBackList'),
-  btnDetailRefresh: document.getElementById('btnDetailRefresh'),
   btnAdd: document.getElementById('btnAdd'),
   btnEmptyAdd: document.getElementById('btnEmptyAdd'),
   btnEmptyImport: document.getElementById('btnEmptyImport'),
   btnImportLocal: document.getElementById('btnImportLocal'),
   btnImportInDialog: document.getElementById('btnImportInDialog'),
   btnRefreshAll: document.getElementById('btnRefreshAll'),
+  btnExport: document.getElementById('btnExport'),
+  btnSaveSettings: document.getElementById('btnSaveSettings'),
   btnHelp: document.getElementById('btnHelp'),
   btnSaveMember: document.getElementById('btnSaveMember'),
   btnDialogClose: document.getElementById('btnDialogClose'),
   btnDialogCancel: document.getElementById('btnDialogCancel'),
 };
+
+const toast = createToast(els.toast);
 
 /** @type {object[]} */
 let membersCache = [];
@@ -45,87 +56,10 @@ let membersCache = [];
 let summaryCache = null;
 /** @type {{ id?: string } | null} */
 let editing = null;
-/** @type {string | null} */
-let detailMemberId = null;
 /** @type {ReturnType<typeof setInterval> | null} */
 let autoRefreshTimer = null;
 let refreshingAll = false;
-
-function toast(message) {
-  els.toast.textContent = message;
-  els.toast.classList.remove('hidden');
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => els.toast.classList.add('hidden'), 3600);
-}
-
-function setBusy(btn, busy, busyLabel) {
-  if (!btn) return;
-  if (busy) {
-    if (!btn.dataset.label) btn.dataset.label = btn.textContent || '';
-    btn.classList.add('busy');
-    btn.disabled = true;
-    if (busyLabel) btn.innerHTML = `<span class="spin">↻</span> ${busyLabel}`;
-  } else {
-    btn.classList.remove('busy');
-    btn.disabled = false;
-    if (btn.dataset.label != null) {
-      btn.textContent = btn.dataset.label;
-      delete btn.dataset.label;
-    }
-  }
-}
-
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
-  return data;
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
-}
-
-function money(n, digits = 2) {
-  if (n == null || Number.isNaN(n)) return '—';
-  return `$${Number(n).toFixed(digits)}`;
-}
-
-function formatTokens(n) {
-  if (n == null || !Number.isFinite(n) || n <= 0) return '—';
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return String(Math.round(n));
-}
-
-function daysUntil(iso) {
-  if (!iso) return null;
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return null;
-  const ms = t - Date.now();
-  if (ms <= 0) return 0;
-  return Math.max(1, Math.ceil(ms / 86400000));
-}
-
-function accountIdentity(member) {
-  const email = member.email || '';
-  const name = (member.displayName || '').trim();
-  const same =
-    name &&
-    email &&
-    (name.toLowerCase() === email.toLowerCase() ||
-      name.toLowerCase() === email.split('@')[0].toLowerCase());
-  if (name && !same) return { title: name, subtitle: email || member.userId || '' };
-  if (email) return { title: email, subtitle: '' };
-  return { title: name || member.userId || '未命名', subtitle: '' };
-}
+let settings = loadSettings();
 
 function usedPercent(member) {
   const snap = member.lastSnapshot;
@@ -179,9 +113,7 @@ function chipClassForDays(days) {
   return 'neutral';
 }
 
-/**
- * 紧凑色块：剩余额度 / 剩余天数，避免长文案撑破布局。
- */
+/** 紧凑色块：剩余额度 / 剩余天数。 */
 function metaChips(member) {
   const remain = remainingPercent(member);
   const days = daysUntil(member.lastSnapshot?.window?.resetIso);
@@ -238,7 +170,6 @@ function splitLines(lines, { includeGrok = true } = {}) {
   for (const line of lines || []) {
     if (line.type === 'spend-row') spend = line;
     else if (line.type === 'progress') {
-      // 列表页隐藏 Grok，详情页再展示，避免占行。
       if (!includeGrok && line.label === 'Grok Bot usage') continue;
       progress.push(line);
     }
@@ -259,7 +190,7 @@ function renderAccountRow(member) {
           ? '<span class="badge ok">正常</span>'
           : '<span class="badge muted">待同步</span>';
 
-  const idn = accountIdentity(member);
+  const idn = accountIdentity(member, settings.privacyMode);
   const err = member.lastError
     ? `<div class="error-box">${escapeHtml(member.lastError)}</div>`
     : '';
@@ -288,7 +219,6 @@ function renderAccountRow(member) {
         <div class="account-actions">
           <button type="button" class="btn icon" data-action="refresh" title="刷新">↻</button>
           <button type="button" class="btn icon" data-action="edit" title="更新 Token">✎</button>
-          <button type="button" class="btn sm" data-action="test">测试</button>
           <button type="button" class="btn sm danger" data-action="delete">删除</button>
         </div>
       </div>
@@ -334,148 +264,37 @@ function filteredMembers() {
       if (br == null) return -1;
       return ar - br;
     }
-    if (sort === 'used') return (usedPercent(b) ?? -1) - (usedPercent(a) ?? -1);
+    if (sort === 'used') {
+      const au = usedPercent(a);
+      const bu = usedPercent(b);
+      if (au == null && bu == null) return 0;
+      if (au == null) return 1;
+      if (bu == null) return -1;
+      return bu - au;
+    }
     if (sort === 'reset') return resetMs(a) - resetMs(b);
-    return String(a.displayName || '').localeCompare(String(b.displayName || ''), 'zh');
+    return String(a.displayName || a.email || '').localeCompare(
+      String(b.displayName || b.email || ''),
+      'zh',
+    );
   });
   return list;
 }
 
 function renderList() {
   renderSummary(summaryCache);
-  const members = filteredMembers();
-  if (!membersCache.length) {
-    els.list.innerHTML = '';
-    els.empty.classList.remove('hidden');
-    return;
-  }
-  els.empty.classList.add('hidden');
-  if (!members.length) {
-    els.list.innerHTML = `<div class="empty"><p>没有符合筛选条件的账号</p></div>`;
-    return;
-  }
-  els.list.innerHTML = members.map(renderAccountRow).join('');
-}
-
-/**
- * 轻量 SVG 柱状图，避免引入 Chart.js 依赖。
- * @param {HTMLElement} el
- * @param {Array<{ label: string, value: number }>} points
- * @param {string} color
- */
-function renderBarChart(el, points, color) {
-  if (!el) return;
-  const vals = points.map((p) => p.value);
-  const max = Math.max(...vals, 0);
-  if (!points.length || max <= 0) {
-    el.innerHTML = `<div class="chart-empty">No data</div>`;
-    return;
-  }
-  const w = 600;
-  const h = 180;
-  const padL = 8;
-  const padR = 8;
-  const padT = 12;
-  const padB = 28;
-  const innerW = w - padL - padR;
-  const innerH = h - padT - padB;
-  const gap = 2;
-  const barW = Math.max(2, (innerW - gap * (points.length - 1)) / points.length);
-
-  const bars = points
-    .map((p, i) => {
-      const bh = (p.value / max) * innerH;
-      const x = padL + i * (barW + gap);
-      const y = padT + innerH - bh;
-      const title = `${p.label}: ${p.value}`;
-      return `<rect x="${x}" y="${y}" width="${barW}" height="${Math.max(bh, 1)}" rx="1.5" fill="${color}"><title>${escapeHtml(title)}</title></rect>`;
-    })
-    .join('');
-
-  const labels = [0, Math.floor(points.length / 2), points.length - 1]
-    .filter((i, idx, arr) => arr.indexOf(i) === idx)
-    .map((i) => {
-      const x = padL + i * (barW + gap) + barW / 2;
-      const label = points[i]?.label?.slice(5) || ''; // MM-DD
-      return `<text x="${x}" y="${h - 8}" text-anchor="middle" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(label)}</text>`;
-    })
-    .join('');
-
-  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${bars}${labels}</svg>`;
-}
-
-function renderHorizontalBars(el, items, color) {
-  if (!el) return;
-  if (!items.length) {
-    el.innerHTML = `<div class="chart-empty">No data</div>`;
-    return;
-  }
-  const max = Math.max(...items.map((i) => i.value), 1);
-  el.innerHTML = `
-    <div style="display:grid;gap:8px;padding-top:4px">
-      ${items
-        .map(
-          (item) => `
-        <div>
-          <div class="panel-line-head">
-            <span class="panel-line-label">${escapeHtml(item.label)}</span>
-            <span class="panel-line-value">${item.value}</span>
-          </div>
-          <div class="panel-track"><div class="panel-fill" style="width:${(item.value / max) * 100}%;background:${color}"></div></div>
-        </div>`,
-        )
-        .join('')}
-    </div>
-  `;
+  const list = filteredMembers();
+  els.empty.classList.toggle('hidden', membersCache.length > 0);
+  els.list.innerHTML = list.map(renderAccountRow).join('');
 }
 
 function showView(view) {
   els.tabAccounts.classList.toggle('hidden', view !== 'accounts');
+  els.tabSettings.classList.toggle('hidden', view !== 'settings');
   els.tabHelp.classList.toggle('hidden', view !== 'help');
-  els.tabDetail.classList.toggle('hidden', view !== 'detail');
   document.querySelectorAll('.nav-item').forEach((b) => {
-    b.classList.toggle('active', b.dataset.tab === (view === 'detail' ? 'accounts' : view));
+    b.classList.toggle('active', b.dataset.tab === view);
   });
-}
-
-function openDetail(memberId) {
-  const member = membersCache.find((m) => m.id === memberId);
-  if (!member) return;
-  detailMemberId = memberId;
-  const idn = accountIdentity(member);
-  const snap = member.lastSnapshot;
-  els.detailTitle.textContent = idn.title;
-  els.detailSub.textContent = [
-    snap?.plan?.planName || snap?.plan?.membershipType || '',
-    idn.subtitle,
-    member.lastSyncedAt ? `同步 ${new Date(member.lastSyncedAt).toLocaleString('zh-CN')}` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
-
-  const { progress, spend } = splitLines(snap?.panelLines, { includeGrok: true });
-  els.detailMeters.innerHTML =
-    progress.map(renderProgressLine).join('') + (spend ? renderSpendRow(spend) : '');
-
-  const daily = snap?.spend?.daily || [];
-  renderBarChart(
-    els.chartSpend,
-    daily.map((d) => ({ label: d.date, value: d.dollars || 0 })),
-    '#2dd4bf',
-  );
-  renderBarChart(
-    els.chartTokens,
-    daily.map((d) => ({ label: d.date, value: d.tokens || 0 })),
-    '#4daafc',
-  );
-  const models = (snap?.usage?.topModels || []).slice(0, 8);
-  renderHorizontalBars(
-    els.chartModels,
-    models.map((m) => ({ label: m.model, value: m.count })),
-    '#a78bfa',
-  );
-
-  showView('detail');
 }
 
 async function load() {
@@ -483,9 +302,6 @@ async function load() {
   membersCache = data.members || [];
   summaryCache = data.summary || {};
   renderList();
-  if (detailMemberId && !els.tabDetail.classList.contains('hidden')) {
-    openDetail(detailMemberId);
-  }
 }
 
 async function refreshAll(silent = false) {
@@ -507,15 +323,15 @@ async function refreshAll(silent = false) {
 
 function updateAutoRefreshHint(justRan = false) {
   if (!els.autoRefreshHint) return;
-  const sec = Number(els.autoRefresh?.value || 0);
+  const sec = Number(settings.autoRefreshSec || 0);
   if (!sec) {
-    els.autoRefreshHint.textContent = '自动刷新已关闭';
+    els.autoRefreshHint.textContent = '自动刷新已关闭（可在设置中开启）';
     return;
   }
   const mins = sec / 60;
   els.autoRefreshHint.textContent = justRan
     ? `已刷新 · 下一次约 ${mins} 分钟后`
-    : `自动刷新：每 ${mins} 分钟`;
+    : `自动刷新：每 ${mins} 分钟（设置页可改）`;
 }
 
 function setupAutoRefresh() {
@@ -523,13 +339,20 @@ function setupAutoRefresh() {
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
   }
-  const sec = Number(els.autoRefresh?.value || 0);
   updateAutoRefreshHint(false);
+  const sec = Number(settings.autoRefreshSec || 0);
   if (!sec) return;
   autoRefreshTimer = setInterval(() => {
     if (document.hidden) return;
     refreshAll(true);
   }, sec * 1000);
+}
+
+function applySettingsToForm() {
+  if (els.privacyMode) els.privacyMode.checked = Boolean(settings.privacyMode);
+  if (els.settingAutoRefresh) {
+    els.settingAutoRefresh.value = String(settings.autoRefreshSec || 0);
+  }
 }
 
 function closeMemberDialog() {
@@ -557,16 +380,11 @@ async function importLocalCursor(displayName) {
 
 document.querySelectorAll('.nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
-    detailMemberId = null;
-    showView(btn.dataset.tab === 'help' ? 'help' : 'accounts');
+    showView(btn.dataset.tab === 'settings' ? 'settings' : btn.dataset.tab === 'help' ? 'help' : 'accounts');
   });
 });
 
 els.btnHelp.addEventListener('click', () => showView('help'));
-els.btnBackList.addEventListener('click', () => {
-  detailMemberId = null;
-  showView('accounts');
-});
 els.btnAdd.addEventListener('click', () => openMemberDialog());
 els.btnEmptyAdd.addEventListener('click', () => openMemberDialog());
 els.btnDialogClose.addEventListener('click', closeMemberDialog);
@@ -574,7 +392,36 @@ els.btnDialogCancel.addEventListener('click', closeMemberDialog);
 els.searchInput.addEventListener('input', renderList);
 els.filterStatus.addEventListener('change', renderList);
 els.sortBy?.addEventListener('change', renderList);
-els.autoRefresh?.addEventListener('change', setupAutoRefresh);
+
+els.privacyMode?.addEventListener('change', () => {
+  settings = saveSettings({ privacyMode: Boolean(els.privacyMode.checked) });
+  renderList();
+});
+
+els.btnSaveSettings?.addEventListener('click', () => {
+  const sec = Number(els.settingAutoRefresh?.value || 0);
+  settings = saveSettings({ autoRefreshSec: sec });
+  setupAutoRefresh();
+  toast('设置已保存');
+});
+
+els.btnExport?.addEventListener('click', async () => {
+  setBusy(els.btnExport, true, '导出中…');
+  try {
+    const data = await api('/api/export/accounts');
+    const stamp = new Date().toISOString().slice(0, 19).replaceAll(':', '');
+    downloadText(
+      `cursor-team-usage-accounts-${stamp}.json`,
+      JSON.stringify(data, null, 2),
+      'application/json',
+    );
+    toast(`已导出 ${data.members?.length || 0} 个账号（含 Token，请妥善保管）`);
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(els.btnExport, false);
+  }
+});
 
 els.btnImportLocal.addEventListener('click', async () => {
   setBusy(els.btnImportLocal, true, '导入中…');
@@ -614,19 +461,23 @@ els.btnSaveMember.addEventListener('click', async () => {
   const displayName = els.displayName.value.trim();
   const sessionToken = els.sessionToken.value.trim();
   if (!displayName) return toast('请填写显示名');
-  if (!editing?.id && !sessionToken) return toast('请粘贴会话 Token，或改用「从本机 Cursor 导入」');
-
+  if (!editing?.id && !sessionToken) return toast('请填写会话 Token');
   setBusy(els.btnSaveMember, true, '保存中…');
   try {
     if (editing?.id) {
       const body = { displayName };
       if (sessionToken) body.sessionToken = sessionToken;
       await api(`/api/members/${editing.id}`, { method: 'PUT', body: JSON.stringify(body) });
-      if (sessionToken) await api(`/api/members/${editing.id}/refresh`, { method: 'POST', body: '{}' });
-      toast('账号已更新');
+      if (sessionToken) {
+        await api(`/api/members/${editing.id}/refresh`, { method: 'POST', body: '{}' });
+      }
+      toast('已更新');
     } else {
-      await api('/api/members', { method: 'POST', body: JSON.stringify({ displayName, sessionToken }) });
-      toast('账号已添加并完成首次同步');
+      await api('/api/members', {
+        method: 'POST',
+        body: JSON.stringify({ displayName, sessionToken }),
+      });
+      toast('已添加并同步');
     }
     closeMemberDialog();
     await load();
@@ -639,20 +490,6 @@ els.btnSaveMember.addEventListener('click', async () => {
 
 els.btnRefreshAll.addEventListener('click', () => refreshAll(false));
 
-els.btnDetailRefresh.addEventListener('click', async () => {
-  if (!detailMemberId) return;
-  setBusy(els.btnDetailRefresh, true, '刷新中…');
-  try {
-    await api(`/api/members/${detailMemberId}/refresh`, { method: 'POST', body: '{}' });
-    await load();
-    toast('已刷新');
-  } catch (e) {
-    toast(e.message || String(e));
-  } finally {
-    setBusy(els.btnDetailRefresh, false);
-  }
-});
-
 els.list.addEventListener('click', async (event) => {
   const btn = event.target.closest('button[data-action]');
   const card = event.target.closest('.account');
@@ -664,30 +501,20 @@ els.list.addEventListener('click', async (event) => {
     const action = btn.dataset.action;
     const member = membersCache.find((m) => m.id === id);
 
-    if (action === 'refresh' || action === 'test') {
-      if (action === 'refresh') {
-        btn.innerHTML = '<span class="spin">↻</span>';
-        btn.classList.add('busy');
-        btn.disabled = true;
-      } else setBusy(btn, true, '测试中…');
+    if (action === 'refresh') {
+      btn.innerHTML = '<span class="spin">↻</span>';
+      btn.classList.add('busy');
+      btn.disabled = true;
       try {
-        const data = await api(`/api/members/${id}/refresh`, { method: 'POST', body: '{}' });
-        toast(
-          action === 'test'
-            ? data.member?.lastError
-              ? `测试失败：${data.member.lastError}`
-              : '测试通过'
-            : '已刷新',
-        );
+        await api(`/api/members/${id}/refresh`, { method: 'POST', body: '{}' });
+        toast('已刷新');
         await load();
       } catch (e) {
         toast(e.message || String(e));
       } finally {
-        if (action === 'refresh') {
-          btn.classList.remove('busy');
-          btn.disabled = false;
-          btn.textContent = '↻';
-        } else setBusy(btn, false);
+        btn.classList.remove('busy');
+        btn.disabled = false;
+        btn.textContent = '↻';
       }
       return;
     }
@@ -712,9 +539,10 @@ els.list.addEventListener('click', async (event) => {
     return;
   }
 
-  openDetail(id);
+  location.href = `/detail.html?id=${encodeURIComponent(id)}`;
 });
 
+applySettingsToForm();
 load()
   .then(() => setupAutoRefresh())
   .catch((e) => toast(e.message || String(e)));

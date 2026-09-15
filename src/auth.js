@@ -1,6 +1,6 @@
 /**
  * 会话 Token 规范化：把用户粘贴的多种形态统一成 cookie 值。
- * 个人版没有 Team Admin API，只能靠每人一份 WorkosCursorSessionToken。
+ * 多账号场景下每个账号各自一份 WorkosCursorSessionToken。
  */
 
 /**

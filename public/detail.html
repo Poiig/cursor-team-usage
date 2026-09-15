@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>账号详情 · Cursor Team Usage</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="standalone">
+    <div class="app">
+      <header class="header">
+        <div class="header-top">
+          <div class="brand">
+            <h1>Cursor Team Usage</h1>
+            <p class="footer-links">
+              <a href="/">← 返回账号列表</a>
+              <span>·</span>
+              <a href="https://cursor.com/dashboard/usage" target="_blank" rel="noreferrer">Official usage ↗</a>
+            </p>
+          </div>
+        </div>
+      </header>
+
+      <section class="panel detail-panel" id="detailRoot">
+        <div class="panel-head">
+          <div class="detail-head">
+            <div>
+              <h2 id="detailTitle">账号详情</h2>
+              <p id="detailSub" class="muted"></p>
+            </div>
+          </div>
+          <div class="toolbar">
+            <button type="button" class="btn" id="btnDetailRefresh">刷新用量</button>
+          </div>
+        </div>
+        <div id="detailMeters" class="panel-lines"></div>
+        <div class="charts">
+          <article class="chart-card">
+            <h3>Daily spend (30d)</h3>
+            <div id="chartSpend" class="chart-box"></div>
+          </article>
+          <article class="chart-card">
+            <h3>Daily tokens (30d)</h3>
+            <div id="chartTokens" class="chart-box"></div>
+          </article>
+          <article class="chart-card">
+            <h3>Top models (cycle)</h3>
+            <div id="chartModels" class="chart-box"></div>
+          </article>
+        </div>
+
+        <div class="usage-section">
+          <div class="panel-head usage-head">
+            <h3>Usage events</h3>
+            <div class="toolbar">
+              <select id="eventsDays" aria-label="时间范围">
+                <option value="7" selected>近 7 天</option>
+                <option value="30">近 30 天</option>
+                <option value="90">近 90 天</option>
+              </select>
+              <button type="button" class="btn" id="btnLoadEvents">刷新列表</button>
+              <button type="button" class="btn" id="btnLoadMore" disabled>加载更多</button>
+              <button type="button" class="btn" id="btnExportCsv">Export CSV</button>
+            </div>
+          </div>
+          <p id="eventsHint" class="muted usage-hint">与 cursor.com/dashboard/usage 同源接口；分页加载，避免一次卡死。</p>
+          <div class="usage-table-wrap">
+            <table class="usage-table" id="usageTable">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Model</th>
+                  <th>Tokens</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody id="usageBody">
+                <tr>
+                  <td colspan="5" class="muted">正在加载…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script type="module" src="/detail.js"></script>
+  </body>
+</html>

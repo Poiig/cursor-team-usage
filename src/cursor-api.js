@@ -1,5 +1,5 @@
 /**
- * 个人版 Cursor 用量客户端。
+ * Cursor 用量客户端。
  * 用每人一份会话 cookie 调用 cursor.com 非官方 dashboard / Connect 接口，
  * 拉取计划、请求额度、花费上限与账单周期用量。
  */
@@ -145,6 +145,40 @@ function pickChargedCents(e) {
 }
 
 /**
+ * 把 Cursor 原始 kind 映射成官方用量页 Type 文案（Included / Free / On-Demand）。
+ * @param {string | undefined} kind
+ */
+export function usageKindLabel(kind) {
+  const k = String(kind || '');
+  if (!k) return '—';
+  if (/FREE/i.test(k)) return 'Free';
+  if (/INCLUDED/i.test(k)) return 'Included';
+  if (/USAGE_BASED|ON_?DEMAND|ERRORED/i.test(k)) return 'On-Demand';
+  return k.replace(/^USAGE_EVENT_KIND_/, '').replaceAll('_', ' ');
+}
+
+/**
+ * Cost 列：套餐内/免费显示文案；按量计费显示美元。
+ * @param {{ kind?: string, chargedCents?: number | null }} e
+ */
+export function usageCostLabel(e) {
+  const type = usageKindLabel(e.kind);
+  if (type === 'Included' || type === 'Free') return type;
+  if (e.chargedCents != null && Number(e.chargedCents) > 0) {
+    return `$${(Number(e.chargedCents) / 100).toFixed(2)}`;
+  }
+  return type === '—' ? '—' : type;
+}
+
+/**
+ * 单次请求总 token（input + output + cache read），对齐官方 Tokens 列口径。
+ * @param {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number }} e
+ */
+export function eventTotalTokens(e) {
+  return (e.inputTokens || 0) + (e.outputTokens || 0) + (e.cacheReadTokens || 0);
+}
+
+/**
  * 校验会话并拿到账号邮箱/姓名，用于成员卡片身份展示。
  * @param {{ cookieValue: string }} session
  */
@@ -255,30 +289,38 @@ export async function fetchDashboardUsage(session, startMs, endMs) {
         seenIds.add(key);
       }
       const tu = e.tokenUsage || null;
-      events.push({
+      const inputTokens = tu ? num(tu.inputTokens) ?? num(tu.input_tokens) ?? 0 : 0;
+      const outputTokens = tu ? num(tu.outputTokens) ?? num(tu.output_tokens) ?? 0 : 0;
+      const cacheReadTokens = tu
+        ? num(tu.cacheReadTokens) ??
+          num(tu.cache_read_tokens) ??
+          num(tu.cacheReadInputTokens) ??
+          0
+        : 0;
+      const cacheWriteTokens = tu
+        ? num(tu.cacheWriteTokens) ??
+          num(tu.cache_write_tokens) ??
+          num(tu.cacheCreationInputTokens) ??
+          0
+        : 0;
+      const kind = e.kind || e.usageEventKind || '';
+      const row = {
         id: String(rawId ?? `${e.timestamp}-${e.model ?? 'unknown'}`),
         timestamp: e.timestamp ?? e.timestampEpoch ?? 0,
         model: e.model || e.modelIntent || 'unknown',
+        kind,
+        kindLabel: usageKindLabel(kind),
         isTokenBasedCall: Boolean(e.isTokenBasedCall),
         chargedCents: pickChargedCents(e),
         tokenCents: tu ? num(tu.totalCents) : null,
-        inputTokens: tu ? num(tu.inputTokens) ?? num(tu.input_tokens) ?? 0 : 0,
-        outputTokens: tu ? num(tu.outputTokens) ?? num(tu.output_tokens) ?? 0 : 0,
-        cacheReadTokens:
-          tu
-            ? num(tu.cacheReadTokens) ??
-              num(tu.cache_read_tokens) ??
-              num(tu.cacheReadInputTokens) ??
-              0
-            : 0,
-        cacheWriteTokens:
-          tu
-            ? num(tu.cacheWriteTokens) ??
-              num(tu.cache_write_tokens) ??
-              num(tu.cacheCreationInputTokens) ??
-              0
-            : 0,
-      });
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+      };
+      row.totalTokens = eventTotalTokens(row);
+      row.costLabel = usageCostLabel(row);
+      events.push(row);
       added++;
     }
 
@@ -296,7 +338,7 @@ export async function fetchDashboardUsage(session, startMs, endMs) {
 }
 
 /**
- * 把事件汇总成主管关心的周期指标：花费、请求数、token、模型分布。
+ * 把事件汇总成周期指标：花费、请求数、token、模型分布。
  * @param {Array<{ chargedCents: number | null, tokenCents: number | null, model: string, isTokenBasedCall: boolean, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
  */
 export function summarizeEvents(events) {
@@ -765,6 +807,91 @@ export function buildOpenUsagePanelLines(input) {
   });
 
   return lines;
+}
+
+/**
+ * 按本地近 N 天拉取官方同款用量事件；支持 page/pageSize，详情表首屏可快速出数。
+ * @param {string} cookieValue
+ * @param {{ days?: number, page?: number, pageSize?: number }} [opts]
+ */
+export async function fetchMemberUsageEvents(cookieValue, opts = {}) {
+  const session = sessionFromCookie(cookieValue);
+  if (!session) throw new Error('会话 Token 格式无效');
+  const days = Math.min(90, Math.max(1, Number(opts.days) || 30));
+  const page = Math.max(1, Number(opts.page) || 1);
+  const pageSize = Math.min(100, Math.max(10, Number(opts.pageSize) || 50));
+  const end = Date.now();
+  const start = end - days * 86400000;
+
+  const data = await fetchJson('https://cursor.com/api/dashboard/get-filtered-usage-events', {
+    method: 'POST',
+    headers: {
+      ...BROWSER_HEADERS,
+      'Content-Type': 'application/json',
+      Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+    },
+    body: JSON.stringify({
+      teamId: 0,
+      startDate: String(start),
+      endDate: String(end),
+      page,
+      pageSize,
+    }),
+  });
+
+  const batch = data.usageEventsDisplay || data.usageEvents || data.events || [];
+  const events = batch.map((e) => {
+    const tu = e.tokenUsage || null;
+    const inputTokens = tu ? num(tu.inputTokens) ?? num(tu.input_tokens) ?? 0 : 0;
+    const outputTokens = tu ? num(tu.outputTokens) ?? num(tu.output_tokens) ?? 0 : 0;
+    const cacheReadTokens = tu
+      ? num(tu.cacheReadTokens) ??
+        num(tu.cache_read_tokens) ??
+        num(tu.cacheReadInputTokens) ??
+        0
+      : 0;
+    const cacheWriteTokens = tu
+      ? num(tu.cacheWriteTokens) ??
+        num(tu.cache_write_tokens) ??
+        num(tu.cacheCreationInputTokens) ??
+        0
+      : 0;
+    const kind = e.kind || e.usageEventKind || '';
+    const rawId = e?.id ?? e?.eventId;
+    const row = {
+      id: String(rawId ?? `${e.timestamp}-${e.model ?? 'unknown'}`),
+      timestamp: e.timestamp ?? e.timestampEpoch ?? 0,
+      model: e.model || e.modelIntent || 'unknown',
+      kind,
+      kindLabel: usageKindLabel(kind),
+      isTokenBasedCall: Boolean(e.isTokenBasedCall),
+      chargedCents: pickChargedCents(e),
+      tokenCents: tu ? num(tu.totalCents) : null,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+    };
+    row.totalTokens = eventTotalTokens(row);
+    row.costLabel = usageCostLabel(row);
+    return row;
+  });
+
+  const total = num(data.totalUsageEventsCount);
+  const hasNext =
+    data.pagination?.hasNextPage ??
+    (total != null ? page * pageSize < total : batch.length === pageSize);
+
+  return {
+    days,
+    start,
+    end,
+    page,
+    pageSize,
+    total: total ?? events.length,
+    hasNext: Boolean(hasNext && batch.length > 0),
+    events,
+  };
 }
 
 /**
