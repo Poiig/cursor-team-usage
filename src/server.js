@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   getListenConfig,
+  getLogRetentionDays,
   getServerAutoRefreshSec,
   getStoreDriver,
   loadAppConfig,
@@ -16,6 +17,12 @@ import {
 import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
 import { fetchMemberSnapshot, fetchMemberUsageEvents } from './cursor-api.js';
 import { probeLocalCursorSession, resolveLocalCursorSession } from './local-session.js';
+import {
+  initAppLog,
+  memberLogLabel,
+  pruneOldLogFiles,
+  writeAppLog,
+} from './app-log.js';
 import {
   clearSessionCookie,
   issueSessionToken,
@@ -66,6 +73,8 @@ const PUBLIC_STATIC = new Set([
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let autoRefreshTimer = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let logPruneTimer = null;
 /** 正在刷新的成员，避免上报与定时器重复拉同一账号。 */
 const refreshingIds = new Set();
 
@@ -146,21 +155,41 @@ function buildTeamSummary(members) {
   };
 }
 
-/** @param {string} id */
-async function refreshOne(id) {
+/** @param {string} id @param {{ source?: string, trigger?: string }} [ctx] */
+async function refreshOne(id, ctx = {}) {
   if (refreshingIds.has(id)) {
     const current = await getMemberInternal(id);
     return current ? toPublicMember(current) : null;
   }
   refreshingIds.add(id);
+  const source = ctx.source || '未知';
+  const trigger = ctx.trigger || '';
   try {
     const member = await getMemberInternal(id);
     if (!member) throw new Error('成员不存在');
+    const label = memberLogLabel(member);
     try {
       const snapshot = await fetchMemberSnapshot(member.cookieValue);
-      return await saveSyncResult(id, { snapshot });
+      const result = await saveSyncResult(id, { snapshot });
+      await writeAppLog('刷新', {
+        账号: label,
+        来源: source,
+        触发: trigger || undefined,
+        结果: '成功',
+        同步时间: result?.lastSyncedAt || snapshot?.syncedAt,
+      });
+      return result;
     } catch (e) {
-      return await saveSyncResult(id, { error: e?.message || String(e) });
+      const msg = e?.message || String(e);
+      const result = await saveSyncResult(id, { error: msg });
+      await writeAppLog('刷新', {
+        账号: label,
+        来源: source,
+        触发: trigger || undefined,
+        结果: '失败',
+        错误: msg,
+      });
+      return result;
     }
   } finally {
     refreshingIds.delete(id);
@@ -183,8 +212,9 @@ function isMemberDue(member, intervalSec, nowMs = Date.now()) {
 /**
  * 只刷新到期账号（按 lastSyncedAt 错开），避免整点齐刷。
  * @param {number} [concurrency]
+ * @param {{ trigger?: string }} [ctx]
  */
-async function refreshDueMembers(concurrency = 2) {
+async function refreshDueMembers(concurrency = 2, ctx = {}) {
   const sec = getServerAutoRefreshSec();
   if (sec <= 0) return [];
   const now = Date.now();
@@ -198,27 +228,48 @@ async function refreshDueMembers(concurrency = 2) {
     });
   if (!due.length) return [];
 
+  await writeAppLog('自动刷新', {
+    触发: ctx.trigger || '定时扫描',
+    到期账号数: due.length,
+    总账号数: members.length,
+    账号列表: due.map((m) => memberLogLabel(m)).join('; '),
+  });
+
   const queue = [...due];
   const results = [];
   async function worker() {
     while (queue.length) {
       const m = queue.shift();
       if (!m) break;
-      results.push(await refreshOne(m.id));
+      results.push(
+        await refreshOne(m.id, { source: '自动刷新', trigger: ctx.trigger || '到期' }),
+      );
     }
   }
   await Promise.all(
     Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()),
   );
-  if (results.length) {
-    console.log(`自动刷新：到期 ${results.length}/${members.length} 个账号`);
-  }
+
+  const ok = results.filter((r) => r && !r.lastError).length;
+  const fail = results.length - ok;
+  await writeAppLog('自动刷新', {
+    触发: ctx.trigger || '定时扫描',
+    完成: true,
+    成功: ok,
+    失败: fail,
+  });
   return results;
 }
 
-/** @param {number} [concurrency] */
-async function refreshAll(concurrency = 3) {
+/** @param {number} [concurrency] @param {{ source?: string, trigger?: string }} [ctx] */
+async function refreshAll(concurrency = 3, ctx = {}) {
   const members = await getAllMembersInternal();
+  await writeAppLog('全量刷新', {
+    来源: ctx.source || '控制台',
+    触发: ctx.trigger || '手动',
+    账号数: members.length,
+    账号列表: members.map((m) => memberLogLabel(m)).join('; '),
+  });
   const queue = [...members];
   const results = [];
 
@@ -226,7 +277,12 @@ async function refreshAll(concurrency = 3) {
     while (queue.length) {
       const m = queue.shift();
       if (!m) break;
-      results.push(await refreshOne(m.id));
+      results.push(
+        await refreshOne(m.id, {
+          source: ctx.source || '全量刷新',
+          trigger: ctx.trigger || '手动',
+        }),
+      );
     }
   }
 
@@ -235,7 +291,38 @@ async function refreshAll(concurrency = 3) {
       worker(),
     ),
   );
+
+  const ok = results.filter((r) => r && !r.lastError).length;
+  await writeAppLog('全量刷新', {
+    完成: true,
+    成功: ok,
+    失败: results.length - ok,
+  });
   return results;
+}
+
+/**
+ * 每日清理过期日志文件。
+ */
+function setupLogPruneSchedule() {
+  if (logPruneTimer) {
+    clearInterval(logPruneTimer);
+    logPruneTimer = null;
+  }
+  const days = getLogRetentionDays();
+  if (days <= 0) return;
+  logPruneTimer = setInterval(
+    () => {
+      pruneOldLogFiles(days)
+        .then((n) => {
+          if (n > 0) {
+            writeAppLog('日志清理', { 删除文件数: n, 保留天数: days }).catch(() => {});
+          }
+        })
+        .catch((e) => console.error('日志清理失败:', e?.message || e));
+    },
+    24 * 3600 * 1000,
+  );
 }
 
 /**
@@ -255,11 +342,14 @@ function setupServerAutoRefresh() {
   const tickSec = Math.min(60, Math.max(15, Math.floor(sec / 12) || 15));
   console.log(`服务端自动刷新：每账号间隔 ${sec} 秒（扫描周期 ${tickSec} 秒）`);
   autoRefreshTimer = setInterval(() => {
-    refreshDueMembers().catch((e) => console.error('自动刷新失败:', e?.message || e));
+    refreshDueMembers(2, { trigger: '定时扫描' }).catch((e) =>
+      writeAppLog('自动刷新', { 结果: '异常', 错误: e?.message || String(e) }),
+    );
   }, tickSec * 1000);
-  // 启动后尽快补刷从未同步的账号（例如刚上报 Token 但拉取失败）。
   setTimeout(() => {
-    refreshDueMembers().catch((e) => console.error('启动补刷失败:', e?.message || e));
+    refreshDueMembers(2, { trigger: '启动补刷' }).catch((e) =>
+      writeAppLog('自动刷新', { 结果: '启动补刷异常', 错误: e?.message || String(e) }),
+    );
   }, 3000);
 }
 
@@ -375,12 +465,21 @@ const server = http.createServer(async (req, res) => {
         email: body?.email,
         hostname: body?.hostname,
       });
+      await writeAppLog(created ? '注册' : '上报', {
+        账号: memberLogLabel(member),
+        操作: created ? '新建账号' : '更新Token',
+        主机名: body?.hostname || member?.hostname || undefined,
+        邮箱: body?.email || member?.email || undefined,
+        显示名请求: body?.displayName || undefined,
+      });
       const shouldRefresh = body?.refresh !== false;
       let refreshed = member;
       if (shouldRefresh && member?.id) {
-        refreshed = await refreshOne(member.id);
-      }
-      return sendJson(res, created ? 201 : 200, {
+        refreshed = await refreshOne(member.id, {
+          source: created ? '注册' : '上报',
+          trigger: '上报后刷新',
+        });
+      }      return sendJson(res, created ? 201 : 200, {
         ok: true,
         created,
         member: refreshed,
@@ -408,7 +507,14 @@ const server = http.createServer(async (req, res) => {
           displayName,
           sessionToken: local.cookieValue,
         });
-        const refreshed = await refreshOne(member.id);
+        await writeAppLog('添加账号', {
+          账号: memberLogLabel(member),
+          来源: '本机导入',
+        });
+        const refreshed = await refreshOne(member.id, {
+          source: '添加账号',
+          trigger: '本机导入',
+        });
         return sendJson(res, 201, {
           member: refreshed,
           local: {
@@ -418,7 +524,14 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const member = await addMember(body);
-      const refreshed = await refreshOne(member.id);
+      await writeAppLog('添加账号', {
+        账号: memberLogLabel(member),
+        来源: '手动粘贴Token',
+      });
+      const refreshed = await refreshOne(member.id, {
+        source: '添加账号',
+        trigger: '手动添加',
+      });
       return sendJson(res, 201, { member: refreshed });
     }
 
@@ -466,7 +579,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (method === 'POST' && suffix === '/refresh') {
-        const member = await refreshOne(id);
+        const member = await refreshOne(id, { source: '控制台', trigger: '单账号刷新' });
         return sendJson(res, 200, { member });
       }
       if (method === 'PUT' && !suffix) {
@@ -481,7 +594,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (method === 'POST' && pathname === '/api/refresh-all') {
-      const members = await refreshAll();
+      const members = await refreshAll(3, { source: '控制台', trigger: '更新模型' });
       return sendJson(res, 200, {
         members,
         summary: buildTeamSummary(members.map((m) => m || {}).filter(Boolean)),
@@ -519,16 +632,25 @@ const server = http.createServer(async (req, res) => {
 });
 
 await loadAppConfig();
+await initAppLog();
 // 控制台账号落在存储驱动内，须先开库再建默认 admin。
 await initStore();
 await initUsers();
 setupServerAutoRefresh();
+setupLogPruneSchedule();
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   console.log(`cursor-team-usage → http://${HOST}:${PORT}`);
   console.log(`存储：${getStoreDriver()}`);
   console.log(
     `插件上报鉴权：${isAccessKeyConfigured() ? '已启用 Access Key' : '未配置（/api/agent/report 不可用）'}`,
   );
-    console.log('控制台登录：默认 admin / admin（首次登录须改密）');
+  console.log('控制台登录：默认 admin / admin（首次登录须改密）');
+  await writeAppLog('启动', {
+    地址: `http://${HOST}:${PORT}`,
+    存储: getStoreDriver(),
+    自动刷新秒: getServerAutoRefreshSec(),
+    日志保留天: getLogRetentionDays(),
+    插件鉴权: isAccessKeyConfigured() ? '已启用' : '未配置',
+  });
 });

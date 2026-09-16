@@ -275,3 +275,34 @@ test('countWorkingDaysInclusive / computeUsagePace 按工作日节奏预警', as
   assert.ok(['ok', 'warn', 'danger'].includes(pace.status));
   assert.ok(pace.label);
 });
+
+test('app-log 日期键、账号标签与过期清理', async () => {
+  const { mkdtemp, writeFile, readdir } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const { logDateKey, memberLogLabel, pruneOldLogFiles } = await import('../src/app-log.js');
+
+  assert.equal(logDateKey(new Date(2026, 8, 16)), '2026-09-16');
+
+  const label = memberLogLabel({
+    id: 'abc',
+    displayName: '陈瑶',
+    email: 'a@b.com',
+    hostname: 'LUKE-PC',
+  });
+  assert.match(label, /陈瑶/);
+  assert.match(label, /id=abc/);
+
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-log-'));
+  const oldDay = new Date(2020, 0, 15, 12, 0, 0, 0);
+  const keepDay = new Date(2026, 8, 16, 12, 0, 0, 0);
+  await writeFile(pathMod.join(dir, `${logDateKey(oldDay)}.log`), 'old\n', 'utf8');
+  await writeFile(pathMod.join(dir, `${logDateKey(keepDay)}.log`), 'keep\n', 'utf8');
+  await writeFile(pathMod.join(dir, 'ignore.txt'), 'x', 'utf8');
+
+  const removed = await pruneOldLogFiles(30, keepDay, dir);
+  assert.equal(removed, 1);
+  const left = await readdir(dir);
+  assert.ok(left.includes(`${logDateKey(keepDay)}.log`));
+  assert.ok(!left.includes(`${logDateKey(oldDay)}.log`));
+});

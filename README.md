@@ -172,8 +172,10 @@ extension/           Reporter 扩展（打 VSIX）
 docker-compose.yml   拉取 ghcr.io/poiig/cursor-team-usage
 scripts/             本机读 state.vscdb 等
 docs/screenshots/    README 截图
-data/                运行时数据（app.sqlite，勿提交）
+data/                运行时数据（app.sqlite、log/ 操作日志，勿提交）
 ```
+
+操作日志写入 `data/log/YYYY-MM-DD.log`，记录启动、注册、上报、刷新、自动刷新等；保留天数见 `.env` 的 `LOG_RETENTION_DAYS`（默认 30）。
 
 ## 参考
 

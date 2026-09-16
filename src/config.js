@@ -29,6 +29,7 @@ export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
  *   accessKey: string,
  *   autoRefreshSec: number,
  *   sessionSecret: string,
+ *   logRetentionDays: number,
  * }} AppConfig
  */
 
@@ -40,6 +41,7 @@ let runtime = {
   accessKey: DEFAULT_ACCESS_KEY,
   autoRefreshSec: 1800,
   sessionSecret: '',
+  logRetentionDays: 30,
 };
 
 /**
@@ -92,6 +94,7 @@ function defaults() {
     accessKey: DEFAULT_ACCESS_KEY,
     autoRefreshSec: 1800, // 每账号距上次同步的刷新间隔（秒）
     sessionSecret: '',
+    logRetentionDays: 30, // data/log 下日志保留天数，0=不自动删除
   };
 }
 
@@ -143,6 +146,10 @@ function configFromProcessEnv() {
     if (Number.isFinite(n) && n >= 0) next.autoRefreshSec = Math.floor(n);
   }
   if (process.env.SESSION_SECRET) next.sessionSecret = String(process.env.SESSION_SECRET);
+  if (process.env.LOG_RETENTION_DAYS != null && process.env.LOG_RETENTION_DAYS !== '') {
+    const n = Number(process.env.LOG_RETENTION_DAYS);
+    if (Number.isFinite(n) && n >= 0) next.logRetentionDays = Math.floor(n);
+  }
   return next;
 }
 
@@ -253,6 +260,12 @@ export function getServerAutoRefreshSec() {
 
 export function getSessionSecret() {
   return getAppConfig().sessionSecret || 'dev-insecure-session-secret';
+}
+
+/** @returns {number} data/log 日志保留天数，0 表示不自动删除 */
+export function getLogRetentionDays() {
+  const n = getAppConfig().logRetentionDays;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 30;
 }
 
 export function getConfigPath() {
