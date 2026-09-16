@@ -3,9 +3,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { access, readFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { maskToken, sessionFromCookie, tokenExpiresAtIso } from './auth.js';
 import { getDatabaseUrl } from './config.js';
@@ -15,10 +12,6 @@ import {
 } from './store-member-fields.js';
 
 const { Pool } = pg;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const MEMBERS_JSON = path.join(DATA_DIR, 'members.json');
-const USERS_JSON = path.join(DATA_DIR, 'users.json');
 
 /** @type {import('pg').Pool | null} */
 let pool = null;
@@ -159,102 +152,6 @@ export async function init() {
       must_change_password BOOLEAN NOT NULL DEFAULT TRUE
     )
   `);
-  await migrateMembersFromJson();
-  await migrateAdminFromJson();
-}
-
-/**
- * @param {any} parsed
- * @returns {{ username: string, passwordHash: string, salt: string, createdAt: string, mustChangePassword: boolean } | null}
- */
-function pickAdminFromJson(parsed) {
-  if (parsed?.admin && typeof parsed.admin === 'object') {
-    return {
-      username: 'admin',
-      salt: String(parsed.admin.salt || ''),
-      passwordHash: String(parsed.admin.passwordHash || ''),
-      createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
-      mustChangePassword: Boolean(parsed.admin.mustChangePassword),
-    };
-  }
-  const list = Array.isArray(parsed?.users) ? parsed.users : [];
-  const found = list.find((u) => u?.username === 'admin') || list[0];
-  if (!found) return null;
-  return {
-    username: 'admin',
-    salt: String(found.salt || ''),
-    passwordHash: String(found.passwordHash || ''),
-    createdAt: String(found.createdAt || new Date().toISOString()),
-    mustChangePassword: found.mustChangePassword != null ? Boolean(found.mustChangePassword) : true,
-  };
-}
-
-/** 表空时从旧 JSON 迁入名册，避免切到 PG 丢本地数据。 */
-async function migrateMembersFromJson() {
-  const { rows } = await db().query('SELECT COUNT(*)::int AS c FROM members');
-  if (Number(rows[0]?.c || 0) > 0) return;
-  try {
-    await access(MEMBERS_JSON);
-  } catch {
-    return;
-  }
-  const raw = await readFile(MEMBERS_JSON, 'utf8');
-  const parsed = JSON.parse(raw);
-  const members = Array.isArray(parsed?.members) ? parsed.members : [];
-  if (!members.length) return;
-
-  for (const m of members) {
-    const cookie = String(m.cookieValue || '');
-    const pulled = pulledColumnsFromSnapshot(m.lastSnapshot);
-    await db().query(
-      `INSERT INTO members
-        (id, display_name, cookie_value, user_id, email, hostname, token_expires_at,
-         plan_name, membership_type, total_percent_used, spend_today, spend_yesterday, spend_last30, hard_limit,
-         created_at, updated_at, last_snapshot, last_error, last_synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19)
-       ON CONFLICT (user_id) DO NOTHING`,
-      [
-        String(m.id || randomUUID()),
-        String(m.displayName || m.userId || 'member'),
-        cookie,
-        String(m.userId || ''),
-        m.email ? String(m.email) : pulled.email,
-        m.hostname ? String(m.hostname) : null,
-        tokenExpiresAtFromCookie(cookie),
-        pulled.planName,
-        pulled.membershipType,
-        pulled.totalPercentUsed,
-        pulled.spendToday,
-        pulled.spendYesterday,
-        pulled.spendLast30,
-        pulled.hardLimit,
-        String(m.createdAt || new Date().toISOString()),
-        String(m.updatedAt || m.createdAt || new Date().toISOString()),
-        m.lastSnapshot ? JSON.stringify(m.lastSnapshot) : null,
-        m.lastError ?? null,
-        m.lastSyncedAt ?? null,
-      ],
-    );
-  }
-  console.log(`已从 members.json 迁入 ${members.length} 条成员到 PostgreSQL`);
-}
-
-/** 表空时从旧 users.json 迁入控制台账号，避免升级后被重置为 admin/admin。 */
-async function migrateAdminFromJson() {
-  const { rows } = await db().query('SELECT username FROM console_admin WHERE username = $1', [
-    'admin',
-  ]);
-  if (rows.length) return;
-  try {
-    await access(USERS_JSON);
-  } catch {
-    return;
-  }
-  const raw = await readFile(USERS_JSON, 'utf8');
-  const admin = pickAdminFromJson(JSON.parse(raw));
-  if (!admin?.salt || !admin?.passwordHash) return;
-  await saveConsoleAdmin(admin);
-  console.log('已从 users.json 迁入控制台账号到 PostgreSQL');
 }
 
 /** 热切换存储前释放连接池。 */

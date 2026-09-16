@@ -63,7 +63,7 @@ copy config.example.json data\config.json   # Linux/macOS: cp config.example.jso
 
 服务端按 `autoRefreshSec` 在后台定时刷新账号用量（不依赖浏览器开着）。
 
-启动时自动建表（`members` + `console_admin`）。从旧版 JSON 升级时，SQLite 会在表空时一次性迁入 `members.json` / `users.json`。
+启动时自动建表（`members` + `console_admin`）。
 
 PostgreSQL 示例：
 
@@ -82,6 +82,16 @@ docker compose up -d --build
 ```
 
 打开 http://localhost:3780 。数据在 `./data`（已 gitignore）。`docker-compose.yml` 里可取消注释 Postgres。
+
+CI 推送到 GitHub Packages（GHCR）：
+
+```bash
+docker pull ghcr.io/poiig/cursor-team-usage:latest
+# 或指定构建时的完整 commit sha
+# docker pull ghcr.io/poiig/cursor-team-usage:<commit-sha>
+```
+
+包页：https://github.com/Poiig/cursor-team-usage/pkgs/container/cursor-team-usage
 
 仅本机访问时可改 ports 为 `"127.0.0.1:3780:3780"`。
 
@@ -132,7 +142,7 @@ Cursor / VS Code：**Extensions: Install from VSIX…**
 
 - 会话 Token **等同登录态**，仅本机或可信内网
 - 默认监听 `127.0.0.1`；对外请自行加反向代理与访问控制
-- `data/` 下 `app.sqlite`、`config.json` 以及遗留的 `members.json` / `users.json` 已忽略，勿提交
+- `data/` 下 `app.sqlite`、`config.json` 已忽略，勿提交
 - 「导出」含完整 Token，自行保管
 
 ## 数据来源

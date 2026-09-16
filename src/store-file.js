@@ -284,28 +284,18 @@ export async function saveSyncResult(id, result) {
  */
 
 /**
+ * 仅认单一 { admin }；控制台无多用户。
  * @param {any} parsed
  * @returns {ConsoleAdmin | null}
  */
 function pickAdminFromFile(parsed) {
-  if (parsed?.admin && typeof parsed.admin === 'object') {
-    return {
-      username: 'admin',
-      salt: String(parsed.admin.salt || ''),
-      passwordHash: String(parsed.admin.passwordHash || ''),
-      createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
-      mustChangePassword: Boolean(parsed.admin.mustChangePassword),
-    };
-  }
-  const list = Array.isArray(parsed?.users) ? parsed.users : [];
-  const found = list.find((u) => u?.username === 'admin') || list[0];
-  if (!found) return null;
+  if (!parsed?.admin || typeof parsed.admin !== 'object') return null;
   return {
     username: 'admin',
-    salt: String(found.salt || ''),
-    passwordHash: String(found.passwordHash || ''),
-    createdAt: String(found.createdAt || new Date().toISOString()),
-    mustChangePassword: found.mustChangePassword != null ? Boolean(found.mustChangePassword) : true,
+    salt: String(parsed.admin.salt || ''),
+    passwordHash: String(parsed.admin.passwordHash || ''),
+    createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
+    mustChangePassword: Boolean(parsed.admin.mustChangePassword),
   };
 }
 
