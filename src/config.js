@@ -11,11 +11,13 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+const DEFAULT_SQLITE = path.join(DATA_DIR, 'app.sqlite');
 
 /**
  * @typedef {{
- *   storeDriver: 'file' | 'postgres',
+ *   storeDriver: 'sqlite' | 'postgres' | 'file',
  *   databaseUrl: string,
+ *   sqlitePath: string,
  *   accessKey: string,
  *   autoRefreshSec: number,
  *   sessionSecret: string,
@@ -24,18 +26,34 @@ const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 
 /** @type {AppConfig} */
 let runtime = {
-  storeDriver: 'file',
+  storeDriver: 'sqlite',
   databaseUrl: '',
+  sqlitePath: DEFAULT_SQLITE,
   accessKey: '',
   autoRefreshSec: 1800,
   sessionSecret: '',
 };
 
+/**
+ * 归一化驱动名：空 / 未知 → sqlite；兼容 pg 别名与遗留 file。
+ * @param {unknown} value
+ * @returns {'sqlite' | 'postgres' | 'file'}
+ */
+export function normalizeStoreDriver(value) {
+  const s = String(value || '')
+    .toLowerCase()
+    .trim();
+  if (s === 'postgres' || s === 'pg' || s === 'postgresql') return 'postgres';
+  if (s === 'file' || s === 'json') return 'file';
+  return 'sqlite';
+}
+
 /** @returns {AppConfig} */
 function defaults() {
   return {
-    storeDriver: 'file',
+    storeDriver: 'sqlite',
     databaseUrl: '',
+    sqlitePath: DEFAULT_SQLITE,
     accessKey: '',
     autoRefreshSec: 1800, // 30 分钟后台刷新全员用量
     sessionSecret: randomBytes(24).toString('hex'),
@@ -48,12 +66,11 @@ function defaults() {
  */
 function applyEnvOverrides(cfg) {
   const next = { ...cfg };
-  const driver = String(process.env.STORE_DRIVER || '').toLowerCase();
-  if (driver === 'postgres' || driver === 'pg' || driver === 'postgresql') {
-    next.storeDriver = 'postgres';
-  } else if (driver === 'file' || driver === 'json') {
-    next.storeDriver = 'file';
+  const envDriver = String(process.env.STORE_DRIVER || '').toLowerCase().trim();
+  if (envDriver) {
+    next.storeDriver = normalizeStoreDriver(envDriver);
   } else if (!next.databaseUrl && (process.env.DATABASE_URL || process.env.PGHOST)) {
+    // 未显式指定驱动但给了 PG 连接信息时，自动走 postgres。
     next.storeDriver = 'postgres';
   }
 
@@ -67,6 +84,10 @@ function applyEnvOverrides(cfg) {
     next.databaseUrl = `postgresql://${auth}@${process.env.PGHOST}:${port}/${db}`;
   }
 
+  if (process.env.SQLITE_PATH) {
+    next.sqlitePath = String(process.env.SQLITE_PATH).trim() || DEFAULT_SQLITE;
+  }
+
   if (process.env.ACCESS_KEY || process.env.AGENT_ACCESS_KEY) {
     next.accessKey = String(process.env.ACCESS_KEY || process.env.AGENT_ACCESS_KEY).trim();
   }
@@ -78,12 +99,22 @@ function applyEnvOverrides(cfg) {
   return next;
 }
 
+/**
+ * 相对路径相对仓库根解析，避免 cwd 变化导致库文件漂移。
+ * @param {string} p
+ */
+function resolveDataPath(p) {
+  const raw = String(p || '').trim() || DEFAULT_SQLITE;
+  return path.isAbsolute(raw) ? raw : path.join(__dirname, '..', raw);
+}
+
 /** 把可落盘字段写成 data/config.json（首次启动时）。 */
 async function writeConfigFile(cfg) {
   await mkdir(DATA_DIR, { recursive: true });
   const disk = {
-    storeDriver: cfg.storeDriver === 'postgres' ? 'postgres' : 'file',
+    storeDriver: normalizeStoreDriver(cfg.storeDriver),
     databaseUrl: cfg.databaseUrl || '',
+    sqlitePath: cfg.sqlitePath || 'data/app.sqlite',
     accessKey: cfg.accessKey || '',
     autoRefreshSec: Number(cfg.autoRefreshSec) || 0,
     sessionSecret: cfg.sessionSecret || defaults().sessionSecret,
@@ -98,10 +129,12 @@ export async function loadAppConfig() {
   try {
     const raw = await readFile(CONFIG_PATH, 'utf8');
     const parsed = JSON.parse(raw);
+    const sqliteRaw = String(parsed.sqlitePath || 'data/app.sqlite').trim() || 'data/app.sqlite';
     fileCfg = {
       ...fileCfg,
-      storeDriver: parsed.storeDriver === 'postgres' ? 'postgres' : 'file',
+      storeDriver: normalizeStoreDriver(parsed.storeDriver),
       databaseUrl: String(parsed.databaseUrl || ''),
+      sqlitePath: resolveDataPath(sqliteRaw),
       accessKey: String(parsed.accessKey || ''),
       autoRefreshSec:
         parsed.autoRefreshSec != null && parsed.autoRefreshSec !== ''
@@ -114,8 +147,13 @@ export async function loadAppConfig() {
     missing = true;
   }
   runtime = applyEnvOverrides(fileCfg);
+  // sqlitePath 经 env 覆盖后仍可能是相对路径，统一解析到绝对路径。
+  runtime.sqlitePath = resolveDataPath(runtime.sqlitePath);
   if (missing) {
-    await writeConfigFile(runtime);
+    await writeConfigFile({
+      ...runtime,
+      sqlitePath: path.relative(path.join(__dirname, '..'), runtime.sqlitePath) || 'data/app.sqlite',
+    });
     console.log('已生成 data/config.json（可参考仓库根目录 config.example.json）');
   }
   return getAppConfig();
@@ -133,9 +171,14 @@ export function getListenConfig() {
   };
 }
 
-/** @returns {'file' | 'postgres'} */
+/** @returns {'sqlite' | 'postgres' | 'file'} */
 export function getStoreDriver() {
-  return getAppConfig().storeDriver === 'postgres' ? 'postgres' : 'file';
+  return normalizeStoreDriver(getAppConfig().storeDriver);
+}
+
+/** @returns {string} */
+export function getSqlitePath() {
+  return getAppConfig().sqlitePath || DEFAULT_SQLITE;
 }
 
 /** @returns {string | null} */

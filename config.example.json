@@ -1,10 +1,13 @@
 {
   "//": "复制为 data/config.json 后按需修改，改完需重启进程。以下以 // 开头的键仅作说明，运行时会忽略。也可用同名环境变量覆盖（优先于文件）。",
 
-  "//storeDriver": "存储驱动：file = 本地 data/members.json；postgres = PostgreSQL（需配 databaseUrl 或 DATABASE_URL）",
-  "storeDriver": "file",
+  "//storeDriver": "存储驱动：sqlite = 本地 data/app.sqlite（默认，含名册与控制台账号）；postgres = PostgreSQL；file = 遗留 JSON（members.json + users.json）",
+  "storeDriver": "sqlite",
 
-  "//databaseUrl": "PostgreSQL 连接串。示例：postgresql://postgres:postgres@127.0.0.1:5432/cursor_team_usage 。也可用环境变量 DATABASE_URL，或 PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE 拼装。storeDriver=file 时可留空。",
+  "//sqlitePath": "SQLite 库文件路径（相对仓库根或绝对路径）。也可用环境变量 SQLITE_PATH。storeDriver=sqlite 时生效。",
+  "sqlitePath": "data/app.sqlite",
+
+  "//databaseUrl": "PostgreSQL 连接串。示例：postgresql://postgres:postgres@127.0.0.1:5432/cursor_team_usage 。也可用环境变量 DATABASE_URL，或 PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE 拼装。storeDriver=sqlite/file 时可留空。",
   "databaseUrl": "",
 
   "//accessKey": "插件 /api/agent/report 鉴权密钥。留空则禁止插件上报。也可用环境变量 ACCESS_KEY 或 AGENT_ACCESS_KEY。",

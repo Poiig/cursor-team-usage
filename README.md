@@ -24,7 +24,7 @@
 | 隐私模式 | 列表邮箱脱敏 |
 | 控制台 | 固定账号 `admin`，默认密码 `admin`，首次登录强制改密 |
 | 配置 | 改服务器上的 `data/config.json`（或环境变量），**无网页设置页**，改完重启 |
-| 存储 | 默认 `data/members.json`；可选 PostgreSQL |
+| 存储 | 默认本地 SQLite（`data/app.sqlite`，含名册与控制台账号）；可选 PostgreSQL；`file` 为遗留 JSON |
 | 刷新 | 服务端按 `autoRefreshSec` 后台定时刷新（默认 30 分钟）；列表可手动「更新模型」 |
 
 ## 快速开始
@@ -53,7 +53,8 @@ copy config.example.json data\config.json   # Linux/macOS: cp config.example.jso
 
 | 字段 / 环境变量 | 说明 |
 | --- | --- |
-| `storeDriver` / `STORE_DRIVER` | `file` 或 `postgres` |
+| `storeDriver` / `STORE_DRIVER` | `sqlite`（默认）、`postgres`，或遗留 `file` |
+| `sqlitePath` / `SQLITE_PATH` | SQLite 库路径，默认 `data/app.sqlite` |
 | `databaseUrl` / `DATABASE_URL` | PG 连接串；也可用 `PGHOST` 等拆分变量 |
 | `accessKey` / `ACCESS_KEY` | Reporter 扩展上报密钥；空则禁止插件上报 |
 | `autoRefreshSec` / `AUTO_REFRESH_SEC` | 服务端定时刷全员用量（秒），默认 `1800`（30 分钟），`0`=关 |
@@ -61,6 +62,8 @@ copy config.example.json data\config.json   # Linux/macOS: cp config.example.jso
 | `HOST` / `PORT` | 监听地址端口（仅环境变量，默认 `127.0.0.1:3780`） |
 
 服务端按 `autoRefreshSec` 在后台定时刷新账号用量（不依赖浏览器开着）。
+
+启动时自动建表（`members` + `console_admin`）。从旧版 JSON 升级时，SQLite 会在表空时一次性迁入 `members.json` / `users.json`。
 
 PostgreSQL 示例：
 
@@ -70,7 +73,7 @@ set DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/cursor_team_usage
 npm start
 ```
 
-启动时自动 `CREATE TABLE IF NOT EXISTS members (...)`。
+启动时自动 `CREATE TABLE IF NOT EXISTS`（名册与控制台账号）。
 
 ## Docker
 
@@ -129,7 +132,7 @@ Cursor / VS Code：**Extensions: Install from VSIX…**
 
 - 会话 Token **等同登录态**，仅本机或可信内网
 - 默认监听 `127.0.0.1`；对外请自行加反向代理与访问控制
-- `data/` 下 `members.json`、`config.json`、`users.json` 已忽略，勿提交
+- `data/` 下 `app.sqlite`、`config.json` 以及遗留的 `members.json` / `users.json` 已忽略，勿提交
 - 「导出」含完整 Token，自行保管
 
 ## 数据来源
@@ -155,7 +158,7 @@ extension/           Reporter 扩展（打 VSIX）
 config.example.json  配置模板 → 复制为 data/config.json
 scripts/             本机读 state.vscdb 等
 docs/screenshots/    README 截图
-data/                运行时数据（勿提交）
+data/                运行时数据（app.sqlite / config.json，勿提交）
 ```
 
 ## 参考

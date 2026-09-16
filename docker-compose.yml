@@ -16,12 +16,12 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "3780"
-      # 默认 file；改用 Postgres 时取消下行与 postgres 服务注释
+      # 默认 sqlite（data/app.sqlite）；改用 Postgres 时取消下行与 postgres 服务注释
       # STORE_DRIVER: postgres
       # DATABASE_URL: postgresql://postgres:postgres@postgres:5432/cursor_team_usage
       # TZ: "Asia/Shanghai"
     volumes:
-      # file 存储：账号名册与会话 Token
+      # sqlite / 配置：名册、控制台账号与会话 Token
       - ./data:/app/data
     # depends_on:
     #   - postgres

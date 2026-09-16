@@ -54,7 +54,7 @@ test('tokenExpiresAtIso 从 JWT exp 解析', () => {
   assert.equal(tokenExpiresAtIso(cookie), new Date(exp * 1000).toISOString());
 });
 
-test('未配置数据库时默认 file 存储', async () => {
+test('未配置数据库时默认 sqlite 存储', async () => {
   const saved = {
     STORE_DRIVER: process.env.STORE_DRIVER,
     DATABASE_URL: process.env.DATABASE_URL,
@@ -65,7 +65,7 @@ test('未配置数据库时默认 file 存储', async () => {
   delete process.env.PGHOST;
   try {
     await loadAppConfig();
-    assert.equal(getStoreDriver(), 'file');
+    assert.equal(getStoreDriver(), 'sqlite');
   } finally {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];

@@ -1,4 +1,5 @@
-# 仅打包运行所需文件；名册与密钥走 volume，不进镜像层。
+# 名册与密钥走 volume，不进镜像层。
+# SQLite（sql.js）为纯 WASM，无需原生编译工具链。
 FROM node:20-alpine
 
 WORKDIR /app

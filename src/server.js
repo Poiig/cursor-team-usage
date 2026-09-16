@@ -300,6 +300,7 @@ const server = http.createServer(async (req, res) => {
         sessionToken,
         displayName: body?.displayName,
         email: body?.email,
+        hostname: body?.hostname,
       });
       const shouldRefresh = body?.refresh !== false;
       let refreshed = member;
@@ -445,8 +446,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 await loadAppConfig();
-await initUsers();
+// 控制台账号落在存储驱动内，须先开库再建默认 admin。
 await initStore();
+await initUsers();
 setupServerAutoRefresh();
 
 server.listen(PORT, HOST, () => {

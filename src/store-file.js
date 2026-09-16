@@ -1,5 +1,5 @@
 /**
- * 本地 JSON 名册：零依赖，默认存储。
+ * 本地 JSON 名册（遗留）：STORE_DRIVER=file 时使用；默认已改为 sqlite。
  */
 
 import { randomUUID } from 'node:crypto';
@@ -7,10 +7,15 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { maskToken, sessionFromCookie, tokenExpiresAtIso } from './auth.js';
+import {
+  pulledColumnsFromSnapshot,
+  tokenExpiresAtFromCookie,
+} from './store-member-fields.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const STORE_PATH = path.join(DATA_DIR, 'members.json');
+const USERS_PATH = path.join(DATA_DIR, 'users.json');
 
 /**
  * @typedef {{
@@ -19,6 +24,15 @@ const STORE_PATH = path.join(DATA_DIR, 'members.json');
  *   cookieValue: string,
  *   userId: string,
  *   email?: string,
+ *   hostname?: string | null,
+ *   tokenExpiresAt?: string | null,
+ *   planName?: string | null,
+ *   membershipType?: string | null,
+ *   totalPercentUsed?: number | null,
+ *   spendToday?: number | null,
+ *   spendYesterday?: number | null,
+ *   spendLast30?: number | null,
+ *   hardLimit?: number | null,
  *   createdAt: string,
  *   updatedAt: string,
  *   lastSnapshot?: object | null,
@@ -59,8 +73,16 @@ export function toPublicMember(m) {
     displayName: m.displayName,
     userId: m.userId,
     email: m.email ?? m.lastSnapshot?.email,
+    hostname: m.hostname ?? null,
     tokenHint: maskToken(m.cookieValue),
-    tokenExpiresAt: tokenExpiresAtIso(m.cookieValue),
+    tokenExpiresAt: m.tokenExpiresAt ?? tokenExpiresAtIso(m.cookieValue),
+    planName: m.planName ?? m.lastSnapshot?.plan?.planName ?? null,
+    membershipType: m.membershipType ?? m.lastSnapshot?.plan?.membershipType ?? null,
+    totalPercentUsed: m.totalPercentUsed ?? null,
+    spendToday: m.spendToday ?? null,
+    spendYesterday: m.spendYesterday ?? null,
+    spendLast30: m.spendLast30 ?? null,
+    hardLimit: m.hardLimit ?? null,
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
     lastSnapshot: m.lastSnapshot ?? null,
@@ -75,7 +97,7 @@ export async function listMembers() {
 }
 
 /**
- * @param {{ displayName: string, sessionToken: string }} input
+ * @param {{ displayName: string, sessionToken: string, hostname?: string }} input
  */
 export async function addMember(input) {
   const displayName = String(input.displayName || '').trim();
@@ -96,6 +118,8 @@ export async function addMember(input) {
     displayName,
     cookieValue: session.cookieValue,
     userId: session.userId,
+    hostname: input.hostname ? String(input.hostname).trim() : null,
+    tokenExpiresAt: tokenExpiresAtFromCookie(session.cookieValue),
     createdAt: now,
     updatedAt: now,
     lastSnapshot: null,
@@ -130,6 +154,10 @@ export async function updateMember(id, patch) {
     }
     member.cookieValue = session.cookieValue;
     member.userId = session.userId;
+    member.tokenExpiresAt = tokenExpiresAtFromCookie(session.cookieValue);
+  }
+  if (patch.hostname != null) {
+    member.hostname = String(patch.hostname).trim() || null;
   }
   member.updatedAt = new Date().toISOString();
   store.members[idx] = member;
@@ -139,7 +167,7 @@ export async function updateMember(id, patch) {
 
 /**
  * 按 userId 上报会话：已存在则轮换 Token，否则新建。
- * @param {{ displayName?: string, sessionToken: string, email?: string }} input
+ * @param {{ displayName?: string, sessionToken: string, email?: string, hostname?: string }} input
  */
 export async function upsertMemberBySession(input) {
   const session = sessionFromCookie(input.sessionToken);
@@ -152,12 +180,16 @@ export async function upsertMemberBySession(input) {
     String(input.displayName || '').trim() ||
     String(input.email || '').trim() ||
     session.userId;
+  const hostname = input.hostname != null ? String(input.hostname).trim() || null : null;
+  const tokenExpiresAt = tokenExpiresAtFromCookie(session.cookieValue);
 
   if (idx >= 0) {
     const member = store.members[idx];
     member.cookieValue = session.cookieValue;
     member.userId = session.userId;
+    member.tokenExpiresAt = tokenExpiresAt;
     if (input.email) member.email = String(input.email).trim();
+    if (hostname != null) member.hostname = hostname;
     if (String(input.displayName || '').trim()) {
       member.displayName = String(input.displayName).trim();
     }
@@ -174,6 +206,8 @@ export async function upsertMemberBySession(input) {
     cookieValue: session.cookieValue,
     userId: session.userId,
     email: input.email ? String(input.email).trim() : undefined,
+    hostname,
+    tokenExpiresAt,
     createdAt: now,
     updatedAt: now,
     lastSnapshot: null,
@@ -216,8 +250,17 @@ export async function saveSyncResult(id, result) {
   const member = store.members[idx];
   const now = new Date().toISOString();
   if (result.snapshot) {
+    const pulled = pulledColumnsFromSnapshot(result.snapshot);
     member.lastSnapshot = result.snapshot;
-    member.email = result.snapshot.email ?? member.email;
+    member.email = pulled.email ?? member.email;
+    member.planName = pulled.planName;
+    member.membershipType = pulled.membershipType;
+    member.totalPercentUsed = pulled.totalPercentUsed;
+    member.spendToday = pulled.spendToday;
+    member.spendYesterday = pulled.spendYesterday;
+    member.spendLast30 = pulled.spendLast30;
+    member.hardLimit = pulled.hardLimit;
+    member.tokenExpiresAt = tokenExpiresAtFromCookie(member.cookieValue);
     member.lastError = null;
     member.lastSyncedAt = result.snapshot.syncedAt || now;
   } else {
@@ -228,4 +271,59 @@ export async function saveSyncResult(id, result) {
   store.members[idx] = member;
   await writeStore(store);
   return toPublicMember(member);
+}
+
+/**
+ * @typedef {{
+ *   username: string,
+ *   passwordHash: string,
+ *   salt: string,
+ *   createdAt: string,
+ *   mustChangePassword: boolean,
+ * }} ConsoleAdmin
+ */
+
+/**
+ * @param {any} parsed
+ * @returns {ConsoleAdmin | null}
+ */
+function pickAdminFromFile(parsed) {
+  if (parsed?.admin && typeof parsed.admin === 'object') {
+    return {
+      username: 'admin',
+      salt: String(parsed.admin.salt || ''),
+      passwordHash: String(parsed.admin.passwordHash || ''),
+      createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
+      mustChangePassword: Boolean(parsed.admin.mustChangePassword),
+    };
+  }
+  const list = Array.isArray(parsed?.users) ? parsed.users : [];
+  const found = list.find((u) => u?.username === 'admin') || list[0];
+  if (!found) return null;
+  return {
+    username: 'admin',
+    salt: String(found.salt || ''),
+    passwordHash: String(found.passwordHash || ''),
+    createdAt: String(found.createdAt || new Date().toISOString()),
+    mustChangePassword: found.mustChangePassword != null ? Boolean(found.mustChangePassword) : true,
+  };
+}
+
+/** @returns {Promise<ConsoleAdmin | null>} */
+export async function getConsoleAdmin() {
+  try {
+    const raw = await readFile(USERS_PATH, 'utf8');
+    return pickAdminFromFile(JSON.parse(raw));
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
+/**
+ * @param {ConsoleAdmin} admin
+ */
+export async function saveConsoleAdmin(admin) {
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(USERS_PATH, JSON.stringify({ admin }, null, 2), 'utf8');
 }

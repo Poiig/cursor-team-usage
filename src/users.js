@@ -1,20 +1,16 @@
 /**
  * 控制台仅单一 admin：默认 admin/admin，首次登录须改密。
+ * 凭据落在当前存储驱动（SQLite / PG / 遗留 file）的 console_admin，与名册同库。
  */
 
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { getConsoleAdmin, saveConsoleAdmin } from './store.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const USERS_PATH = path.join(DATA_DIR, 'users.json');
 const ADMIN_NAME = 'admin';
 
 /**
  * @typedef {{
- *   username: 'admin',
+ *   username: string,
  *   passwordHash: string,
  *   salt: string,
  *   createdAt: string,
@@ -49,13 +45,6 @@ function isDefaultPassword(user) {
   return verifyPassword('admin', user);
 }
 
-async function persist() {
-  if (!admin) return;
-  await mkdir(DATA_DIR, { recursive: true });
-  // 只存单一 admin，不再支持多用户列表。
-  await writeFile(USERS_PATH, JSON.stringify({ admin }, null, 2), 'utf8');
-}
-
 /** @returns {AdminUser} */
 function createDefaultAdmin() {
   const salt = randomBytes(16).toString('hex');
@@ -68,59 +57,29 @@ function createDefaultAdmin() {
   };
 }
 
-/**
- * 从旧版 { users: [...] } 或新版 { admin } 解析出唯一 admin。
- * @param {any} parsed
- */
-function pickAdminFromFile(parsed) {
-  if (parsed?.admin && typeof parsed.admin === 'object') {
-    return {
-      username: ADMIN_NAME,
-      salt: String(parsed.admin.salt || ''),
-      passwordHash: String(parsed.admin.passwordHash || ''),
-      createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
-      mustChangePassword: Boolean(parsed.admin.mustChangePassword),
-    };
-  }
-  const list = Array.isArray(parsed?.users) ? parsed.users : [];
-  const found = list.find((u) => u?.username === ADMIN_NAME) || list[0];
-  if (!found) return null;
-  return {
-    username: ADMIN_NAME,
-    salt: String(found.salt || ''),
-    passwordHash: String(found.passwordHash || ''),
-    createdAt: String(found.createdAt || new Date().toISOString()),
-    mustChangePassword: found.mustChangePassword != null ? Boolean(found.mustChangePassword) : true,
-  };
-}
-
-/** 启动时加载；无记录则创建默认 admin/admin。 */
+/** 启动时从存储加载；无记录则创建默认 admin/admin。须在 initStore 之后调用。 */
 export async function initUsers() {
-  let fromDisk = null;
-  let migrated = false;
-  try {
-    const raw = await readFile(USERS_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    fromDisk = pickAdminFromFile(parsed);
-    // 旧多用户文件统一收敛为单一 admin。
-    if (Array.isArray(parsed?.users)) migrated = true;
-  } catch (e) {
-    if (e && e.code !== 'ENOENT') throw e;
-  }
+  const fromStore = await getConsoleAdmin();
 
-  if (!fromDisk?.salt || !fromDisk?.passwordHash) {
+  if (!fromStore?.salt || !fromStore?.passwordHash) {
     admin = createDefaultAdmin();
-    await persist();
+    await saveConsoleAdmin(admin);
     console.log('已创建默认控制台账号 admin / admin（首次登录须改密）');
     return;
   }
 
-  admin = fromDisk;
+  admin = {
+    username: ADMIN_NAME,
+    salt: fromStore.salt,
+    passwordHash: fromStore.passwordHash,
+    createdAt: fromStore.createdAt || new Date().toISOString(),
+    mustChangePassword: Boolean(fromStore.mustChangePassword),
+  };
+
   if (admin.mustChangePassword == null || isDefaultPassword(admin)) {
     admin.mustChangePassword = true;
-    migrated = true;
+    await saveConsoleAdmin(admin);
   }
-  if (migrated) await persist();
 }
 
 /**
@@ -151,7 +110,7 @@ export async function changeAdminPassword(password) {
   admin.salt = randomBytes(16).toString('hex');
   admin.passwordHash = hashPassword(next, admin.salt);
   admin.mustChangePassword = false;
-  await persist();
+  await saveConsoleAdmin(admin);
   return {
     username: ADMIN_NAME,
     createdAt: admin.createdAt,
