@@ -42,13 +42,14 @@
           <div class="toolbar">
             <input type="search" id="searchInput" placeholder="搜索账号名称 / 邮箱…" />
             <select id="sortBy" aria-label="排序">
+              <option value="remaining" selected>按剩余额度</option>
+              <option value="todayTokens">按今日 tokens</option>
               <option value="name">按名称</option>
-              <option value="remaining">按剩余额度</option>
               <option value="used">按已用额度</option>
               <option value="reset">按重置时间</option>
             </select>
             <label class="switch" title="开启后邮箱将脱敏显示">
-              <input type="checkbox" id="privacyMode" />
+              <input type="checkbox" id="privacyMode" checked />
               <span class="switch-track" aria-hidden="true"></span>
               <span class="switch-label">隐私模式</span>
             </label>
@@ -100,6 +101,35 @@
         </ol>
       </section>
     </div>
+
+    <dialog id="todayRankDialog" class="sheet sheet-wide">
+      <div class="sheet-body">
+        <header>
+          <h3>今日用量排行</h3>
+          <button type="button" class="icon-close" id="btnTodayRankClose" aria-label="关闭">×</button>
+        </header>
+        <p class="hint">按今日 tokens 从高到低；点击行可进入账号详情。</p>
+        <div class="rank-table-wrap">
+          <table class="rank-table" id="todayRankTable">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>用户名</th>
+                <th>今日 tokens</th>
+                <th>次数</th>
+                <th>花费</th>
+              </tr>
+            </thead>
+            <tbody id="todayRankBody"></tbody>
+          </table>
+        </div>
+        <footer class="sheet-footer">
+          <div class="sheet-footer-right">
+            <button type="button" class="btn" id="btnTodayRankCancel">关闭</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
 
     <dialog id="memberDialog" class="sheet">
       <div class="sheet-body">

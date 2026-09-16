@@ -15,7 +15,7 @@ export function loadSettings() {
   } catch {
     /* ignore corrupt settings */
   }
-  return { privacyMode: false };
+  return { privacyMode: true };
 }
 
 /**

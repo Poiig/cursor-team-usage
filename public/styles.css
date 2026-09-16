@@ -195,6 +195,26 @@ h3 {
   box-shadow: var(--shadow);
 }
 
+.stat-click {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.stat-click:hover {
+  border-color: color-mix(in srgb, var(--accent, #4daafc) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent, #4daafc) 8%, var(--panel));
+}
+
+.stat-click:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, #4daafc) 70%, transparent);
+  outline-offset: 2px;
+}
+
 .stat .label {
   margin: 0;
   color: var(--muted);
@@ -859,6 +879,70 @@ code {
   background: var(--panel);
   color: var(--text);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+}
+
+.sheet.sheet-wide {
+  width: min(720px, calc(100vw - 2rem));
+}
+
+.rank-table-wrap {
+  max-height: min(60vh, 480px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rank-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.rank-table th,
+.rank-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.rank-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.rank-table .rank-metric {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rank-num {
+  width: 2.5em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rank-name {
+  display: block;
+  font-weight: 600;
+}
+
+.rank-sub {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.rank-row {
+  cursor: pointer;
+}
+
+.rank-row:hover td {
+  background: color-mix(in srgb, var(--accent, #4daafc) 8%, transparent);
 }
 
 .sheet::backdrop {

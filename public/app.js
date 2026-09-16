@@ -50,6 +50,10 @@ const els = {
   btnSaveMember: document.getElementById('btnSaveMember'),
   btnDialogClose: document.getElementById('btnDialogClose'),
   btnDialogCancel: document.getElementById('btnDialogCancel'),
+  todayRankDialog: document.getElementById('todayRankDialog'),
+  todayRankBody: document.getElementById('todayRankBody'),
+  btnTodayRankClose: document.getElementById('btnTodayRankClose'),
+  btnTodayRankCancel: document.getElementById('btnTodayRankCancel'),
 };
 
 const toast = createToast(els.toast);
@@ -86,6 +90,19 @@ function resetMs(member) {
   if (!iso) return Number.POSITIVE_INFINITY;
   const t = new Date(iso).getTime();
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+}
+
+/** 今日 tokens，无数据视为 0，便于排行。 */
+function todayTokensOf(member) {
+  return Number(member.lastSnapshot?.spend?.today?.tokens) || 0;
+}
+
+function todayRequestsOf(member) {
+  return Number(member.lastSnapshot?.spend?.today?.requests) || 0;
+}
+
+function todayDollarsOf(member) {
+  return Number(member.lastSnapshot?.spend?.today?.dollars) || 0;
 }
 
 function memberStatus(member) {
@@ -275,20 +292,60 @@ function renderSummary(summary) {
   };
   els.summary.innerHTML = `
     <article class="stat"><p class="label">账号</p><p class="value">${s.memberCount}</p><p class="note">${money(s.todayBilledDollars)} 今日</p></article>
-    <article class="stat"><p class="label">今日用量</p><p class="value">${s.todayRequests ?? 0}<span class="unit">次</span></p><p class="note">${formatTokens(s.todayTokens)} tokens</p></article>
+    <button type="button" class="stat stat-click" id="btnTodayUsage" title="查看今日用量排行（按 tokens）">
+      <p class="label">今日用量</p>
+      <p class="value">${s.todayRequests ?? 0}<span class="unit">次</span></p>
+      <p class="note">${formatTokens(s.todayTokens)} tokens · 点击排行</p>
+    </button>
     <article class="stat"><p class="label">正常</p><p class="value">${s.syncedOk ?? 0}</p><p class="note">已完成同步</p></article>
     <article class="stat"><p class="label">失败</p><p class="value ${(s.syncedError || 0) > 0 ? 'danger' : ''}">${s.syncedError ?? 0}</p><p class="note">需更新 Token</p></article>
   `;
+  document.getElementById('btnTodayUsage')?.addEventListener('click', openTodayRank);
+}
+
+/** 打开今日用量排行：按 tokens 倒序，展示用户名。 */
+function openTodayRank() {
+  const ranked = [...membersCache].sort((a, b) => todayTokensOf(b) - todayTokensOf(a));
+  if (!els.todayRankBody) return;
+  if (!ranked.length) {
+    els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">暂无账号</td></tr>`;
+  } else {
+    els.todayRankBody.innerHTML = ranked
+      .map((m, i) => {
+        const idn = accountIdentity(m, settings.privacyMode);
+        const tokens = todayTokensOf(m);
+        const reqs = todayRequestsOf(m);
+        const dollars = todayDollarsOf(m);
+        return `
+          <tr class="rank-row" data-id="${escapeHtml(m.id)}" title="打开详情">
+            <td class="rank-num">${i + 1}</td>
+            <td>
+              <span class="rank-name">${escapeHtml(idn.title)}</span>
+              ${idn.subtitle ? `<span class="rank-sub">${escapeHtml(idn.subtitle)}</span>` : ''}
+            </td>
+            <td class="rank-metric">${escapeHtml(formatTokens(tokens))}</td>
+            <td class="rank-metric">${reqs}次</td>
+            <td class="rank-metric">${money(dollars)}</td>
+          </tr>
+        `;
+      })
+      .join('');
+  }
+  // 同步列表排序，方便关对话框后继续看列表
+  if (els.sortBy) els.sortBy.value = 'todayTokens';
+  renderList();
+  els.todayRankDialog?.showModal();
 }
 
 function filteredMembers() {
   const q = (els.searchInput.value || '').trim().toLowerCase();
-  const sort = els.sortBy?.value || 'name';
+  const sort = els.sortBy?.value || 'remaining';
   const list = membersCache.filter((m) => {
     if (!q) return true;
     return `${m.displayName} ${m.email || ''} ${m.userId || ''}`.toLowerCase().includes(q);
   });
   list.sort((a, b) => {
+    if (sort === 'todayTokens') return todayTokensOf(b) - todayTokensOf(a);
     if (sort === 'remaining') {
       const ar = remainingPercent(a);
       const br = remainingPercent(b);
@@ -416,6 +473,14 @@ els.btnAdd.addEventListener('click', () => openMemberDialog());
 els.btnEmptyAdd.addEventListener('click', () => openMemberDialog());
 els.btnDialogClose.addEventListener('click', closeMemberDialog);
 els.btnDialogCancel.addEventListener('click', closeMemberDialog);
+els.btnTodayRankClose?.addEventListener('click', () => els.todayRankDialog?.close());
+els.btnTodayRankCancel?.addEventListener('click', () => els.todayRankDialog?.close());
+els.todayRankBody?.addEventListener('click', (e) => {
+  const row = e.target.closest('tr[data-id]');
+  if (!row?.dataset.id) return;
+  els.todayRankDialog?.close();
+  location.href = `/detail.html?id=${encodeURIComponent(row.dataset.id)}`;
+});
 els.searchInput.addEventListener('input', renderList);
 els.sortBy?.addEventListener('change', renderList);
 
