@@ -102,7 +102,7 @@ docker login ghcr.io -u YOUR_GITHUB_USERNAME
 | --- | --- | --- |
 | 本机导入 | 看板跑在装了 Cursor 的同一台机器 | 网页点「本机导入」（读 `state.vscdb`，需本机 Python 3） |
 | 粘贴 Token | 任意机器临时加号 | Cookie 里复制 `WorkosCursorSessionToken` |
-| **Reporter 扩展（多机推荐）** | 各开发机自动续报 | 安装 `extension/*.vsix`，配置看板地址与 `accessKey` |
+| **Reporter 扩展（多机推荐）** | 各开发机自动续报 | `install-reporter.ps1` 下载成品安装，配置看板地址与 `accessKey` |
 
 ### Token 能用多久？
 
@@ -114,16 +114,19 @@ docker login ghcr.io -u YOUR_GITHUB_USERNAME
 ### Reporter 扩展
 
 1. 服务端 `.env` 设好 `ACCESS_KEY`，并视需要 `HOST=0.0.0.0` 供局域网访问。
-2. 打包并安装：
+2. 各开发机安装 Reporter 扩展（下载成品，无需本机构建）：
 
-```bash
-# 需要 Node 20+（nvm use 20）
-npm run ext:install
-npm run ext:package
-# → extension/cursor-team-usage-reporter-0.1.0.vsix
+```powershell
+# 默认地址
+irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1 | iex
+
+# 指定 VSIX 下载地址
+iex "& { $(irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1) } -Url 'https://example.com/reporter.vsix'"
 ```
 
-Cursor / VS Code：**Extensions: Install from VSIX…**
+安装后 **Developer: Reload Window**。默认 VSIX：
+
+`https://github.com/Poiig/cursor-team-usage/releases/download/extension-latest/cursor-team-usage-reporter.vsix`
 
 3. 设置里填写（与看板一致）：
 
@@ -134,7 +137,7 @@ Cursor / VS Code：**Extensions: Install from VSIX…**
 | `cursorTeamUsage.displayName` | 可选；**留空则用本机机器名** |
 | `cursorTeamUsage.autoReportIntervalMinutes` | 启动先报一次，之后按间隔（分钟）；默认 30；`0`=仅手动 |
 
-也可在打包前改 `extension/package.json` 里对应项的 `default`（公开仓库勿提交真实密钥）。
+打包发布时自行改 `extension/package.json` 默认值后 `npm run ext:package`，再把 VSIX 放到上述地址对应位置。
 
 详情见 [extension/README.md](./extension/README.md)。
 

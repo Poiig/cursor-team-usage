@@ -517,12 +517,15 @@ export async function saveSyncResult(id, result) {
       ],
     );
   } else {
-    run(`UPDATE members SET last_error=?, last_synced_at=?, updated_at=? WHERE id=?`, [
-      result.error ?? '同步失败',
-      now,
-      now,
-      id,
-    ]);
+    // 尚无成功快照时不推进 last_synced_at，便于按到期逻辑尽快重试。
+    run(
+      `UPDATE members SET
+        last_error=?,
+        last_synced_at=CASE WHEN last_snapshot IS NULL THEN last_synced_at ELSE ? END,
+        updated_at=?
+       WHERE id=?`,
+      [result.error ?? '同步失败', now, now, id],
+    );
   }
   await persist();
   const next = await getMemberInternal(id);

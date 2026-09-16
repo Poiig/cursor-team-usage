@@ -366,8 +366,13 @@ export async function saveSyncResult(id, result) {
       ],
     );
   } else {
+    // 尚无成功快照时不推进 last_synced_at，便于按到期逻辑尽快重试。
     await db().query(
-      `UPDATE members SET last_error=$1, last_synced_at=$2, updated_at=$2 WHERE id=$3`,
+      `UPDATE members SET
+        last_error=$1,
+        last_synced_at=CASE WHEN last_snapshot IS NULL THEN last_synced_at ELSE $2 END,
+        updated_at=$2
+       WHERE id=$3`,
       [result.error ?? '同步失败', now, id],
     );
   }

@@ -84,7 +84,7 @@
             <strong>录入账号</strong>：本机导入 / 粘贴 Token；多机用 Reporter 扩展定时上报（显示名默认机器名）。
           </li>
           <li>
-            <strong>刷新</strong>：服务端按 <code>.env</code> 的 <code>AUTO_REFRESH_SEC</code>（默认 1800 秒）后台定时刷新；列表「更新模型」可立刻全量更新。
+            <strong>刷新</strong>：服务端按每个账号的上次更新时间错开刷新（间隔见 <code>AUTO_REFRESH_SEC</code>，默认 1800 秒）；上报后会立刻拉一次用量。列表「更新模型」可强制全量更新。
           </li>
           <li>
             <strong>Token</strong>：落盘 JWT 会过期。看板不刷新 Token；本机再导入，或靠扩展在 Cursor 开着时续报。

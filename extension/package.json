@@ -2,9 +2,10 @@
   "name": "cursor-team-usage-reporter",
   "displayName": "Cursor Team Usage Reporter",
   "description": "把本机 Cursor 会话 Token 上报到 cursor-team-usage 看板（Access Key 鉴权）",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "poiig",
   "license": "MIT",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/Poiig/cursor-team-usage.git"

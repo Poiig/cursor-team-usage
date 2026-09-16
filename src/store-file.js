@@ -265,7 +265,8 @@ export async function saveSyncResult(id, result) {
     member.lastSyncedAt = result.snapshot.syncedAt || now;
   } else {
     member.lastError = result.error ?? '同步失败';
-    member.lastSyncedAt = now;
+    // 尚无成功快照时不推进 lastSyncedAt，便于按到期逻辑尽快重试。
+    if (member.lastSnapshot) member.lastSyncedAt = now;
   }
   member.updatedAt = now;
   store.members[idx] = member;

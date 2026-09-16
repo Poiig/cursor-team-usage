@@ -66,6 +66,8 @@ const PUBLIC_STATIC = new Set([
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let autoRefreshTimer = null;
+/** 正在刷新的成员，避免上报与定时器重复拉同一账号。 */
+const refreshingIds = new Set();
 
 /**
  * @param {import('node:http').IncomingMessage} req
@@ -142,14 +144,72 @@ function buildTeamSummary(members) {
 
 /** @param {string} id */
 async function refreshOne(id) {
-  const member = await getMemberInternal(id);
-  if (!member) throw new Error('成员不存在');
-  try {
-    const snapshot = await fetchMemberSnapshot(member.cookieValue);
-    return await saveSyncResult(id, { snapshot });
-  } catch (e) {
-    return await saveSyncResult(id, { error: e?.message || String(e) });
+  if (refreshingIds.has(id)) {
+    const current = await getMemberInternal(id);
+    return current ? toPublicMember(current) : null;
   }
+  refreshingIds.add(id);
+  try {
+    const member = await getMemberInternal(id);
+    if (!member) throw new Error('成员不存在');
+    try {
+      const snapshot = await fetchMemberSnapshot(member.cookieValue);
+      return await saveSyncResult(id, { snapshot });
+    } catch (e) {
+      return await saveSyncResult(id, { error: e?.message || String(e) });
+    }
+  } finally {
+    refreshingIds.delete(id);
+  }
+}
+
+/**
+ * 是否已超过「距上次同步」的刷新间隔；从未同步的账号视为到期。
+ * @param {{ lastSyncedAt?: string | null }} member
+ * @param {number} intervalSec
+ * @param {number} nowMs
+ */
+function isMemberDue(member, intervalSec, nowMs = Date.now()) {
+  if (!member.lastSyncedAt) return true;
+  const t = Date.parse(member.lastSyncedAt);
+  if (!Number.isFinite(t)) return true;
+  return nowMs - t >= intervalSec * 1000;
+}
+
+/**
+ * 只刷新到期账号（按 lastSyncedAt 错开），避免整点齐刷。
+ * @param {number} [concurrency]
+ */
+async function refreshDueMembers(concurrency = 2) {
+  const sec = getServerAutoRefreshSec();
+  if (sec <= 0) return [];
+  const now = Date.now();
+  const members = await getAllMembersInternal();
+  const due = members
+    .filter((m) => !refreshingIds.has(m.id) && isMemberDue(m, sec, now))
+    .sort((a, b) => {
+      const ta = a.lastSyncedAt ? Date.parse(a.lastSyncedAt) : 0;
+      const tb = b.lastSyncedAt ? Date.parse(b.lastSyncedAt) : 0;
+      return ta - tb;
+    });
+  if (!due.length) return [];
+
+  const queue = [...due];
+  const results = [];
+  async function worker() {
+    while (queue.length) {
+      const m = queue.shift();
+      if (!m) break;
+      results.push(await refreshOne(m.id));
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()),
+  );
+  if (results.length) {
+    console.log(`自动刷新：到期 ${results.length}/${members.length} 个账号`);
+  }
+  return results;
 }
 
 /** @param {number} [concurrency] */
@@ -174,7 +234,9 @@ async function refreshAll(concurrency = 3) {
   return results;
 }
 
-/** 按当前配置重置服务端自动刷新定时器。 */
+/**
+ * 短周期扫描到期账号；AUTO_REFRESH_SEC 表示「每个账号距上次同步」的间隔，而非全员齐刷周期。
+ */
 function setupServerAutoRefresh() {
   if (autoRefreshTimer) {
     clearInterval(autoRefreshTimer);
@@ -185,10 +247,16 @@ function setupServerAutoRefresh() {
     console.log('服务端自动刷新：已关闭');
     return;
   }
-  console.log(`服务端自动刷新：每 ${sec} 秒`);
+  // 扫描周期远短于账号间隔，便于按各自 lastSyncedAt 错开触发。
+  const tickSec = Math.min(60, Math.max(15, Math.floor(sec / 12) || 15));
+  console.log(`服务端自动刷新：每账号间隔 ${sec} 秒（扫描周期 ${tickSec} 秒）`);
   autoRefreshTimer = setInterval(() => {
-    refreshAll().catch((e) => console.error('自动刷新失败:', e?.message || e));
-  }, sec * 1000);
+    refreshDueMembers().catch((e) => console.error('自动刷新失败:', e?.message || e));
+  }, tickSec * 1000);
+  // 启动后尽快补刷从未同步的账号（例如刚上报 Token 但拉取失败）。
+  setTimeout(() => {
+    refreshDueMembers().catch((e) => console.error('启动补刷失败:', e?.message || e));
+  }, 3000);
 }
 
 /** @param {string} urlPath */

@@ -90,7 +90,7 @@ function defaults() {
     databaseUrl: '',
     sqlitePath: DEFAULT_SQLITE,
     accessKey: DEFAULT_ACCESS_KEY,
-    autoRefreshSec: 1800, // 30 分钟后台刷新全员用量
+    autoRefreshSec: 1800, // 每账号距上次同步的刷新间隔（秒）
     sessionSecret: '',
   };
 }

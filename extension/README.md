@@ -8,19 +8,41 @@
 2. 若扩展不在本机访问看板，看板需监听可达地址（如 `HOST=0.0.0.0`）。
 3. 本机已登录 Cursor，并安装 **Python 3**（只读 `state.vscdb`）。
 
-## 打包与安装
+## 安装（推荐）
 
-在仓库根目录：
+不需要本机构建。PowerShell 从固定地址下载成品 VSIX 并安装到 Cursor：
+
+```powershell
+# 默认地址
+irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1 | iex
+
+# 指定 VSIX 下载地址
+iex "& { $(irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1) } -Url 'https://example.com/reporter.vsix'"
+```
+
+或克隆仓库后：
+
+```powershell
+.\scripts\install-reporter.ps1
+.\scripts\install-reporter.ps1 -Url https://example.com/reporter.vsix
+```
+
+默认 VSIX：
+
+`https://github.com/Poiig/cursor-team-usage/releases/download/extension-latest/cursor-team-usage-reporter.vsix`
+
+安装后执行 **Developer: Reload Window**。
+
+## 开发者打包
+
+仓库根目录（需要 Node 20+）。打包前可按环境改 `package.json` 里的默认 `apiBaseUrl` / `accessKey`，再：
 
 ```bash
-# 需要 Node 20+（若本机仍是 18：nvm use 20）
 npm run ext:install
 npm run ext:package
 ```
 
-生成 `extension/cursor-team-usage-reporter-0.1.0.vsix`。
-
-Cursor / VS Code 命令面板 → **Extensions: Install from VSIX…** → 选该文件。
+生成 `extension/cursor-team-usage-reporter-*.vsix`，自行放到上述下载地址对应位置。
 
 开发调试：
 

@@ -140,7 +140,12 @@ function metaChips(member) {
     tokenExpText == null
       ? ''
       : `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`;
-  return `${remainChip}${resetChip}${tokenChip}`;
+  const syncedText = formatDateTimeDot(member.lastSyncedAt);
+  const syncedChip =
+    syncedText == null
+      ? ''
+      : `<span class="chip neutral" title="上次用量更新时间">更新 ${escapeHtml(syncedText)}</span>`;
+  return `${remainChip}${resetChip}${tokenChip}${syncedChip}`;
 }
 
 function renderProgressLine(line) {
