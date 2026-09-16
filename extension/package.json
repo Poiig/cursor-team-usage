@@ -14,7 +14,8 @@
   },
   "homepage": "https://github.com/Poiig/cursor-team-usage#readme",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.85.0",
+    "node": ">=20"
   },
   "categories": [
     "Other"
@@ -69,13 +70,18 @@
   "scripts": {
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "package": "npm run compile && npx --yes @vscode/vsce package --no-dependencies",
+    "prepackage": "node -e \"const m=Number(process.versions.node.split('.')[0]); if(m<20){console.error('打包需要 Node >=20，当前 '+process.version+'。请执行: nvm use 20'); process.exit(1)}\"",
+    "package": "npm run compile && vsce package --no-dependencies",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "cursor-team-usage": "file:.."
   }
 }

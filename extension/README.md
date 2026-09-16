@@ -13,6 +13,7 @@
 在仓库根目录：
 
 ```bash
+# 需要 Node 20+（若本机仍是 18：nvm use 20）
 npm run ext:install
 npm run ext:package
 ```

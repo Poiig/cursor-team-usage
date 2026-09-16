@@ -117,6 +117,7 @@ docker login ghcr.io -u YOUR_GITHUB_USERNAME
 2. 打包并安装：
 
 ```bash
+# 需要 Node 20+（nvm use 20）
 npm run ext:install
 npm run ext:package
 # → extension/cursor-team-usage-reporter-0.1.0.vsix
