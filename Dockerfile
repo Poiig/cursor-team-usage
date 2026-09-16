@@ -7,7 +7,9 @@ WORKDIR /app
 RUN apk add --no-cache python3 \
   && ln -sf python3 /usr/bin/python
 
-COPY package.json ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 COPY src ./src
 COPY public ./public
 COPY scripts ./scripts

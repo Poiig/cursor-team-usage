@@ -1,0 +1,18 @@
+{
+  "//": "复制为 data/config.json 后按需修改，改完需重启进程。以下以 // 开头的键仅作说明，运行时会忽略。也可用同名环境变量覆盖（优先于文件）。",
+
+  "//storeDriver": "存储驱动：file = 本地 data/members.json；postgres = PostgreSQL（需配 databaseUrl 或 DATABASE_URL）",
+  "storeDriver": "file",
+
+  "//databaseUrl": "PostgreSQL 连接串。示例：postgresql://postgres:postgres@127.0.0.1:5432/cursor_team_usage 。也可用环境变量 DATABASE_URL，或 PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE 拼装。storeDriver=file 时可留空。",
+  "databaseUrl": "",
+
+  "//accessKey": "插件 /api/agent/report 鉴权密钥。留空则禁止插件上报。也可用环境变量 ACCESS_KEY 或 AGENT_ACCESS_KEY。",
+  "accessKey": "",
+
+  "//autoRefreshSec": "服务端定时刷新全员用量的间隔（秒）。0=关闭。默认 1800（30 分钟）。也可用环境变量 AUTO_REFRESH_SEC。",
+  "autoRefreshSec": 1800,
+
+  "//sessionSecret": "控制台登录 Cookie 签名密钥。首次启动若为空会自动生成并写入 data/config.json。生产环境建议设固定值或环境变量 SESSION_SECRET，避免重启后全员掉登录。",
+  "sessionSecret": ""
+}

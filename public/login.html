@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>登录 · Cursor Team Usage</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="standalone login-body">
+    <main class="login-card">
+      <h1>Cursor Team Usage</h1>
+      <p class="muted">多账号用量管理看板</p>
+      <form id="loginForm" class="login-form">
+        <label>
+          用户名
+          <input id="username" name="username" value="admin" readonly autocomplete="username" />
+        </label>
+        <label>
+          密码
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            placeholder="默认 admin"
+            autofocus
+          />
+        </label>
+        <p id="loginError" class="error-box hidden"></p>
+        <button type="submit" class="btn primary" id="btnLogin">登录</button>
+      </form>
+      <p class="hint login-hint">固定账号 <code>admin</code>，默认密码 <code>admin</code>；首次登录须立即改密。</p>
+    </main>
+    <script type="module" src="/login.js"></script>
+  </body>
+</html>

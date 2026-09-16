@@ -93,3 +93,17 @@ export function jwtFromCookie(cookieValue) {
   const parts = session.cookieValue.split('%3A%3A');
   return parts[1] || null;
 }
+
+/**
+ * 解析会话 JWT 的 exp，返回 ISO；无 exp 或已损坏则 null。
+ * @param {string} cookieValue
+ * @returns {string | null}
+ */
+export function tokenExpiresAtIso(cookieValue) {
+  const jwt = jwtFromCookie(cookieValue);
+  if (!jwt) return null;
+  const payload = decodeJwtPayload(jwt);
+  const exp = Number(payload?.exp);
+  if (!Number.isFinite(exp) || exp <= 0) return null;
+  return new Date(exp * 1000).toISOString();
+}

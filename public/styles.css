@@ -77,6 +77,11 @@ body {
   display: none !important;
 }
 
+.muted {
+  color: #9aa4b2;
+  font-size: 12px;
+}
+
 a {
   color: var(--accent);
   text-decoration: none;
@@ -157,6 +162,22 @@ h3 {
 .nav-item.active {
   background: var(--btn-primary-bg);
   color: var(--accent-fg);
+}
+
+.nav-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 6px;
+  padding: 0 10px 0 6px;
+  border-left: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.nav-user {
+  font-weight: 600;
+  color: var(--text);
 }
 
 .stats {
@@ -344,6 +365,8 @@ h3 {
   font-variant-numeric: tabular-nums;
   color: #052e1c;
   background: var(--green);
+  white-space: nowrap;
+  letter-spacing: 0.01em;
 }
 
 .chip.warn {
@@ -866,11 +889,11 @@ code {
   }
 }
 
-/* 隐私开关、设置页、官方同款请求表 */
-.toggle {
+/* 隐私模式滑动开关（对齐参考图） */
+.switch {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 13px;
   color: var(--muted, #9aa4b2);
   white-space: nowrap;
@@ -878,35 +901,72 @@ code {
   user-select: none;
 }
 
-.toggle input {
-  accent-color: #4daafc;
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
 }
 
-.list-refresh-hint {
-  margin: 0 0 12px;
-  padding: 0 2px;
+.switch-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  transition: background 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
 }
 
-.settings-card {
-  margin-top: 12px;
-  padding: 18px 20px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  max-width: 520px;
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #e8eef5;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s ease;
 }
 
-.settings-field {
-  display: grid;
-  gap: 8px;
+.switch input:checked + .switch-track {
+  background: #3d8bfd;
+  border-color: #3d8bfd;
 }
 
-.settings-label {
-  font-weight: 600;
+.switch input:checked + .switch-track::after {
+  transform: translateX(16px);
 }
 
-.settings-actions {
-  margin-top: 16px;
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid rgba(61, 139, 253, 0.55);
+  outline-offset: 2px;
+}
+
+.switch-label {
+  line-height: 1;
+}
+
+.force-password-lede {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: #c5ced8;
+  line-height: 1.5;
+}
+
+.sheet-force {
+  border-color: rgba(240, 198, 116, 0.35);
+}
+
+.sheet-force::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.error-hint {
+  color: #ff8b8b;
 }
 
 .usage-section {
@@ -956,5 +1016,50 @@ code {
 .usage-table td:nth-child(4),
 .usage-table td:nth-child(5) {
   font-variant-numeric: tabular-nums;
+}
+
+/* 登录页 */
+.login-body {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: min(400px, 100%);
+  padding: 28px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.login-card h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+}
+
+.login-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.login-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.login-form input {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+}
+
+.login-hint {
+  margin-top: 14px;
 }
 

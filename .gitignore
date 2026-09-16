@@ -1,4 +1,7 @@
 node_modules/
+extension/node_modules/
+extension/*.vsix
+extension/dist/
 data/*
 !data/.gitkeep
 *.log

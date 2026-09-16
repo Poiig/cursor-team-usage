@@ -1,0 +1,84 @@
+{
+  "name": "cursor-team-usage-reporter",
+  "displayName": "Cursor Team Usage Reporter",
+  "description": "把本机 Cursor 会话 Token 上报到 cursor-team-usage 看板（Access Key 鉴权）",
+  "version": "0.1.0",
+  "publisher": "poiig",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Poiig/cursor-team-usage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Poiig/cursor-team-usage/issues"
+  },
+  "homepage": "https://github.com/Poiig/cursor-team-usage#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Cursor Team Usage Reporter",
+      "properties": {
+        "cursorTeamUsage.apiBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3780",
+          "markdownDescription": "看板服务根地址，例如 `http://192.168.1.10:3780`（不要末尾斜杠）"
+        },
+        "cursorTeamUsage.accessKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "与服务端 `ACCESS_KEY` / `data/config.json` 的 accessKey 一致。安装后在设置里填；若要打进 VSIX，打包前改本项 `default`（公开仓库勿提交真实密钥）。"
+        },
+        "cursorTeamUsage.displayName": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "上报显示名；留空则用本机机器名（`os.hostname()`）"
+        },
+        "cursorTeamUsage.autoReportIntervalMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "markdownDescription": "自动上报间隔（分钟）。启动时先上报一次，之后按此间隔。`0` = 仅手动上报"
+        },
+        "cursorTeamUsage.refreshAfterReport": {
+          "type": "boolean",
+          "default": true,
+          "description": "上报后让看板立刻刷新该账号用量"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "cursorTeamUsage.reportNow",
+        "title": "Cursor Team Usage: 立即上报本机账号"
+      },
+      {
+        "command": "cursorTeamUsage.showStatus",
+        "title": "Cursor Team Usage: 查看上报状态"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "npm run compile && npx --yes @vscode/vsce package --no-dependencies",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "cursor-team-usage": "file:.."
+  }
+}

@@ -14,10 +14,17 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test test/unit.test.js"
+    "test": "node --test test/unit.test.js",
+    "ext:install": "npm install --prefix extension",
+    "ext:compile": "npm run compile --prefix extension",
+    "ext:watch": "npm run watch --prefix extension",
+    "ext:package": "npm run package --prefix extension"
   },
   "engines": {
     "node": ">=18"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
 }

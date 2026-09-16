@@ -10,7 +10,9 @@ import {
   normalizeManualToken,
   sessionFromCookie,
   maskToken,
+  tokenExpiresAtIso,
 } from '../src/auth.js';
+import { getStoreDriver, loadAppConfig, getAccessKey } from '../src/config.js';
 import {
   parseQuotaResponse,
   computeResetIso,
@@ -40,6 +42,49 @@ test('normalizeManualToken 接受 cookie / name=value / 裸 JWT', () => {
   );
   assert.equal(normalizeManualToken(jwt), buildCookieValue('user_abc', jwt));
   assert.equal(normalizeManualToken(''), null);
+});
+
+test('tokenExpiresAtIso 从 JWT exp 解析', () => {
+  const exp = Math.floor(Date.UTC(2026, 8, 16, 3, 0, 0) / 1000); // 2026-09-16 11:00 CST = 03:00 UTC
+  const jwt =
+    'eyJhbGciOiJub25lIn0.' +
+    Buffer.from(JSON.stringify({ sub: 'auth0|user_abc', exp })).toString('base64url') +
+    '.x';
+  const cookie = buildCookieValue('user_abc', jwt);
+  assert.equal(tokenExpiresAtIso(cookie), new Date(exp * 1000).toISOString());
+});
+
+test('未配置数据库时默认 file 存储', async () => {
+  const saved = {
+    STORE_DRIVER: process.env.STORE_DRIVER,
+    DATABASE_URL: process.env.DATABASE_URL,
+    PGHOST: process.env.PGHOST,
+  };
+  delete process.env.STORE_DRIVER;
+  delete process.env.DATABASE_URL;
+  delete process.env.PGHOST;
+  try {
+    await loadAppConfig();
+    assert.equal(getStoreDriver(), 'file');
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test('getAccessKey 读取配置/环境变量', async () => {
+  const prev = process.env.ACCESS_KEY;
+  process.env.ACCESS_KEY = 'test-key-123';
+  try {
+    await loadAppConfig();
+    assert.equal(getAccessKey(), 'test-key-123');
+  } finally {
+    if (prev === undefined) delete process.env.ACCESS_KEY;
+    else process.env.ACCESS_KEY = prev;
+    await loadAppConfig();
+  }
 });
 
 test('sessionFromCookie 抽出 userId', () => {

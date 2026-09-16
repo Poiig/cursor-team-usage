@@ -4,25 +4,22 @@
 
 const SETTINGS_KEY = 'cursor-team-usage.settings';
 
-/** @returns {{ autoRefreshSec: number, privacyMode: boolean }} */
+/** @returns {{ privacyMode: boolean }} */
 export function loadSettings() {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return {
-        autoRefreshSec: Number(parsed.autoRefreshSec) || 0,
-        privacyMode: Boolean(parsed.privacyMode),
-      };
+      return { privacyMode: Boolean(parsed.privacyMode) };
     }
   } catch {
     /* ignore corrupt settings */
   }
-  return { autoRefreshSec: 1800, privacyMode: false };
+  return { privacyMode: false };
 }
 
 /**
- * @param {Partial<{ autoRefreshSec: number, privacyMode: boolean }>} patch
+ * @param {Partial<{ privacyMode: boolean }>} patch
  */
 export function saveSettings(patch) {
   const next = { ...loadSettings(), ...patch };
@@ -32,9 +29,14 @@ export function saveSettings(patch) {
 
 export async function api(path, options = {}) {
   const res = await fetch(path, {
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   });
+  if (res.status === 401 && !path.startsWith('/api/auth/login')) {
+    location.href = '/login.html';
+    throw new Error('未登录');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
   return data;
@@ -92,6 +94,22 @@ export function daysUntil(iso) {
   const ms = t - Date.now();
   if (ms <= 0) return 0;
   return Math.max(1, Math.ceil(ms / 86400000));
+}
+
+/**
+ * 有效时间展示：2026-09-16 11.00（本地时区）。
+ * @param {string | null | undefined} iso
+ */
+export function formatDateTimeDot(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${day} ${hh}.${mm}`;
 }
 
 export function accountIdentity(member, privacyMode) {

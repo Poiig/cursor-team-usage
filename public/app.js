@@ -9,6 +9,7 @@ import {
   daysUntil,
   downloadText,
   escapeHtml,
+  formatDateTimeDot,
   formatTokens,
   loadSettings,
   money,
@@ -21,27 +22,27 @@ const els = {
   list: document.getElementById('memberList'),
   empty: document.getElementById('emptyState'),
   dialog: document.getElementById('memberDialog'),
+  forcePasswordDialog: document.getElementById('forcePasswordDialog'),
   displayName: document.getElementById('fieldDisplayName'),
   sessionToken: document.getElementById('fieldSessionToken'),
   dialogTitle: document.getElementById('dialogTitle'),
   toast: document.getElementById('toast'),
   searchInput: document.getElementById('searchInput'),
-  filterStatus: document.getElementById('filterStatus'),
   sortBy: document.getElementById('sortBy'),
   privacyMode: document.getElementById('privacyMode'),
-  autoRefreshHint: document.getElementById('autoRefreshHint'),
-  settingAutoRefresh: document.getElementById('settingAutoRefresh'),
+  currentUsername: document.getElementById('currentUsername'),
+  forceNewPassword: document.getElementById('forceNewPassword'),
+  forceNewPassword2: document.getElementById('forceNewPassword2'),
+  forcePasswordError: document.getElementById('forcePasswordError'),
   tabAccounts: document.getElementById('tabAccounts'),
-  tabSettings: document.getElementById('tabSettings'),
   tabHelp: document.getElementById('tabHelp'),
   btnAdd: document.getElementById('btnAdd'),
   btnEmptyAdd: document.getElementById('btnEmptyAdd'),
-  btnEmptyImport: document.getElementById('btnEmptyImport'),
-  btnImportLocal: document.getElementById('btnImportLocal'),
   btnImportInDialog: document.getElementById('btnImportInDialog'),
   btnRefreshAll: document.getElementById('btnRefreshAll'),
   btnExport: document.getElementById('btnExport'),
-  btnSaveSettings: document.getElementById('btnSaveSettings'),
+  btnForceChangePassword: document.getElementById('btnForceChangePassword'),
+  btnLogout: document.getElementById('btnLogout'),
   btnHelp: document.getElementById('btnHelp'),
   btnSaveMember: document.getElementById('btnSaveMember'),
   btnDialogClose: document.getElementById('btnDialogClose'),
@@ -56,10 +57,9 @@ let membersCache = [];
 let summaryCache = null;
 /** @type {{ id?: string } | null} */
 let editing = null;
-/** @type {ReturnType<typeof setInterval> | null} */
-let autoRefreshTimer = null;
 let refreshingAll = false;
 let settings = loadSettings();
+let forcePasswordRequired = false;
 
 function usedPercent(member) {
   const snap = member.lastSnapshot;
@@ -113,19 +113,34 @@ function chipClassForDays(days) {
   return 'neutral';
 }
 
-/** 紧凑色块：剩余额度 / 剩余天数。 */
+function chipClassForTokenExp(iso) {
+  const days = daysUntil(iso);
+  if (days == null) return 'neutral';
+  if (days <= 0) return 'danger';
+  if (days <= 2) return 'warn';
+  return 'neutral';
+}
+
+/** 紧凑色块：剩余额度 / 额度重置时间 / Token 有效时间。 */
 function metaChips(member) {
   const remain = remainingPercent(member);
-  const days = daysUntil(member.lastSnapshot?.window?.resetIso);
+  const resetIso = member.lastSnapshot?.window?.resetIso;
+  const resetText = formatDateTimeDot(resetIso);
+  const resetDays = daysUntil(resetIso);
+  const tokenExpText = formatDateTimeDot(member.tokenExpiresAt);
   const remainChip =
     remain == null
       ? ''
       : `<span class="chip ${chipClassForRemaining(remain)}" title="剩余额度 ${remain.toFixed(1)}%">${remain.toFixed(0)}%</span>`;
-  const daysChip =
-    days == null
+  const resetChip =
+    resetText == null
       ? ''
-      : `<span class="chip ${chipClassForDays(days)}" title="距重置还有 ${days} 天">${days}d</span>`;
-  return `${remainChip}${daysChip}`;
+      : `<span class="chip ${chipClassForDays(resetDays)}" title="额度重置时间">${escapeHtml(resetText)}</span>`;
+  const tokenChip =
+    tokenExpText == null
+      ? ''
+      : `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`;
+  return `${remainChip}${resetChip}${tokenChip}`;
 }
 
 function renderProgressLine(line) {
@@ -248,10 +263,8 @@ function renderSummary(summary) {
 
 function filteredMembers() {
   const q = (els.searchInput.value || '').trim().toLowerCase();
-  const status = els.filterStatus.value;
   const sort = els.sortBy?.value || 'name';
   const list = membersCache.filter((m) => {
-    if (status !== 'all' && memberStatus(m) !== status) return false;
     if (!q) return true;
     return `${m.displayName} ${m.email || ''} ${m.userId || ''}`.toLowerCase().includes(q);
   });
@@ -290,8 +303,9 @@ function renderList() {
 
 function showView(view) {
   els.tabAccounts.classList.toggle('hidden', view !== 'accounts');
-  els.tabSettings.classList.toggle('hidden', view !== 'settings');
   els.tabHelp.classList.toggle('hidden', view !== 'help');
+  // 说明页不需要顶部汇总条。
+  if (els.summary) els.summary.classList.toggle('hidden', view !== 'accounts');
   document.querySelectorAll('.nav-item').forEach((b) => {
     b.classList.toggle('active', b.dataset.tab === view);
   });
@@ -307,12 +321,11 @@ async function load() {
 async function refreshAll(silent = false) {
   if (refreshingAll) return;
   refreshingAll = true;
-  setBusy(els.btnRefreshAll, true, '刷新中…');
+  setBusy(els.btnRefreshAll, true, '更新中…');
   try {
     await api('/api/refresh-all', { method: 'POST', body: '{}' });
     await load();
-    toast(silent ? '已自动刷新' : '全部账号已刷新');
-    updateAutoRefreshHint(true);
+    toast(silent ? '已自动更新' : '全部账号已更新');
   } catch (e) {
     toast(e.message || String(e));
   } finally {
@@ -321,37 +334,31 @@ async function refreshAll(silent = false) {
   }
 }
 
-function updateAutoRefreshHint(justRan = false) {
-  if (!els.autoRefreshHint) return;
-  const sec = Number(settings.autoRefreshSec || 0);
-  if (!sec) {
-    els.autoRefreshHint.textContent = '自动刷新已关闭（可在设置中开启）';
-    return;
-  }
-  const mins = sec / 60;
-  els.autoRefreshHint.textContent = justRan
-    ? `已刷新 · 下一次约 ${mins} 分钟后`
-    : `自动刷新：每 ${mins} 分钟（设置页可改）`;
-}
-
-function setupAutoRefresh() {
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-  }
-  updateAutoRefreshHint(false);
-  const sec = Number(settings.autoRefreshSec || 0);
-  if (!sec) return;
-  autoRefreshTimer = setInterval(() => {
-    if (document.hidden) return;
-    refreshAll(true);
-  }, sec * 1000);
-}
-
 function applySettingsToForm() {
   if (els.privacyMode) els.privacyMode.checked = Boolean(settings.privacyMode);
-  if (els.settingAutoRefresh) {
-    els.settingAutoRefresh.value = String(settings.autoRefreshSec || 0);
+}
+
+/** 默认密码登录后的不可关闭改密弹窗。 */
+function openForcePasswordDialog() {
+  if (!els.forcePasswordDialog) return;
+  if (els.forceNewPassword) els.forceNewPassword.value = '';
+  if (els.forceNewPassword2) els.forceNewPassword2.value = '';
+  els.forcePasswordError?.classList.add('hidden');
+  if (!els.forcePasswordDialog.open) els.forcePasswordDialog.showModal();
+  els.forceNewPassword?.focus();
+}
+
+/** 启动时检查是否须强制改密。 */
+async function ensurePasswordPolicy() {
+  try {
+    const me = await api('/api/auth/me');
+    if (els.currentUsername) els.currentUsername.textContent = me.username || '—';
+    forcePasswordRequired = Boolean(me.mustChangePassword);
+    if (forcePasswordRequired || sessionStorage.getItem('ctu_force_password') === '1') {
+      openForcePasswordDialog();
+    }
+  } catch {
+    /* 未登录时由 api 跳转登录页 */
   }
 }
 
@@ -380,7 +387,7 @@ async function importLocalCursor(displayName) {
 
 document.querySelectorAll('.nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
-    showView(btn.dataset.tab === 'settings' ? 'settings' : btn.dataset.tab === 'help' ? 'help' : 'accounts');
+    showView(btn.dataset.tab === 'help' ? 'help' : 'accounts');
   });
 });
 
@@ -390,7 +397,6 @@ els.btnEmptyAdd.addEventListener('click', () => openMemberDialog());
 els.btnDialogClose.addEventListener('click', closeMemberDialog);
 els.btnDialogCancel.addEventListener('click', closeMemberDialog);
 els.searchInput.addEventListener('input', renderList);
-els.filterStatus.addEventListener('change', renderList);
 els.sortBy?.addEventListener('change', renderList);
 
 els.privacyMode?.addEventListener('change', () => {
@@ -398,11 +404,64 @@ els.privacyMode?.addEventListener('change', () => {
   renderList();
 });
 
-els.btnSaveSettings?.addEventListener('click', () => {
-  const sec = Number(els.settingAutoRefresh?.value || 0);
-  settings = saveSettings({ autoRefreshSec: sec });
-  setupAutoRefresh();
-  toast('设置已保存');
+els.btnForceChangePassword?.addEventListener('click', async () => {
+  const p1 = els.forceNewPassword?.value || '';
+  const p2 = els.forceNewPassword2?.value || '';
+  if (els.forcePasswordError) {
+    els.forcePasswordError.classList.add('hidden');
+    els.forcePasswordError.textContent = '';
+  }
+  if (p1.length < 4) {
+    if (els.forcePasswordError) {
+      els.forcePasswordError.textContent = '密码至少 4 位';
+      els.forcePasswordError.classList.remove('hidden');
+    }
+    return;
+  }
+  if (p1 !== p2) {
+    if (els.forcePasswordError) {
+      els.forcePasswordError.textContent = '两次输入不一致';
+      els.forcePasswordError.classList.remove('hidden');
+    }
+    return;
+  }
+  setBusy(els.btnForceChangePassword, true, '保存中…');
+  try {
+    await api('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ password: p1 }),
+    });
+    sessionStorage.removeItem('ctu_force_password');
+    forcePasswordRequired = false;
+    if (els.forcePasswordDialog?.open) els.forcePasswordDialog.close();
+    toast('密码已更新，可继续使用');
+  } catch (e) {
+    if (els.forcePasswordError) {
+      els.forcePasswordError.textContent = e.message || String(e);
+      els.forcePasswordError.classList.remove('hidden');
+    } else {
+      toast(e.message || String(e));
+    }
+  } finally {
+    setBusy(els.btnForceChangePassword, false);
+  }
+});
+
+// 强制改密弹窗不允许 Esc / 点遮罩关闭。
+els.forcePasswordDialog?.addEventListener('cancel', (e) => {
+  if (forcePasswordRequired || sessionStorage.getItem('ctu_force_password') === '1') {
+    e.preventDefault();
+  }
+});
+
+els.btnLogout?.addEventListener('click', async () => {
+  try {
+    await api('/api/auth/logout', { method: 'POST', body: '{}' });
+  } catch {
+    /* ignore */
+  }
+  sessionStorage.removeItem('ctu_force_password');
+  location.href = '/login.html';
 });
 
 els.btnExport?.addEventListener('click', async () => {
@@ -420,28 +479,6 @@ els.btnExport?.addEventListener('click', async () => {
     toast(e.message || String(e));
   } finally {
     setBusy(els.btnExport, false);
-  }
-});
-
-els.btnImportLocal.addEventListener('click', async () => {
-  setBusy(els.btnImportLocal, true, '导入中…');
-  try {
-    await importLocalCursor();
-  } catch (e) {
-    toast(e.message || String(e));
-  } finally {
-    setBusy(els.btnImportLocal, false);
-  }
-});
-
-els.btnEmptyImport.addEventListener('click', async () => {
-  setBusy(els.btnEmptyImport, true, '导入中…');
-  try {
-    await importLocalCursor();
-  } catch (e) {
-    toast(e.message || String(e));
-  } finally {
-    setBusy(els.btnEmptyImport, false);
   }
 });
 
@@ -543,6 +580,6 @@ els.list.addEventListener('click', async (event) => {
 });
 
 applySettingsToForm();
-load()
-  .then(() => setupAutoRefresh())
+ensurePasswordPolicy()
+  .then(() => load())
   .catch((e) => toast(e.message || String(e)));

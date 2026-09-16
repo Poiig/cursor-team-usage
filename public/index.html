@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Cursor Team Usage</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.png" type="image/png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="standalone">
@@ -23,8 +25,11 @@
           </div>
           <nav class="app-nav" aria-label="Main">
             <button type="button" class="nav-item active" data-tab="accounts">账号</button>
-            <button type="button" class="nav-item" data-tab="settings">设置</button>
             <button type="button" class="nav-item" data-tab="help">说明</button>
+            <span class="nav-session">
+              <span id="currentUsername" class="nav-user">—</span>
+              <button type="button" class="btn-link-inline" id="btnLogout">退出</button>
+            </span>
           </nav>
         </div>
       </header>
@@ -36,55 +41,28 @@
           <h2>账号列表</h2>
           <div class="toolbar">
             <input type="search" id="searchInput" placeholder="搜索账号名称 / 邮箱…" />
-            <select id="filterStatus" aria-label="状态筛选">
-              <option value="all">全部</option>
-              <option value="ok">正常</option>
-              <option value="warn">偏高</option>
-              <option value="error">失败</option>
-            </select>
             <select id="sortBy" aria-label="排序">
               <option value="name">按名称</option>
               <option value="remaining">按剩余额度</option>
               <option value="used">按已用额度</option>
               <option value="reset">按重置时间</option>
             </select>
-            <label class="toggle" title="开启后邮箱将脱敏显示">
+            <label class="switch" title="开启后邮箱将脱敏显示">
               <input type="checkbox" id="privacyMode" />
-              <span>隐私模式</span>
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-label">隐私模式</span>
             </label>
             <button type="button" class="btn" id="btnExport" title="导出账号列表 JSON">导出</button>
-            <button type="button" class="btn" id="btnRefreshAll" title="全部刷新">刷新</button>
-            <button type="button" class="btn" id="btnImportLocal">本机导入</button>
+            <button type="button" class="btn" id="btnRefreshAll" title="刷新全部账号用量">更新模型</button>
             <button type="button" class="btn primary" id="btnAdd">+ 添加账号</button>
           </div>
         </div>
-        <p id="autoRefreshHint" class="toolbar-hint list-refresh-hint"></p>
         <div id="memberList" class="account-list"></div>
         <div id="emptyState" class="empty hidden">
           <h3>还没有账号</h3>
-          <p>本机可一键导入当前 Cursor 登录态，或粘贴其他账号的会话 Token。</p>
+          <p>点击「添加账号」可从本机 Cursor 导入，或粘贴其他账号的会话 Token。</p>
           <div class="empty-actions">
-            <button type="button" class="btn primary" id="btnEmptyImport">从本机 Cursor 导入</button>
-            <button type="button" class="btn" id="btnEmptyAdd">粘贴 Token 添加</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel settings-panel hidden" id="tabSettings">
-        <h2>设置</h2>
-        <div class="settings-card">
-          <label class="settings-field">
-            <span class="settings-label">自动刷新频率</span>
-            <select id="settingAutoRefresh" aria-label="自动刷新频率">
-              <option value="0">手动刷新</option>
-              <option value="900">每 15 分钟</option>
-              <option value="1800">每 30 分钟</option>
-              <option value="3600">每 60 分钟</option>
-            </select>
-            <span class="hint">仅影响本机浏览器；保存后立即生效，列表页不再放置该选项。</span>
-          </label>
-          <div class="settings-actions">
-            <button type="button" class="btn primary" id="btnSaveSettings">保存设置</button>
+            <button type="button" class="btn primary" id="btnEmptyAdd">+ 添加账号</button>
           </div>
         </div>
       </section>
@@ -93,22 +71,31 @@
         <h2>关于本看板</h2>
         <ol class="help-steps">
           <li>
-            <strong>定位</strong>：在本机并排管理多个 Cursor 账号的用量与花费，不是官方 Team Admin。
+            <strong>定位</strong>：本地 / 内网并排看多个 Cursor 账号的用量与花费，不是官方 Team Admin。
           </li>
           <li>
-            <strong>面板指标</strong>：Total usage / Cursor Models / Other Models / Grok Bot（详情页），以及 Today · Yesterday · Last 30 Days。
+            <strong>登录</strong>：固定账号 <code>admin</code>，默认密码 <code>admin</code>，首次登录必须改密。
           </li>
           <li>
-            <strong>请求明细</strong>：详情页分页拉取与
+            <strong>服务配置</strong>：改服务器上的 <code>data/config.json</code>（模板
+            <code>config.example.json</code>）或环境变量，改完重启；无网页设置页。
+          </li>
+          <li>
+            <strong>录入账号</strong>：本机导入 / 粘贴 Token；多机用 Reporter 扩展定时上报（显示名默认机器名）。
+          </li>
+          <li>
+            <strong>刷新</strong>：服务端按 <code>data/config.json</code> 的 <code>autoRefreshSec</code>（默认 1800 秒）后台定时刷新；列表「更新模型」可立刻全量更新。
+          </li>
+          <li>
+            <strong>Token</strong>：落盘 JWT 会过期。看板不刷新 Token；本机再导入，或靠扩展在 Cursor 开着时续报。
+          </li>
+          <li>
+            <strong>面板指标</strong>：Total / Cursor Models / Other Models / Grok Bot（详情页），以及 Today · Yesterday · Last 30 Days。
+          </li>
+          <li>
+            <strong>请求明细</strong>：详情页与
             <a href="https://cursor.com/dashboard/usage" target="_blank" rel="noreferrer">官方用量页</a>
-            同源的逐次请求。
-          </li>
-          <li>
-            <strong>本机导入</strong>：读取 Cursor <code>state.vscdb</code> 的
-            <code>cursorAuth/accessToken</code>；也可粘贴 Cookie。
-          </li>
-          <li>
-            <strong>Token</strong>：JWT 会过期；失效后重新导入或粘贴即可。
+            同源逐次请求。
           </li>
         </ol>
       </section>
@@ -128,18 +115,45 @@
           会话 Token
           <textarea
             id="fieldSessionToken"
-            rows="4"
-            placeholder="WorkosCursorSessionToken（cookie 值或 name=value）"
+            rows="5"
+            placeholder="粘贴 WorkosCursorSessionToken 的完整值&#10;&#10;获取步骤：&#10;1. 浏览器打开 https://cursor.com/dashboard 并登录目标账号&#10;2. F12 → Application（应用）→ Cookies → https://cursor.com&#10;3. 找到 WorkosCursorSessionToken，复制 Value&#10;4. 整段粘贴到这里（可含 user_xxx%3A%3AeyJ… 或 name=value）"
             autocomplete="off"
             spellcheck="false"
           ></textarea>
         </label>
-        <p class="hint">仅保存在本机 data/members.json。本机账号可直接点「从本机 Cursor 导入」。</p>
+        <p class="hint">
+          Token 等同登录态，保存在服务端名册（默认 <code>data/members.json</code>）。本机已登录 Cursor 时可直接点「从本机 Cursor 导入」，无需粘贴。
+        </p>
         <footer class="sheet-footer">
           <button type="button" class="btn" id="btnImportInDialog">从本机 Cursor 导入</button>
           <div class="sheet-footer-right">
             <button type="button" class="btn" id="btnDialogCancel">取消</button>
             <button type="button" class="btn primary" id="btnSaveMember">保存并同步</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="forcePasswordDialog" class="sheet sheet-force" data-force="1">
+      <div class="sheet-body">
+        <header>
+          <h3>请修改默认密码</h3>
+        </header>
+        <p class="force-password-lede">
+          当前仍在使用默认密码 <code>admin</code>。为安全起见，须先改密才能继续使用看板。
+        </p>
+        <label>
+          新密码
+          <input id="forceNewPassword" type="password" placeholder="至少 4 位，勿再用 admin" autocomplete="new-password" />
+        </label>
+        <label>
+          确认新密码
+          <input id="forceNewPassword2" type="password" placeholder="再输入一次" autocomplete="new-password" />
+        </label>
+        <p class="hint error-hint hidden" id="forcePasswordError"></p>
+        <footer class="sheet-footer">
+          <div class="sheet-footer-right">
+            <button type="button" class="btn primary" id="btnForceChangePassword">保存新密码</button>
           </div>
         </footer>
       </div>

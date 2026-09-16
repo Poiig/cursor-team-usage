@@ -16,9 +16,27 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "3780"
+      # 默认 file；改用 Postgres 时取消下行与 postgres 服务注释
+      # STORE_DRIVER: postgres
+      # DATABASE_URL: postgresql://postgres:postgres@postgres:5432/cursor_team_usage
       # TZ: "Asia/Shanghai"
     volumes:
-      # 持久化账号名册与会话 Token
+      # file 存储：账号名册与会话 Token
       - ./data:/app/data
-    # 可选：限制仅本机访问（取消下行注释，并改 ports 为 "127.0.0.1:3780:3780"）
-    # network_mode: bridge
+    # depends_on:
+    #   - postgres
+
+  # postgres:
+  #   image: postgres:16-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: postgres
+  #     POSTGRES_DB: cursor_team_usage
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+
+# volumes:
+#   pgdata:

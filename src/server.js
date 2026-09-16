@@ -1,5 +1,5 @@
 /**
- * 本地 HTTP 服务：静态看板 + 成员 CRUD + 用量同步。
+ * 本地 HTTP 服务：静态看板 + 成员 CRUD + 用量同步 + 登录鉴权。
  * 默认只监听 127.0.0.1，避免会话 Token 被局域网误访问。
  */
 
@@ -7,31 +7,65 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  getListenConfig,
+  getServerAutoRefreshSec,
+  getStoreDriver,
+  loadAppConfig,
+} from './config.js';
+import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
 import { fetchMemberSnapshot, fetchMemberUsageEvents } from './cursor-api.js';
 import { probeLocalCursorSession, resolveLocalCursorSession } from './local-session.js';
+import {
+  clearSessionCookie,
+  issueSessionToken,
+  readSessionFromRequest,
+  setSessionCookie,
+} from './session-auth.js';
 import {
   addMember,
   deleteMember,
   getAllMembersInternal,
   getMemberInternal,
+  initStore,
   listMembers,
   saveSyncResult,
   toPublicMember,
   updateMember,
+  upsertMemberBySession,
 } from './store.js';
+import {
+  authenticateUser,
+  changeAdminPassword,
+  initUsers,
+  mustChangePasswordFor,
+} from './users.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-const HOST = process.env.HOST || '127.0.0.1';
-const PORT = Number(process.env.PORT || 3780);
+const { host: HOST, port: PORT } = getListenConfig();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
   '.json': 'application/json; charset=utf-8',
 };
+
+/** 无需登录可访问的静态资源前缀/文件。 */
+const PUBLIC_STATIC = new Set([
+  '/login.html',
+  '/login.js',
+  '/styles.css',
+  '/favicon.svg',
+  '/favicon.png',
+]);
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let autoRefreshTimer = null;
 
 /**
  * @param {import('node:http').IncomingMessage} req
@@ -49,18 +83,19 @@ async function readBody(req) {
  * @param {import('node:http').ServerResponse} res
  * @param {number} status
  * @param {unknown} data
+ * @param {Record<string, string>} [extraHeaders]
  */
-function sendJson(res, status, data) {
+function sendJson(res, status, data, extraHeaders = {}) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    ...extraHeaders,
   });
   res.end(body);
 }
 
 /**
- * 从已缓存快照汇总全部账号指标，避免列表接口再打 cursor.com。
  * @param {Awaited<ReturnType<typeof listMembers>>} members
  */
 function buildTeamSummary(members) {
@@ -105,10 +140,7 @@ function buildTeamSummary(members) {
   };
 }
 
-/**
- * 同步一名成员；失败写 lastError，不中断其余成员。
- * @param {string} id
- */
+/** @param {string} id */
 async function refreshOne(id) {
   const member = await getMemberInternal(id);
   if (!member) throw new Error('成员不存在');
@@ -120,10 +152,7 @@ async function refreshOne(id) {
   }
 }
 
-/**
- * 并发刷新全员；限制并发避免触发 cursor.com 风控。
- * @param {number} [concurrency]
- */
+/** @param {number} [concurrency] */
 async function refreshAll(concurrency = 3) {
   const members = await getAllMembersInternal();
   const queue = [...members];
@@ -145,9 +174,24 @@ async function refreshAll(concurrency = 3) {
   return results;
 }
 
-/**
- * @param {string} urlPath
- */
+/** 按当前配置重置服务端自动刷新定时器。 */
+function setupServerAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+  const sec = getServerAutoRefreshSec();
+  if (sec <= 0) {
+    console.log('服务端自动刷新：已关闭');
+    return;
+  }
+  console.log(`服务端自动刷新：每 ${sec} 秒`);
+  autoRefreshTimer = setInterval(() => {
+    refreshAll().catch((e) => console.error('自动刷新失败:', e?.message || e));
+  }, sec * 1000);
+}
+
+/** @param {string} urlPath */
 async function serveStatic(urlPath) {
   const safe = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, '');
   const filePath = path.join(PUBLIC_DIR, safe === path.sep ? 'index.html' : safe);
@@ -161,14 +205,113 @@ async function serveStatic(urlPath) {
   }
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {string} pathname
+ */
+function requiresConsoleAuth(pathname, method) {
+  if (pathname === '/api/health') return false;
+  if (pathname === '/api/auth/login' && method === 'POST') return false;
+  if (pathname === '/api/agent/report') return false;
+  if (pathname.startsWith('/api/')) return true;
+  if (pathname === '/' || pathname === '/index.html' || pathname === '/detail.html') return true;
+  if (pathname === '/app.js' || pathname === '/detail.js' || pathname === '/shared.js') return true;
+  return false;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${HOST}:${PORT}`);
     const { pathname } = url;
     const method = req.method || 'GET';
 
+    // 未登录访问受保护页：API 401，页面跳转登录。
+    if (requiresConsoleAuth(pathname, method)) {
+      const session = readSessionFromRequest(req);
+      if (!session) {
+        if (pathname.startsWith('/api/')) {
+          return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
+        }
+        res.writeHead(302, { Location: '/login.html' });
+        res.end();
+        return;
+      }
+      req.consoleUser = session.username;
+    }
+
     if (method === 'GET' && pathname === '/api/health') {
+      return sendJson(res, 200, {
+        ok: true,
+        store: getStoreDriver(),
+        agentAuth: isAccessKeyConfigured(),
+        autoRefreshSec: getServerAutoRefreshSec(),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/login') {
+      const body = await readBody(req);
+      const user = authenticateUser(body?.username, body?.password);
+      if (!user) {
+        const err = new Error('用户名或密码错误');
+        err.status = 401;
+        throw err;
+      }
+      const token = issueSessionToken(user.username);
+      setSessionCookie(res, token);
+      return sendJson(res, 200, {
+        ok: true,
+        username: user.username,
+        mustChangePassword: Boolean(user.mustChangePassword),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/logout') {
+      clearSessionCookie(res);
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (method === 'GET' && pathname === '/api/auth/me') {
+      const session = readSessionFromRequest(req);
+      if (!session) return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
+      return sendJson(res, 200, {
+        username: 'admin',
+        mustChangePassword: mustChangePasswordFor(),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/change-password') {
+      const session = readSessionFromRequest(req);
+      if (!session) {
+        const err = new Error('未登录');
+        err.status = 401;
+        throw err;
+      }
+      const body = await readBody(req);
+      const user = await changeAdminPassword(String(body?.password || ''));
+      return sendJson(res, 200, { ok: true, user });
+    }
+
+    if (method === 'POST' && pathname === '/api/agent/report') {
+      assertAccessKey(req);
+      const body = await readBody(req);
+      const sessionToken = String(body?.sessionToken || '').trim();
+      if (!sessionToken) throw new Error('缺少 sessionToken');
+      const { member, created } = await upsertMemberBySession({
+        sessionToken,
+        displayName: body?.displayName,
+        email: body?.email,
+      });
+      const shouldRefresh = body?.refresh !== false;
+      let refreshed = member;
+      if (shouldRefresh && member?.id) {
+        refreshed = await refreshOne(member.id);
+      }
+      return sendJson(res, created ? 201 : 200, {
+        ok: true,
+        created,
+        member: refreshed,
+        hostname: body?.hostname || null,
+      });
     }
 
     if (method === 'GET' && pathname === '/api/members') {
@@ -182,14 +325,11 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && pathname === '/api/members') {
       const body = await readBody(req);
-      // 本机导入：服务端读 Cursor 登录态，前端不必经手完整 token。
       if (body?.fromLocalCursor) {
         const local = await resolveLocalCursorSession();
         if (!local) throw new Error('本机未找到有效的 Cursor 登录态');
         const displayName =
-          String(body.displayName || '').trim() ||
-          local.email ||
-          local.userId;
+          String(body.displayName || '').trim() || local.email || local.userId;
         const member = await addMember({
           displayName,
           sessionToken: local.cookieValue,
@@ -204,13 +344,11 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const member = await addMember(body);
-      // 新增后立刻拉一次，看板马上有数；失败也保留名册条目。
       const refreshed = await refreshOne(member.id);
       return sendJson(res, 201, { member: refreshed });
     }
 
     if (method === 'GET' && pathname === '/api/export/accounts') {
-      // 本机备份：含完整 Token，仅供可信环境导出再导入。
       const members = await getAllMembersInternal();
       return sendJson(res, 200, {
         app: 'cursor-team-usage',
@@ -277,7 +415,19 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (method === 'GET' || method === 'HEAD') {
+      if (pathname === '/' || pathname === '/index.html') {
+        if (!readSessionFromRequest(req)) {
+          res.writeHead(302, { Location: '/login.html' });
+          res.end();
+          return;
+        }
+      }
       const rel = pathname === '/' ? '/index.html' : pathname;
+      if (!PUBLIC_STATIC.has(rel) && requiresConsoleAuth(rel, method) && !readSessionFromRequest(req)) {
+        res.writeHead(302, { Location: '/login.html' });
+        res.end();
+        return;
+      }
       const file = await serveStatic(rel);
       if (file) {
         res.writeHead(200, { 'Content-Type': file.type });
@@ -289,12 +439,21 @@ const server = http.createServer(async (req, res) => {
 
     sendJson(res, 405, { error: 'Method not allowed' });
   } catch (e) {
-    const status = /不存在/.test(e?.message || '') ? 404 : 400;
+    const status = e?.status || (/不存在/.test(e?.message || '') ? 404 : 400);
     sendJson(res, status, { error: e?.message || String(e) });
   }
 });
 
+await loadAppConfig();
+await initUsers();
+await initStore();
+setupServerAutoRefresh();
+
 server.listen(PORT, HOST, () => {
   console.log(`cursor-team-usage → http://${HOST}:${PORT}`);
-  console.log('多账号模式：每个账号一份 WorkosCursorSessionToken');
+  console.log(`存储：${getStoreDriver()}`);
+  console.log(
+    `插件上报鉴权：${isAccessKeyConfigured() ? '已启用 Access Key' : '未配置（/api/agent/report 不可用）'}`,
+  );
+    console.log('控制台登录：默认 admin / admin（首次登录须改密）');
 });
