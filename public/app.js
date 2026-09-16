@@ -10,9 +10,11 @@ import {
   downloadText,
   escapeHtml,
   formatDateTimeDot,
+  formatSpendPart,
   formatTokens,
   loadSettings,
   money,
+  resolveSpendRow,
   saveSettings,
   setBusy,
 } from './shared.js';
@@ -108,8 +110,9 @@ function chipClassForRemaining(remain) {
 
 function chipClassForDays(days) {
   if (days == null) return 'neutral';
-  if (days <= 2) return 'danger';
-  if (days <= 7) return 'warn';
+  // ≤5 天红；低于 10 天（6–9）黄
+  if (days <= 5) return 'danger';
+  if (days < 10) return 'warn';
   return 'neutral';
 }
 
@@ -121,7 +124,7 @@ function chipClassForTokenExp(iso) {
   return 'neutral';
 }
 
-/** 紧凑色块：剩余额度 / 额度重置时间 / Token 有效时间。 */
+/** 紧凑色块：剩余额度 / 到期天数+有效期 / Token；更新时间只在详情页展示。 */
 function metaChips(member) {
   const remain = remainingPercent(member);
   const resetIso = member.lastSnapshot?.window?.resetIso;
@@ -132,20 +135,18 @@ function metaChips(member) {
     remain == null
       ? ''
       : `<span class="chip ${chipClassForRemaining(remain)}" title="剩余额度 ${remain.toFixed(1)}%">${remain.toFixed(0)}%</span>`;
+  // 天数放在有效期（额度重置日）之前，便于扫一眼还剩多久
   const resetChip =
     resetText == null
       ? ''
-      : `<span class="chip ${chipClassForDays(resetDays)}" title="额度重置时间">${escapeHtml(resetText)}</span>`;
+      : `<span class="chip ${chipClassForDays(resetDays)}" title="额度有效期 / 重置时间">${
+          resetDays != null ? `${resetDays}天 · ` : ''
+        }${escapeHtml(resetText)}</span>`;
   const tokenChip =
     tokenExpText == null
       ? ''
       : `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`;
-  const syncedText = formatDateTimeDot(member.lastSyncedAt);
-  const syncedChip =
-    syncedText == null
-      ? ''
-      : `<span class="chip neutral" title="上次用量更新时间">更新 ${escapeHtml(syncedText)}</span>`;
-  return `${remainChip}${resetChip}${tokenChip}${syncedChip}`;
+  return `${remainChip}${resetChip}${tokenChip}`;
 }
 
 function renderProgressLine(line) {
@@ -169,12 +170,15 @@ function renderProgressLine(line) {
 }
 
 function renderSpendRow(line) {
-  const cell = (label, part) => `
+  const cell = (label, part) => {
+    const text = formatSpendPart(part);
+    return `
     <div class="spend-cell">
       <span class="k">${label}</span>
-      <span class="v" title="${escapeHtml(part?.text || 'No data')}">${escapeHtml(part?.text || 'No data')}</span>
+      <span class="v" title="${escapeHtml(text)}">${escapeHtml(text)}</span>
     </div>
   `;
+  };
   return `
     <div class="spend-row">
       ${cell('Today', line.today)}
@@ -215,7 +219,8 @@ function renderAccountRow(member) {
     ? `<div class="error-box">${escapeHtml(member.lastError)}</div>`
     : '';
 
-  const { progress, spend } = splitLines(snap?.panelLines, { includeGrok: false });
+  const { progress, spend: panelSpend } = splitLines(snap?.panelLines, { includeGrok: false });
+  const spend = resolveSpendRow(snap, panelSpend);
   const meters =
     progress.length > 0
       ? `<div class="panel-lines">${progress.map(renderProgressLine).join('')}</div>`
@@ -252,15 +257,15 @@ function renderAccountRow(member) {
 function renderSummary(summary) {
   const s = summary || {
     memberCount: 0,
-    cycleBilledDollars: 0,
-    cycleRequests: 0,
-    cycleTokens: 0,
+    todayBilledDollars: 0,
+    todayRequests: 0,
+    todayTokens: 0,
     syncedOk: 0,
     syncedError: 0,
   };
   els.summary.innerHTML = `
-    <article class="stat"><p class="label">账号</p><p class="value">${s.memberCount}</p><p class="note">${money(s.cycleBilledDollars)} credits</p></article>
-    <article class="stat"><p class="label">额度 / 用量</p><p class="value">${s.cycleRequests ?? 0}</p><p class="note">${formatTokens(s.cycleTokens)} tokens</p></article>
+    <article class="stat"><p class="label">账号</p><p class="value">${s.memberCount}</p><p class="note">${money(s.todayBilledDollars)} 今日</p></article>
+    <article class="stat"><p class="label">今日用量</p><p class="value">${s.todayRequests ?? 0}<span class="unit">次</span></p><p class="note">${formatTokens(s.todayTokens)} tokens</p></article>
     <article class="stat"><p class="label">正常</p><p class="value">${s.syncedOk ?? 0}</p><p class="note">已完成同步</p></article>
     <article class="stat"><p class="label">失败</p><p class="value ${(s.syncedError || 0) > 0 ? 'danger' : ''}">${s.syncedError ?? 0}</p><p class="note">需更新 Token</p></article>
   `;

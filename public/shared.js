@@ -57,20 +57,50 @@ export function money(n, digits = 2) {
 
 export function formatTokens(n) {
   if (n == null || !Number.isFinite(n) || n <= 0) return '—';
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return String(Math.round(n));
-}
-
-/** 官方用量页 Tokens 列：≥1万用「万」。 */
-export function formatTokensWan(n) {
-  if (n == null || !Number.isFinite(n) || n <= 0) return '—';
-  if (n >= 10000) {
-    const v = n / 10000;
+  // 中文常见量级：≥1 亿用「亿」，≥1 万用「万」
+  if (n >= 1e8) {
+    const v = n / 1e8;
+    const text = v >= 100 ? v.toFixed(0) : v.toFixed(2).replace(/\.?0+$/, '');
+    return `${text}亿`;
+  }
+  if (n >= 1e4) {
+    const v = n / 1e4;
     const text = v >= 100 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, '');
     return `${text}万`;
   }
   return String(Math.round(n));
+}
+
+/**
+ * Today / Yesterday / Last 30 单元格文案：金额 · 调用次数 · tokens。
+ * @param {{ text?: string, dollars?: number | null, tokens?: number | null, requests?: number | null } | null | undefined} part
+ */
+export function formatSpendPart(part) {
+  if (!part || part.text === 'No data') return part?.text || 'No data';
+  if (part.requests != null && part.requests > 0 && part.dollars != null) {
+    const tokenLabel = formatTokens(part.tokens);
+    const tokenText = tokenLabel === '—' ? '0' : tokenLabel;
+    return `$${Number(part.dollars).toFixed(2)} · ${part.requests}次 · ${tokenText}`;
+  }
+  return part.text || 'No data';
+}
+
+/**
+ * 优先用 snapshot.spend（含 requests）渲染花费行，不依赖 panelLines 旧文案。
+ * @param {{ spend?: { today?: object, yesterday?: object, last30?: object } | null } | null | undefined} snap
+ * @param {object | null | undefined} panelSpend
+ */
+export function resolveSpendRow(snap, panelSpend) {
+  const s = snap?.spend;
+  if (s && (s.today || s.yesterday || s.last30)) {
+    return { type: 'spend-row', today: s.today, yesterday: s.yesterday, last30: s.last30 };
+  }
+  return panelSpend || null;
+}
+
+/** 官方用量页 Tokens 列：与 formatTokens 相同（万 / 亿）。 */
+export function formatTokensWan(n) {
+  return formatTokens(n);
 }
 
 /**

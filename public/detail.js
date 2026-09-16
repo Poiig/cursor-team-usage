@@ -6,10 +6,14 @@ import {
   accountIdentity,
   api,
   createToast,
+  daysUntil,
   downloadText,
   escapeHtml,
+  formatDateTimeDot,
+  formatSpendPart,
   formatTokensWan,
   loadSettings,
+  resolveSpendRow,
   setBusy,
 } from './shared.js';
 
@@ -21,6 +25,7 @@ const toast = createToast(document.getElementById('toast'));
 const els = {
   title: document.getElementById('detailTitle'),
   sub: document.getElementById('detailSub'),
+  meta: document.getElementById('detailMeta'),
   meters: document.getElementById('detailMeters'),
   chartSpend: document.getElementById('chartSpend'),
   chartTokens: document.getElementById('chartTokens'),
@@ -69,12 +74,15 @@ function renderProgressLine(line) {
 }
 
 function renderSpendRow(line) {
-  const cell = (label, part) => `
+  const cell = (label, part) => {
+    const text = formatSpendPart(part);
+    return `
     <div class="spend-cell">
       <span class="k">${label}</span>
-      <span class="v">${escapeHtml(part?.text || 'No data')}</span>
+      <span class="v" title="${escapeHtml(text)}">${escapeHtml(text)}</span>
     </div>
   `;
+  };
   return `
     <div class="spend-row">
       ${cell('Today', line.today)}
@@ -200,20 +208,62 @@ function updateEventsMeta() {
   if (els.btnLoadMore) els.btnLoadMore.disabled = !hasNextPage || eventsLoading;
 }
 
+function chipClassForDays(days) {
+  if (days == null) return 'neutral';
+  // ≤5 天红；低于 10 天（6–9）黄
+  if (days <= 5) return 'danger';
+  if (days < 10) return 'warn';
+  return 'neutral';
+}
+
+function chipClassForTokenExp(iso) {
+  const days = daysUntil(iso);
+  if (days == null) return 'neutral';
+  if (days <= 0) return 'danger';
+  if (days <= 2) return 'warn';
+  return 'neutral';
+}
+
+/** 详情页元信息：有效期/Token/更新时间（更新不放在列表头部）。 */
+function renderDetailMeta(member) {
+  const resetIso = member.lastSnapshot?.window?.resetIso;
+  const resetText = formatDateTimeDot(resetIso);
+  const resetDays = daysUntil(resetIso);
+  const tokenExpText = formatDateTimeDot(member.tokenExpiresAt);
+  const syncedText = formatDateTimeDot(member.lastSyncedAt);
+  const chips = [];
+  if (resetText) {
+    chips.push(
+      `<span class="chip ${chipClassForDays(resetDays)}" title="额度有效期 / 重置时间">${
+        resetDays != null ? `${resetDays}天 · ` : ''
+      }${escapeHtml(resetText)}</span>`,
+    );
+  }
+  if (tokenExpText) {
+    chips.push(
+      `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`,
+    );
+  }
+  if (syncedText) {
+    chips.push(
+      `<span class="chip neutral" title="上次用量更新时间">更新 ${escapeHtml(syncedText)}</span>`,
+    );
+  }
+  return chips.join('');
+}
+
 function renderMember() {
   if (!member) return;
   const idn = accountIdentity(member, settings.privacyMode);
   const snap = member.lastSnapshot;
   els.title.textContent = idn.title;
-  els.sub.textContent = [
-    snap?.plan?.planName || snap?.plan?.membershipType || '',
-    idn.subtitle,
-    member.lastSyncedAt ? `同步 ${new Date(member.lastSyncedAt).toLocaleString('zh-CN')}` : '',
-  ]
+  els.sub.textContent = [snap?.plan?.planName || snap?.plan?.membershipType || '', idn.subtitle]
     .filter(Boolean)
     .join(' · ');
+  if (els.meta) els.meta.innerHTML = renderDetailMeta(member);
 
-  const { progress, spend } = splitLines(snap?.panelLines);
+  const { progress, spend: panelSpend } = splitLines(snap?.panelLines);
+  const spend = resolveSpendRow(snap, panelSpend);
   els.meters.innerHTML =
     progress.map(renderProgressLine).join('') + (spend ? renderSpendRow(spend) : '');
 

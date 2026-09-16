@@ -101,9 +101,9 @@ function sendJson(res, status, data, extraHeaders = {}) {
  * @param {Awaited<ReturnType<typeof listMembers>>} members
  */
 function buildTeamSummary(members) {
-  let billed = 0;
-  let requests = 0;
-  let tokens = 0;
+  let todayBilled = 0;
+  let todayRequests = 0;
+  let todayTokens = 0;
   let withQuota = 0;
   let nearQuota = 0;
   let nearSpend = 0;
@@ -116,9 +116,13 @@ function buildTeamSummary(members) {
 
     const snap = m.lastSnapshot;
     if (!snap) continue;
-    billed += snap.usage?.billedDollars ?? 0;
-    requests += snap.usage?.requestCount ?? 0;
-    tokens += snap.usage?.totalTokens ?? 0;
+    // 顶部汇总按「今日」跨账号合计，与列表 Today 行一致
+    const today = snap.spend?.today;
+    if (today) {
+      todayBilled += Number(today.dollars) || 0;
+      todayRequests += Number(today.requests) || 0;
+      todayTokens += Number(today.tokens) || 0;
+    }
     if (snap.quota?.limit != null && snap.quota.limit > 0) withQuota++;
     const primary =
       snap.meters?.primaryPercent ??
@@ -133,9 +137,9 @@ function buildTeamSummary(members) {
     memberCount: members.length,
     syncedOk: ok,
     syncedError: errored,
-    cycleBilledDollars: Math.round(billed * 100) / 100,
-    cycleRequests: requests,
-    cycleTokens: tokens,
+    todayBilledDollars: Math.round(todayBilled * 100) / 100,
+    todayRequests,
+    todayTokens,
     membersWithQuota: withQuota,
     nearQuotaCount: nearQuota,
     nearSpendCount: nearSpend,

@@ -209,6 +209,14 @@ h3 {
   letter-spacing: -0.02em;
 }
 
+.stat .value .unit {
+  margin-left: 4px;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--muted);
+  letter-spacing: 0;
+}
+
 .stat .value.danger {
   color: var(--red);
 }
@@ -415,6 +423,10 @@ h3 {
 
 .detail-head h2 {
   font-size: 16px;
+}
+
+.detail-meta {
+  margin-top: 8px;
 }
 
 .charts {

@@ -590,7 +590,7 @@ export function aggregateSpendPeriods(events, nowMs = Date.now()) {
   const round = (n) => Math.round(n * 100) / 100;
   const pick = (key) => {
     const row = byDay[key];
-    if (!row || (row.tokens <= 0 && row.dollars <= 0)) return null;
+    if (!row || (row.tokens <= 0 && row.dollars <= 0 && row.requests <= 0)) return null;
     return {
       dollars: round(row.dollars),
       tokens: row.tokens,
@@ -786,14 +786,28 @@ export function buildOpenUsagePanelLines(input) {
   }
 
   const fmtCell = (row) => {
-    if (!row) return { text: 'No data', dollars: null, tokens: null };
+    if (!row) return { text: 'No data', dollars: null, tokens: null, requests: null };
     const tokens = row.tokens ?? 0;
-    const tokenLabel =
-      tokens >= 1e6 ? `${(tokens / 1e6).toFixed(1)}M` : tokens >= 1e3 ? `${(tokens / 1e3).toFixed(1)}K` : String(tokens);
+    const requests = row.requests ?? 0;
+    // 与前端 formatTokens 一致：万 / 亿
+    let tokenLabel;
+    if (tokens >= 1e8) {
+      const v = tokens / 1e8;
+      tokenLabel = `${v >= 100 ? v.toFixed(0) : v.toFixed(2).replace(/\.?0+$/, '')}亿`;
+    } else if (tokens >= 1e4) {
+      const v = tokens / 1e4;
+      tokenLabel = `${v >= 100 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, '')}万`;
+    } else {
+      tokenLabel = String(Math.round(tokens));
+    }
+    const parts = [`$${Number(row.dollars || 0).toFixed(2)}`];
+    if (requests > 0) parts.push(`${requests}次`);
+    parts.push(tokenLabel);
     return {
-      text: `$${Number(row.dollars || 0).toFixed(2)} · ${tokenLabel}`,
+      text: parts.join(' · '),
       dollars: row.dollars,
       tokens: row.tokens,
+      requests,
     };
   };
 
