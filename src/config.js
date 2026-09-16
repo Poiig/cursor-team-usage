@@ -1,17 +1,25 @@
 /**
- * 运行时配置：优先 data/config.json，环境变量可覆盖（便于 Docker）。
- * 模板见仓库根目录 config.example.json；改文件后需重启进程。
+ * 运行时配置：加载仓库根目录 .env，再读 process.env（已存在的环境变量优先）。
+ * 模板见 .env.example；改完需重启进程。
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, appendFile, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+const ROOT_DIR = path.join(__dirname, '..');
+const DATA_DIR = path.join(ROOT_DIR, 'data');
+const ENV_PATH = path.join(ROOT_DIR, '.env');
+const ENV_EXAMPLE_PATH = path.join(ROOT_DIR, '.env.example');
 const DEFAULT_SQLITE = path.join(DATA_DIR, 'app.sqlite');
+
+/**
+ * 出厂默认 Access Key，便于开箱联调插件。
+ * 生产环境请在 .env 与扩展设置中同时改成自有密钥。
+ */
+export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
 
 /**
  * @typedef {{
@@ -29,10 +37,37 @@ let runtime = {
   storeDriver: 'sqlite',
   databaseUrl: '',
   sqlitePath: DEFAULT_SQLITE,
-  accessKey: '',
+  accessKey: DEFAULT_ACCESS_KEY,
   autoRefreshSec: 1800,
   sessionSecret: '',
 };
+
+/**
+ * 解析 .env 文本为键值表；支持 # 注释与引号包裹的值。
+ * @param {string} text
+ * @returns {Record<string, string>}
+ */
+export function parseEnvFile(text) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let val = trimmed.slice(eq + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val;
+  }
+  return out;
+}
 
 /**
  * 归一化驱动名：空 / 未知 → sqlite；兼容 pg 别名与遗留 file。
@@ -54,28 +89,38 @@ function defaults() {
     storeDriver: 'sqlite',
     databaseUrl: '',
     sqlitePath: DEFAULT_SQLITE,
-    accessKey: '',
+    accessKey: DEFAULT_ACCESS_KEY,
     autoRefreshSec: 1800, // 30 分钟后台刷新全员用量
-    sessionSecret: randomBytes(24).toString('hex'),
+    sessionSecret: '',
   };
 }
 
 /**
- * 环境变量覆盖（部署时注入优先于文件）。
- * @param {AppConfig} cfg
+ * 把 .env 键写入 process.env；已有非空环境变量不覆盖（便于 Docker / CI 注入）。
+ * @param {Record<string, string>} vars
  */
-function applyEnvOverrides(cfg) {
-  const next = { ...cfg };
+function applyParsedEnv(vars) {
+  for (const [key, value] of Object.entries(vars)) {
+    const cur = process.env[key];
+    if (cur == null || cur === '') process.env[key] = value;
+  }
+}
+
+/**
+ * 从 process.env 组装运行时配置。
+ * @returns {AppConfig}
+ */
+function configFromProcessEnv() {
+  const next = defaults();
   const envDriver = String(process.env.STORE_DRIVER || '').toLowerCase().trim();
   if (envDriver) {
     next.storeDriver = normalizeStoreDriver(envDriver);
-  } else if (!next.databaseUrl && (process.env.DATABASE_URL || process.env.PGHOST)) {
-    // 未显式指定驱动但给了 PG 连接信息时，自动走 postgres。
+  } else if (process.env.DATABASE_URL || process.env.PGHOST) {
     next.storeDriver = 'postgres';
   }
 
   if (process.env.DATABASE_URL) next.databaseUrl = process.env.DATABASE_URL;
-  else if (process.env.PGHOST && !next.databaseUrl) {
+  else if (process.env.PGHOST) {
     const port = process.env.PGPORT || '5432';
     const user = encodeURIComponent(process.env.PGUSER || 'postgres');
     const pass = encodeURIComponent(process.env.PGPASSWORD || '');
@@ -88,8 +133,10 @@ function applyEnvOverrides(cfg) {
     next.sqlitePath = String(process.env.SQLITE_PATH).trim() || DEFAULT_SQLITE;
   }
 
-  if (process.env.ACCESS_KEY || process.env.AGENT_ACCESS_KEY) {
-    next.accessKey = String(process.env.ACCESS_KEY || process.env.AGENT_ACCESS_KEY).trim();
+  if (process.env.ACCESS_KEY != null || process.env.AGENT_ACCESS_KEY != null) {
+    // 显式设为空字符串表示关闭插件上报；未设置则保留默认值。
+    const raw = process.env.ACCESS_KEY ?? process.env.AGENT_ACCESS_KEY ?? '';
+    next.accessKey = String(raw).trim();
   }
   if (process.env.AUTO_REFRESH_SEC != null && process.env.AUTO_REFRESH_SEC !== '') {
     const n = Number(process.env.AUTO_REFRESH_SEC);
@@ -105,57 +152,58 @@ function applyEnvOverrides(cfg) {
  */
 function resolveDataPath(p) {
   const raw = String(p || '').trim() || DEFAULT_SQLITE;
-  return path.isAbsolute(raw) ? raw : path.join(__dirname, '..', raw);
+  return path.isAbsolute(raw) ? raw : path.join(ROOT_DIR, raw);
 }
 
-/** 把可落盘字段写成 data/config.json（首次启动时）。 */
-async function writeConfigFile(cfg) {
-  await mkdir(DATA_DIR, { recursive: true });
-  const disk = {
-    storeDriver: normalizeStoreDriver(cfg.storeDriver),
-    databaseUrl: cfg.databaseUrl || '',
-    sqlitePath: cfg.sqlitePath || 'data/app.sqlite',
-    accessKey: cfg.accessKey || '',
-    autoRefreshSec: Number(cfg.autoRefreshSec) || 0,
-    sessionSecret: cfg.sessionSecret || defaults().sessionSecret,
-  };
-  await writeFile(CONFIG_PATH, JSON.stringify(disk, null, 2), 'utf8');
-}
-
-/** 启动时读取配置文件；不存在则按默认值生成一份。 */
-export async function loadAppConfig() {
-  let fileCfg = defaults();
-  let missing = false;
+/** 缺 .env 时从模板复制一份，方便本地启动。 */
+async function ensureEnvFile() {
   try {
-    const raw = await readFile(CONFIG_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    const sqliteRaw = String(parsed.sqlitePath || 'data/app.sqlite').trim() || 'data/app.sqlite';
-    fileCfg = {
-      ...fileCfg,
-      storeDriver: normalizeStoreDriver(parsed.storeDriver),
-      databaseUrl: String(parsed.databaseUrl || ''),
-      sqlitePath: resolveDataPath(sqliteRaw),
-      accessKey: String(parsed.accessKey || ''),
-      autoRefreshSec:
-        parsed.autoRefreshSec != null && parsed.autoRefreshSec !== ''
-          ? Math.max(0, Math.floor(Number(parsed.autoRefreshSec) || 0))
-          : fileCfg.autoRefreshSec,
-      sessionSecret: String(parsed.sessionSecret || fileCfg.sessionSecret),
-    };
+    await access(ENV_PATH);
+    return false;
   } catch (e) {
-    if (e && e.code !== 'ENOENT') throw e;
-    missing = true;
+    if (!e || e.code !== 'ENOENT') throw e;
   }
-  runtime = applyEnvOverrides(fileCfg);
-  // sqlitePath 经 env 覆盖后仍可能是相对路径，统一解析到绝对路径。
+  try {
+    await access(ENV_EXAMPLE_PATH);
+    await copyFile(ENV_EXAMPLE_PATH, ENV_PATH);
+  } catch {
+    await writeFile(ENV_PATH, '# cursor-team-usage\n', 'utf8');
+  }
+  console.log('已生成 .env（可参考 .env.example）');
+  return true;
+}
+
+/**
+ * 首次无 SESSION_SECRET 时生成并追加到 .env，避免每次重启登录态失效。
+ * @param {string} secret
+ */
+async function persistSessionSecret(secret) {
+  const line = `\n# 首次启动自动生成\nSESSION_SECRET=${secret}\n`;
+  await appendFile(ENV_PATH, line, 'utf8');
+  console.log('已写入 SESSION_SECRET 到 .env');
+}
+
+/** 启动时加载 .env 并固化运行时配置。 */
+export async function loadAppConfig() {
+  await mkdir(DATA_DIR, { recursive: true });
+  await ensureEnvFile();
+  try {
+    const raw = await readFile(ENV_PATH, 'utf8');
+    applyParsedEnv(parseEnvFile(raw));
+  } catch (e) {
+    if (!e || e.code !== 'ENOENT') throw e;
+  }
+
+  runtime = configFromProcessEnv();
   runtime.sqlitePath = resolveDataPath(runtime.sqlitePath);
-  if (missing) {
-    await writeConfigFile({
-      ...runtime,
-      sqlitePath: path.relative(path.join(__dirname, '..'), runtime.sqlitePath) || 'data/app.sqlite',
-    });
-    console.log('已生成 data/config.json（可参考仓库根目录 config.example.json）');
+
+  if (!runtime.sessionSecret) {
+    const secret = randomBytes(24).toString('hex');
+    runtime.sessionSecret = secret;
+    process.env.SESSION_SECRET = secret;
+    await persistSessionSecret(secret);
   }
+
   return getAppConfig();
 }
 
@@ -203,5 +251,5 @@ export function getSessionSecret() {
 }
 
 export function getConfigPath() {
-  return CONFIG_PATH;
+  return ENV_PATH;
 }

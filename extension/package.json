@@ -34,8 +34,8 @@
         },
         "cursorTeamUsage.accessKey": {
           "type": "string",
-          "default": "",
-          "markdownDescription": "与服务端 `ACCESS_KEY` / `data/config.json` 的 accessKey 一致。安装后在设置里填；若要打进 VSIX，打包前改本项 `default`（公开仓库勿提交真实密钥）。"
+          "default": "ctu-change-me",
+          "markdownDescription": "与服务端 `.env` 的 `ACCESS_KEY` 一致。默认 `ctu-change-me` 仅便于开箱试用，**生产环境请务必修改**（服务端与扩展保持一致）。"
         },
         "cursorTeamUsage.displayName": {
           "type": "string",

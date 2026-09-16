@@ -23,15 +23,16 @@
 | 详情页 | Grok Bot、日花费 / tokens 图、Top models、请求明细（可 Export CSV） |
 | 隐私模式 | 列表邮箱脱敏 |
 | 控制台 | 固定账号 `admin`，默认密码 `admin`，首次登录强制改密 |
-| 配置 | 改服务器上的 `data/config.json`（或环境变量），**无网页设置页**，改完重启 |
+| 配置 | 仓库根目录 `.env`（模板 `.env.example`），**无网页设置页**，改完重启 |
 | 存储 | 默认本地 SQLite（`data/app.sqlite`，含名册与控制台账号）；可选 PostgreSQL；`file` 为遗留 JSON |
-| 刷新 | 服务端按 `autoRefreshSec` 后台定时刷新（默认 30 分钟）；列表可手动「更新模型」 |
+| 刷新 | 服务端按 `AUTO_REFRESH_SEC` 后台定时刷新（默认 30 分钟）；列表可手动「更新模型」 |
 
 ## 快速开始
 
 需要 **Node.js 18+**。依赖安装使用淘宝镜像（见根目录 / `extension/.npmrc`）。
 
 ```bash
+cp .env.example .env   # Windows: copy .env.example .env
 npm install
 npm start
 ```
@@ -44,56 +45,54 @@ npm run dev    # 热重载
 
 ### 服务配置
 
-```bash
-mkdir data
-copy config.example.json data\config.json   # Linux/macOS: cp config.example.json data/config.json
-```
+编辑根目录 `.env` 后**重启进程**。进程环境变量优先于 `.env` 文件。
 
-编辑 `data/config.json` 后**重启进程**。以 `//` 开头的键是说明，运行时忽略。也可用同名环境变量覆盖（优先于文件）。
-
-| 字段 / 环境变量 | 说明 |
+| 变量 | 说明 |
 | --- | --- |
-| `storeDriver` / `STORE_DRIVER` | `sqlite`（默认）、`postgres`，或遗留 `file` |
-| `sqlitePath` / `SQLITE_PATH` | SQLite 库路径，默认 `data/app.sqlite` |
-| `databaseUrl` / `DATABASE_URL` | PG 连接串；也可用 `PGHOST` 等拆分变量 |
-| `accessKey` / `ACCESS_KEY` | Reporter 扩展上报密钥；空则禁止插件上报 |
-| `autoRefreshSec` / `AUTO_REFRESH_SEC` | 服务端定时刷全员用量（秒），默认 `1800`（30 分钟），`0`=关 |
-| `sessionSecret` / `SESSION_SECRET` | 登录 Cookie 签名；空则首次启动自动生成 |
-| `HOST` / `PORT` | 监听地址端口（仅环境变量，默认 `127.0.0.1:3780`） |
-
-服务端按 `autoRefreshSec` 在后台定时刷新账号用量（不依赖浏览器开着）。
+| `STORE_DRIVER` | `sqlite`（默认）、`postgres`，或遗留 `file` |
+| `SQLITE_PATH` | SQLite 库路径，默认 `data/app.sqlite` |
+| `DATABASE_URL` | PG 连接串；也可用 `PGHOST` 等拆分变量 |
+| `ACCESS_KEY` | Reporter 扩展上报密钥；默认 `ctu-change-me`（**生产请改**）；显式设空则关闭上报 |
+| `AUTO_REFRESH_SEC` | 服务端定时刷全员用量（秒），默认 `1800`（30 分钟），`0`=关 |
+| `SESSION_SECRET` | 登录 Cookie 签名；空则首次启动自动生成并写入 `.env` |
+| `HOST` / `PORT` | 监听地址端口（默认 `127.0.0.1:3780`） |
 
 启动时自动建表（`members` + `console_admin`）。
 
-PostgreSQL 示例：
+PostgreSQL 示例（写入 `.env`）：
 
-```bash
-set STORE_DRIVER=postgres
-set DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/cursor_team_usage
-npm start
+```env
+STORE_DRIVER=postgres
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/cursor_team_usage
 ```
-
-启动时自动 `CREATE TABLE IF NOT EXISTS`（名册与控制台账号）。
 
 ## Docker
 
+直接拉取 GHCR 镜像，**不在本机构建**：
+
 ```bash
-docker compose up -d --build
+cp .env.example .env   # 按需填写 ACCESS_KEY 等
+docker compose pull
+docker compose up -d
 ```
 
-打开 http://localhost:3780 。数据在 `./data`（已 gitignore）。`docker-compose.yml` 里可取消注释 Postgres。
-
-CI 推送到 GitHub Packages（GHCR）：
+打开 http://localhost:3780 。数据在 `./data`（已 gitignore）。
 
 ```bash
-docker pull ghcr.io/poiig/cursor-team-usage:latest
-# 或指定构建时的完整 commit sha
-# docker pull ghcr.io/poiig/cursor-team-usage:<commit-sha>
+# 指定某次 CI 构建的 commit sha
+# 改 docker-compose.yml 中 image 标签，或：
+docker pull ghcr.io/poiig/cursor-team-usage:<commit-sha>
 ```
 
 包页：https://github.com/Poiig/cursor-team-usage/pkgs/container/cursor-team-usage
 
-仅本机访问时可改 ports 为 `"127.0.0.1:3780:3780"`。
+若 `pull` 失败，先登录 GHCR（Token 需 `read:packages`）：
+
+```bash
+docker login ghcr.io -u YOUR_GITHUB_USERNAME
+```
+
+仅本机访问时可改 ports 为 `"127.0.0.1:3780:3780"`。`docker-compose.yml` 里可取消注释 Postgres。
 
 ## 如何录入账号
 
@@ -114,7 +113,7 @@ docker pull ghcr.io/poiig/cursor-team-usage:latest
 
 ### Reporter 扩展
 
-1. 服务端 `data/config.json` 设好 `accessKey`，并视需要 `HOST=0.0.0.0` 供局域网访问。
+1. 服务端 `.env` 设好 `ACCESS_KEY`，并视需要 `HOST=0.0.0.0` 供局域网访问。
 2. 打包并安装：
 
 ```bash
@@ -130,7 +129,7 @@ Cursor / VS Code：**Extensions: Install from VSIX…**
 | 键 | 说明 |
 | --- | --- |
 | `cursorTeamUsage.apiBaseUrl` | 如 `http://192.168.1.10:3780` |
-| `cursorTeamUsage.accessKey` | 与 `data/config.json` 的 `accessKey` 相同 |
+| `cursorTeamUsage.accessKey` | 与 `.env` 的 `ACCESS_KEY` 相同（默认均为 `ctu-change-me`，生产请改） |
 | `cursorTeamUsage.displayName` | 可选；**留空则用本机机器名** |
 | `cursorTeamUsage.autoReportIntervalMinutes` | 启动先报一次，之后按间隔（分钟）；默认 30；`0`=仅手动 |
 
@@ -142,7 +141,7 @@ Cursor / VS Code：**Extensions: Install from VSIX…**
 
 - 会话 Token **等同登录态**，仅本机或可信内网
 - 默认监听 `127.0.0.1`；对外请自行加反向代理与访问控制
-- `data/` 下 `app.sqlite`、`config.json` 已忽略，勿提交
+- `.env` 与 `data/`（含 `app.sqlite`）已忽略，勿提交
 - 「导出」含完整 Token，自行保管
 
 ## 数据来源
@@ -165,10 +164,11 @@ Cursor / VS Code：**Extensions: Install from VSIX…**
 src/                 服务端与 Cursor API
 public/              列表 / 详情 / 登录页
 extension/           Reporter 扩展（打 VSIX）
-config.example.json  配置模板 → 复制为 data/config.json
+.env.example         配置模板 → 复制为 .env
+docker-compose.yml   拉取 ghcr.io/poiig/cursor-team-usage
 scripts/             本机读 state.vscdb 等
 docs/screenshots/    README 截图
-data/                运行时数据（app.sqlite / config.json，勿提交）
+data/                运行时数据（app.sqlite，勿提交）
 ```
 
 ## 参考

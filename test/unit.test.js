@@ -74,6 +74,19 @@ test('未配置数据库时默认 sqlite 存储', async () => {
   }
 });
 
+test('parseEnvFile 支持 # 注释与引号值', async () => {
+  const { parseEnvFile } = await import('../src/config.js');
+  const parsed = parseEnvFile(`
+# comment
+STORE_DRIVER=sqlite
+DATABASE_URL="postgresql://u:p@h/db"
+ACCESS_KEY='a//b'
+`);
+  assert.equal(parsed.STORE_DRIVER, 'sqlite');
+  assert.equal(parsed.DATABASE_URL, 'postgresql://u:p@h/db');
+  assert.equal(parsed.ACCESS_KEY, 'a//b');
+});
+
 test('getAccessKey 读取配置/环境变量', async () => {
   const prev = process.env.ACCESS_KEY;
   process.env.ACCESS_KEY = 'test-key-123';

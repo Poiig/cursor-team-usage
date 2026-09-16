@@ -77,14 +77,14 @@
             <strong>登录</strong>：固定账号 <code>admin</code>，默认密码 <code>admin</code>，首次登录必须改密。
           </li>
           <li>
-            <strong>服务配置</strong>：改服务器上的 <code>data/config.json</code>（模板
-            <code>config.example.json</code>）或环境变量，改完重启；无网页设置页。
+            <strong>服务配置</strong>：改服务器上的 <code>.env</code>（模板
+            <code>.env.example</code>），改完重启；无网页设置页。
           </li>
           <li>
             <strong>录入账号</strong>：本机导入 / 粘贴 Token；多机用 Reporter 扩展定时上报（显示名默认机器名）。
           </li>
           <li>
-            <strong>刷新</strong>：服务端按 <code>data/config.json</code> 的 <code>autoRefreshSec</code>（默认 1800 秒）后台定时刷新；列表「更新模型」可立刻全量更新。
+            <strong>刷新</strong>：服务端按 <code>.env</code> 的 <code>AUTO_REFRESH_SEC</code>（默认 1800 秒）后台定时刷新；列表「更新模型」可立刻全量更新。
           </li>
           <li>
             <strong>Token</strong>：落盘 JWT 会过期。看板不刷新 Token；本机再导入，或靠扩展在 Cursor 开着时续报。

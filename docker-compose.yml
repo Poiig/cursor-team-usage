@@ -1,27 +1,35 @@
 # Cursor Team Usage — 多账号用量看板
 # 用法：
-#   docker compose up -d --build
+#   cp .env.example .env   # 按需改 ACCESS_KEY / SESSION_SECRET 等
+#   docker compose pull
+#   docker compose up -d
 #   浏览器打开 http://localhost:3780
+#
+# 镜像来自 GHCR（CI 构建），不在本机构建。
+# 若拉取失败：docker login ghcr.io -u USERNAME（Token 需 read:packages）
 #
 # 注意：会话 Token 等同登录态。默认仅映射本机端口；若暴露到局域网/公网请自行加反向代理与访问控制。
 
 services:
   cursor-team-usage:
-    build: .
-    image: cursor-team-usage:latest
+    image: ghcr.io/poiig/cursor-team-usage:latest
+    pull_policy: always
     container_name: cursor-team-usage
     restart: unless-stopped
     ports:
       - "3780:3780"
+    env_file:
+      - .env
     environment:
+      # 容器内必须监听所有接口，覆盖 .env 里的 127.0.0.1
       HOST: "0.0.0.0"
       PORT: "3780"
-      # 默认 sqlite（data/app.sqlite）；改用 Postgres 时取消下行与 postgres 服务注释
+      # 改用 Postgres 时取消下行与 postgres 服务注释
       # STORE_DRIVER: postgres
       # DATABASE_URL: postgresql://postgres:postgres@postgres:5432/cursor_team_usage
       # TZ: "Asia/Shanghai"
     volumes:
-      # sqlite / 配置：名册、控制台账号与会话 Token
+      # sqlite 与运行时数据
       - ./data:/app/data
     # depends_on:
     #   - postgres
