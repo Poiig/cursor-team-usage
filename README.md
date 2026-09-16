@@ -29,7 +29,7 @@
 
 ## 快速开始
 
-需要 **Node.js 18+**。依赖安装使用淘宝镜像（见根目录 / `extension/.npmrc`）。
+需要 **Node.js 20+**。依赖安装使用淘宝镜像（见根目录 / `extension/.npmrc`）。
 
 ```bash
 cp .env.example .env   # Windows: copy .env.example .env

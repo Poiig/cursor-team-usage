@@ -169,7 +169,10 @@ async function ensureEnvFile() {
   } catch {
     await writeFile(ENV_PATH, '# cursor-team-usage\n', 'utf8');
   }
-  console.log('已生成 .env（可参考 .env.example）');
+  // 单测时静默：Node 18 test runner 曾因中文日志触发 IPC 反序列化失败
+  if (process.env.npm_lifecycle_event !== 'test') {
+    console.log('已生成 .env（可参考 .env.example）');
+  }
   return true;
 }
 
@@ -180,7 +183,9 @@ async function ensureEnvFile() {
 async function persistSessionSecret(secret) {
   const line = `\n# 首次启动自动生成\nSESSION_SECRET=${secret}\n`;
   await appendFile(ENV_PATH, line, 'utf8');
-  console.log('已写入 SESSION_SECRET 到 .env');
+  if (process.env.npm_lifecycle_event !== 'test') {
+    console.log('已写入 SESSION_SECRET 到 .env');
+  }
 }
 
 /** 启动时加载 .env 并固化运行时配置。 */
