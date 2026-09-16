@@ -368,6 +368,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const sessionToken = String(body?.sessionToken || '').trim();
       if (!sessionToken) throw new Error('缺少 sessionToken');
+      // upsert：新建写入显示名/主机名；已有账号只轮换 Token，不覆盖人工改名
       const { member, created } = await upsertMemberBySession({
         sessionToken,
         displayName: body?.displayName,

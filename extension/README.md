@@ -61,9 +61,11 @@ npm run watch
 | --- | --- | --- |
 | `apiBaseUrl` | 看板根 URL（无末尾 `/`） | `http://127.0.0.1:3780` |
 | `accessKey` | 与看板 `ACCESS_KEY` 一致 | `ctu-change-me`（生产请改） |
-| `displayName` | 看板里显示的账号名 | 空 → **用本机机器名** |
+| `displayName` | 仅**新建**时作显示名；已有账号上报不覆盖人工改名 | 空 → **用本机机器名** |
 | `autoReportIntervalMinutes` | 自动上报间隔（分钟）；**启动先报一次**，之后按此间隔；`0`=仅手动 | `30` |
 | `refreshAfterReport` | 上报后让看板立刻刷该账号用量 | `true` |
+
+> 已有账号再次上报只更新会话 Token；`displayName` / `hostname` 不会被覆盖。
 
 要把 `accessKey` / `apiBaseUrl` 打进 VSIX：打包前改 `package.json` → `contributes.configuration.properties` 里对应项的 `default`。公开仓库不要提交真实密钥。
 

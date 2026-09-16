@@ -262,21 +262,18 @@ export async function upsertMemberBySession(input) {
 
   if (existing.rowCount) {
     const id = existing.rows[0].id;
+    // 上报只轮换 Token / 邮箱；已有显示名与主机名不覆盖，避免冲掉人工改名
     await db().query(
       `UPDATE members SET
         cookie_value=$1,
         token_expires_at=$2,
-        display_name=CASE WHEN $3 <> '' THEN $3 ELSE display_name END,
-        email=COALESCE($4, email),
-        hostname=COALESCE($5, hostname),
-        updated_at=$6
-       WHERE id=$7`,
+        email=COALESCE($3, email),
+        updated_at=$4
+       WHERE id=$5`,
       [
         session.cookieValue,
         tokenExpiresAt,
-        String(input.displayName || '').trim(),
         input.email ? String(input.email).trim() : null,
-        hostname,
         now,
         id,
       ],

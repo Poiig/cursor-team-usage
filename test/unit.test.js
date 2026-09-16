@@ -245,3 +245,31 @@ test('usageKindLabel / usageCostLabel 对齐官方 Type·Cost 文案', () => {
     1000,
   );
 });
+
+test('countWorkingDaysInclusive / computeUsagePace 按工作日节奏预警', async () => {
+  const { countWorkingDaysInclusive, computeUsagePace } = await import('../public/shared.js');
+  // 2026-09-14 周一 → 2026-09-18 周五 = 5 个工作日
+  const mon = Date.parse('2026-09-14T00:00:00+08:00');
+  const fri = Date.parse('2026-09-18T00:00:00+08:00');
+  assert.equal(countWorkingDaysInclusive(mon, fri), 5);
+  // 含周末：9/14–9/20 = 5 工作日
+  assert.equal(countWorkingDaysInclusive(mon, Date.parse('2026-09-20T00:00:00+08:00')), 5);
+
+  const member = {
+    lastSnapshot: {
+      meters: { totalPercentUsed: 50 },
+      window: {
+        startIso: '2026-09-01T00:00:00.000Z',
+        endIso: '2026-09-30T00:00:00.000Z',
+      },
+    },
+  };
+  // 假想「今天」为周期中段工作日，50% 用量应可算出日均与预计期末
+  const pace = computeUsagePace(member, Date.parse('2026-09-16T12:00:00+08:00'));
+  assert.ok(pace);
+  assert.equal(pace.usedPercent, 50);
+  assert.ok(pace.elapsedWorkDays >= 1);
+  assert.ok(pace.dailyPercent > 0);
+  assert.ok(['ok', 'warn', 'danger'].includes(pace.status));
+  assert.ok(pace.label);
+});

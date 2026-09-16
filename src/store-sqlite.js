@@ -401,31 +401,20 @@ export async function upsertMemberBySession(input) {
     String(input.email || '').trim() ||
     session.userId;
   const email = input.email ? String(input.email).trim() : null;
-  const namePatch = String(input.displayName || '').trim();
   const hostname = input.hostname != null ? String(input.hostname).trim() || null : null;
   const tokenExpiresAt = tokenExpiresAtFromCookie(session.cookieValue);
 
   if (existing) {
     const id = String(existing.id);
+    // 上报只轮换 Token / 邮箱；已有显示名与主机名不覆盖，避免冲掉人工改名
     run(
       `UPDATE members SET
         cookie_value=?,
         token_expires_at=?,
-        display_name=CASE WHEN ? <> '' THEN ? ELSE display_name END,
         email=COALESCE(?, email),
-        hostname=COALESCE(?, hostname),
         updated_at=?
        WHERE id=?`,
-      [
-        session.cookieValue,
-        tokenExpiresAt,
-        namePatch,
-        namePatch,
-        email,
-        hostname,
-        now,
-        id,
-      ],
+      [session.cookieValue, tokenExpiresAt, email, now, id],
     );
     await persist();
     const member = await getMemberInternal(id);

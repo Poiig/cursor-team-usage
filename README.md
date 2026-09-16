@@ -134,7 +134,7 @@ iex "& { $(irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/
 | --- | --- |
 | `cursorTeamUsage.apiBaseUrl` | 如 `http://192.168.1.10:3780` |
 | `cursorTeamUsage.accessKey` | 与 `.env` 的 `ACCESS_KEY` 相同（默认均为 `ctu-change-me`，生产请改） |
-| `cursorTeamUsage.displayName` | 可选；**留空则用本机机器名** |
+| `cursorTeamUsage.displayName` | 可选；**仅新建时**用作显示名（留空则机器名）；已有账号不覆盖 |
 | `cursorTeamUsage.autoReportIntervalMinutes` | 启动先报一次，之后按间隔（分钟）；默认 30；`0`=仅手动 |
 
 打包发布时自行改 `extension/package.json` 默认值后 `npm run ext:package`，再把 VSIX 放到上述地址对应位置。

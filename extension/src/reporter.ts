@@ -44,7 +44,7 @@ export async function reportSession(
     },
     body: JSON.stringify({
       sessionToken: session.cookieValue,
-      // 未手动配置显示名时，默认用本机机器名。
+      // 仅新建账号时服务端采用显示名；已有账号不会被覆盖
       displayName: config.displayName || host || session.email || session.userId,
       email: session.email,
       hostname: host,

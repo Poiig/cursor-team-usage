@@ -429,6 +429,67 @@ h3 {
   margin-top: 8px;
 }
 
+.pace-card {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 45%, var(--panel));
+  min-width: 0;
+}
+
+.pace-card.hidden {
+  display: none;
+}
+
+.pace-models-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 14px;
+  align-items: stretch;
+}
+
+.pace-models-row .chart-models {
+  margin: 0;
+  min-width: 0;
+}
+
+/* 无预警卡片时，Top models 占满一行 */
+.pace-models-row:has(.pace-card.hidden) {
+  grid-template-columns: 1fr;
+}
+
+.pace-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pace-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pace-summary {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.pace-facts {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.pace-facts strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .charts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -471,6 +532,10 @@ h3 {
 
 @media (max-width: 900px) {
   .charts {
+    grid-template-columns: 1fr;
+  }
+
+  .pace-models-row {
     grid-template-columns: 1fr;
   }
 

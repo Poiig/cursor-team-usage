@@ -5,6 +5,7 @@
 import {
   accountIdentity,
   api,
+  computeUsagePace,
   createToast,
   daysUntil,
   downloadText,
@@ -90,8 +91,25 @@ function resetMs(member) {
 function memberStatus(member) {
   if (member.lastError && !member.lastSnapshot) return 'error';
   if (!member.lastSnapshot) return 'pending';
+  const pace = computeUsagePace(member);
+  if (pace) return pace.status;
+  // 无周期窗口时退回绝对用量阈值
   if ((usedPercent(member) ?? 0) >= 80) return 'warn';
   return 'ok';
+}
+
+function statusBadgeHtml(member) {
+  const status = memberStatus(member);
+  if (status === 'error') return '<span class="badge danger">失败</span>';
+  if (status === 'pending') return '<span class="badge muted">待同步</span>';
+  const pace = computeUsagePace(member);
+  if (status === 'danger') {
+    return `<span class="badge danger" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '超速')}</span>`;
+  }
+  if (status === 'warn') {
+    return `<span class="badge warn" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '偏快')}</span>`;
+  }
+  return `<span class="badge ok" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '充足')}</span>`;
 }
 
 function fillClass(pct) {
@@ -203,16 +221,8 @@ function splitLines(lines, { includeGrok = true } = {}) {
 
 function renderAccountRow(member) {
   const snap = member.lastSnapshot;
-  const status = memberStatus(member);
   const plan = snap?.plan?.planName || snap?.plan?.membershipType || 'unknown';
-  const statusBadge =
-    status === 'error'
-      ? '<span class="badge danger">失败</span>'
-      : status === 'warn'
-        ? '<span class="badge warn">偏高</span>'
-        : status === 'ok'
-          ? '<span class="badge ok">正常</span>'
-          : '<span class="badge muted">待同步</span>';
+  const statusBadge = statusBadgeHtml(member);
 
   const idn = accountIdentity(member, settings.privacyMode);
   const err = member.lastError

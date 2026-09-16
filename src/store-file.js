@@ -188,11 +188,8 @@ export async function upsertMemberBySession(input) {
     member.cookieValue = session.cookieValue;
     member.userId = session.userId;
     member.tokenExpiresAt = tokenExpiresAt;
+    // 上报不覆盖已有显示名 / 主机名，避免冲掉人工改名
     if (input.email) member.email = String(input.email).trim();
-    if (hostname != null) member.hostname = hostname;
-    if (String(input.displayName || '').trim()) {
-      member.displayName = String(input.displayName).trim();
-    }
     member.updatedAt = now;
     store.members[idx] = member;
     await writeStore(store);

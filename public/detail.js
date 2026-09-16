@@ -5,6 +5,7 @@
 import {
   accountIdentity,
   api,
+  computeUsagePace,
   createToast,
   daysUntil,
   downloadText,
@@ -27,6 +28,7 @@ const els = {
   sub: document.getElementById('detailSub'),
   meta: document.getElementById('detailMeta'),
   meters: document.getElementById('detailMeters'),
+  pace: document.getElementById('detailPace'),
   chartSpend: document.getElementById('chartSpend'),
   chartTokens: document.getElementById('chartTokens'),
   chartModels: document.getElementById('chartModels'),
@@ -261,6 +263,31 @@ function renderMember() {
     .filter(Boolean)
     .join(' · ');
   if (els.meta) els.meta.innerHTML = renderDetailMeta(member);
+
+  const pace = computeUsagePace(member);
+  if (els.pace) {
+    if (!pace) {
+      els.pace.classList.add('hidden');
+      els.pace.innerHTML = '';
+    } else {
+      els.pace.classList.remove('hidden');
+      const badgeClass =
+        pace.status === 'danger' ? 'danger' : pace.status === 'warn' ? 'warn' : 'ok';
+      els.pace.innerHTML = `
+        <div class="pace-head">
+          <h3>用量节奏预警</h3>
+          <span class="badge ${badgeClass}">${escapeHtml(pace.label)}</span>
+        </div>
+        <p class="muted pace-summary">${escapeHtml(pace.summary)}</p>
+        <ul class="pace-facts">
+          <li>Total usage <strong>${pace.usedPercent}%</strong> ÷ 已过工作日 <strong>${pace.elapsedWorkDays}</strong> = 日均 <strong>${pace.dailyPercent}%</strong>/工作日</li>
+          <li>周期工作日合计 <strong>${pace.totalWorkDays}</strong> · 剩余工作日 <strong>${pace.remainingWorkDays}</strong></li>
+          <li>剩余额度 <strong>${pace.remainingPercent}%</strong> ÷ 日均 ≈ 可撑 <strong>${pace.daysAffordable == null ? '—' : pace.daysAffordable}</strong> 个工作日</li>
+          <li>按此节奏预计期末用量 <strong>${pace.projectedEndPercent}%</strong>（${pace.projectedEndPercent > 100 ? '会超额' : '可覆盖'}）</li>
+        </ul>
+      `;
+    }
+  }
 
   const { progress, spend: panelSpend } = splitLines(snap?.panelLines);
   const spend = resolveSpendRow(snap, panelSpend);
