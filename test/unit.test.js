@@ -487,7 +487,11 @@ test('切换报表汇总与 Total usage 快照', async () => {
 test('使用人席位：别名优先，老插件回退主机中文备注', async () => {
   const { displayPresenceLabel } = await import('../src/account-presence.js');
   const aliasByUsername = new Map([['lukezhang', '陆克']]);
-  const nameByHostname = new Map([['allengao-pc', '高山']]);
+  const nameByHostname = new Map([
+    ['allengao-pc', '高山'],
+    ['desktop-q6vl93b', '王路峰'],
+    ['luke-pc', '张朝刚'],
+  ]);
   assert.equal(
     displayPresenceLabel(
       { username: 'lukezhang', hostname: 'LUKE-PC', label: 'lukezhang' },
@@ -507,7 +511,7 @@ test('使用人席位：别名优先，老插件回退主机中文备注', async
       { username: 'zephyrwang', hostname: 'DESKTOP-Q6VL93B', label: 'zephyrwang' },
       { aliasByUsername, nameByHostname },
     ),
-    'zephyrwang',
+    '王路峰',
   );
 });
 
