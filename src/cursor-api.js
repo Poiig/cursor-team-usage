@@ -18,7 +18,8 @@ const BROWSER_HEADERS = {
 };
 
 /**
- * 带超时的 JSON 请求；把非 2xx 收成可读错误，便于成员卡片展示失败原因。
+ * 带超时的 JSON 请求；非 2xx 与网络层异常都收成「原因: 接口地址」形式的错误，
+ * 让成员卡片和操作日志能区分 Token 失效、服务端报错、连接被重置等不同失败。
  * @param {string} url
  * @param {RequestInit} options
  * @param {number} [timeoutMs]
@@ -36,14 +37,26 @@ async function fetchJson(url, options, timeoutMs = 20000) {
       data = { raw: text };
     }
     if (!res.ok) {
-      const msg = data?.message || data?.error || `HTTP ${res.status}`;
-      const err = new Error(String(msg));
+      const detail = data?.message || data?.error;
+      // 部分接口把错误包成对象返回，String() 会变成 [object Object]；展开后截断，避免整段响应体进日志
+      const reason =
+        typeof detail === 'string' ? detail : detail ? JSON.stringify(detail).slice(0, 300) : '';
+      const err = new Error(
+        reason ? `${reason} (HTTP ${res.status}): ${url}` : `HTTP ${res.status}: ${url}`,
+      );
       err.status = res.status;
       throw err;
     }
     return data;
   } catch (e) {
     if (e?.name === 'AbortError') throw new Error(`请求超时: ${url}`);
+    // fetch 的网络层异常只报笼统的 fetch failed / terminated，真实原因（ECONNRESET、连接超时等）在 cause 里
+    if (e instanceof TypeError && e.cause) {
+      const cause = e.cause;
+      throw new Error(`${e.message} (${cause.code || cause.message || cause.name}): ${url}`, {
+        cause,
+      });
+    }
     throw e;
   } finally {
     clearTimeout(timer);

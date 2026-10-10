@@ -24,6 +24,7 @@ import {
   usageKindLabel,
   usageCostLabel,
   eventTotalTokens,
+  fetchMe,
 } from '../src/cursor-api.js';
 
 test('normalizeManualToken 接受 cookie / name=value / 裸 JWT', () => {
@@ -244,6 +245,37 @@ test('usageKindLabel / usageCostLabel 对齐官方 Type·Cost 文案', () => {
     eventTotalTokens({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 880 }),
     1000,
   );
+});
+
+test('请求失败时错误信息带上接口地址与真实原因', async () => {
+  const realFetch = globalThis.fetch;
+  const session = { cookieValue: 'x' };
+  const url = 'https://cursor.com/api/auth/me';
+  try {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ error: 'not_authenticated' }), { status: 401 });
+    await assert.rejects(fetchMe(session), {
+      message: `not_authenticated (HTTP 401): ${url}`,
+      status: 401,
+    });
+
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ error: { code: 'rate_limited' } }), { status: 429 });
+    await assert.rejects(fetchMe(session), {
+      message: `{"code":"rate_limited"} (HTTP 429): ${url}`,
+    });
+
+    globalThis.fetch = async () => new Response('<html>Bad Gateway</html>', { status: 502 });
+    await assert.rejects(fetchMe(session), { message: `HTTP 502: ${url}` });
+
+    globalThis.fetch = async () => {
+      const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+      throw new TypeError('fetch failed', { cause });
+    };
+    await assert.rejects(fetchMe(session), { message: `fetch failed (ECONNRESET): ${url}` });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('countWorkingDaysInclusive / computeUsagePace 按工作日节奏预警', async () => {
