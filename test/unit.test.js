@@ -308,6 +308,49 @@ test('countWorkingDaysInclusive / computeUsagePace 按工作日节奏预警', as
   assert.ok(pace.label);
 });
 
+test('buildLocalAuthPayload 从 cookie 抽出本机写入字段', async () => {
+  const { buildCookieValue } = await import('../src/auth.js');
+  const { buildLocalAuthPayload } = await import('../src/account-switch.js');
+  // 伪造 session JWT：sub 带 provider，供 stripeMembershipAuthId 使用
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(
+    JSON.stringify({
+      sub: 'google-oauth2|user_test123',
+      type: 'session',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    }),
+  ).toString('base64url');
+  const jwt = `${header}.${payload}.x`;
+  const cookie = buildCookieValue('user_test123', jwt);
+  const auth = buildLocalAuthPayload(cookie, { email: 'a@b.com' });
+  assert.equal(auth.accessToken, jwt);
+  assert.equal(auth.refreshToken, jwt);
+  assert.equal(auth.cachedEmail, 'a@b.com');
+  assert.equal(auth.stripeMembershipAuthId, 'google-oauth2|user_test123');
+  assert.equal(auth.cachedSignUpType, 'google-oauth2');
+  assert.equal(auth.userId, 'user_test123');
+});
+
+test('用户名与密码校验', async () => {
+  const { assertValidUsername, assertValidPassword, toPublicUser } = await import('../src/users.js');
+  assert.equal(assertValidUsername('张三'), '张三');
+  assert.throws(() => assertValidUsername('bad name!'), /用户名/);
+  assert.equal(assertValidPassword('abcd'), 'abcd');
+  assert.throws(() => assertValidPassword('admin'), /默认密码/);
+  const pub = toPublicUser({
+    username: 'u1',
+    passwordHash: 'x',
+    salt: 'y',
+    role: 'user',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    mustChangePassword: true,
+    disabled: false,
+  });
+  assert.equal(pub.username, 'u1');
+  assert.equal(pub.role, 'user');
+  assert.equal('passwordHash' in pub, false);
+});
+
 test('app-log 日期键、账号标签与过期清理', async () => {
   const { mkdtemp, writeFile, readdir } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

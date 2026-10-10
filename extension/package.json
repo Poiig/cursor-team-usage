@@ -1,8 +1,8 @@
 {
   "name": "cursor-team-usage-reporter",
   "displayName": "Cursor Team Usage Reporter",
-  "description": "把本机 Cursor 会话 Token 上报到 cursor-team-usage 看板（Access Key 鉴权）",
-  "version": "0.1.1",
+  "description": "上报本机 Cursor 会话到看板，并支持从看板一键切换本机登录账号",
+  "version": "0.2.1",
   "publisher": "poiig",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -22,7 +22,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onUri"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -54,6 +55,12 @@
           "type": "boolean",
           "default": true,
           "description": "上报后让看板立刻刷新该账号用量"
+        },
+        "cursorTeamUsage.localBridgePort": {
+          "type": "number",
+          "default": 3781,
+          "minimum": 0,
+          "markdownDescription": "本机 HTTP 桥端口（仅 `127.0.0.1`）。看板「切换」优先走此通道，**Agent 模式也可用**。`0`=关闭（仅依赖 `cursor://`，需 IDE 模式）。"
         }
       }
     },
@@ -65,6 +72,10 @@
       {
         "command": "cursorTeamUsage.showStatus",
         "title": "Cursor Team Usage: 查看上报状态"
+      },
+      {
+        "command": "cursorTeamUsage.claimSwitchTicket",
+        "title": "Cursor Team Usage: 粘贴切换票据"
       }
     ]
   },

@@ -42,10 +42,23 @@ import {
   upsertMemberBySession,
 } from './store.js';
 import {
+  claimAccountSwitch,
+  createAccountSwitch,
+  finishAccountSwitch,
+  listAccountSwitchLogs,
+} from './account-switch.js';
+import {
   authenticateUser,
-  changeAdminPassword,
+  changeOwnPassword,
+  createUser,
+  getPublicUser,
   initUsers,
+  isAdminUsername,
+  listPublicUsers,
   mustChangePasswordFor,
+  removeUser,
+  resetUserPassword,
+  updateUser,
 } from './users.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -374,11 +387,38 @@ async function serveStatic(urlPath) {
 function requiresConsoleAuth(pathname, method) {
   if (pathname === '/api/health') return false;
   if (pathname === '/api/auth/login' && method === 'POST') return false;
-  if (pathname === '/api/agent/report') return false;
+  // 扩展侧用 Access Key，不走控制台 Cookie
+  if (pathname.startsWith('/api/agent/')) return false;
   if (pathname.startsWith('/api/')) return true;
   if (pathname === '/' || pathname === '/index.html' || pathname === '/detail.html') return true;
   if (pathname === '/app.js' || pathname === '/detail.js' || pathname === '/shared.js') return true;
   return false;
+}
+
+/**
+ * 仅管理员可写名册 / 管用户；普通用户只读用量并允许切换。
+ * @param {string} pathname
+ * @param {string} method
+ */
+function requiresAdmin(pathname, method) {
+  if (pathname === '/api/members' && method === 'POST') return true;
+  if (pathname === '/api/export/accounts') return true;
+  if (pathname.startsWith('/api/users')) return true;
+  const memberWrite = pathname.match(/^\/api\/members\/[^/]+$/);
+  if (memberWrite && (method === 'PUT' || method === 'DELETE')) return true;
+  return false;
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} req
+ */
+async function assertAdmin(req) {
+  const ok = await isAdminUsername(req.consoleUser);
+  if (!ok) {
+    const err = new Error('需要管理员权限');
+    err.status = 403;
+    throw err;
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -399,6 +439,9 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       req.consoleUser = session.username;
+      if (requiresAdmin(pathname, method)) {
+        await assertAdmin(req);
+      }
     }
 
     if (method === 'GET' && pathname === '/api/health') {
@@ -412,7 +455,7 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && pathname === '/api/auth/login') {
       const body = await readBody(req);
-      const user = authenticateUser(body?.username, body?.password);
+      const user = await authenticateUser(body?.username, body?.password);
       if (!user) {
         const err = new Error('用户名或密码错误');
         err.status = 401;
@@ -420,9 +463,14 @@ const server = http.createServer(async (req, res) => {
       }
       const token = issueSessionToken(user.username);
       setSessionCookie(res, token);
+      await writeAppLog('登录', {
+        用户: user.username,
+        角色: user.role,
+      });
       return sendJson(res, 200, {
         ok: true,
         username: user.username,
+        role: user.role,
         mustChangePassword: Boolean(user.mustChangePassword),
       });
     }
@@ -435,9 +483,14 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname === '/api/auth/me') {
       const session = readSessionFromRequest(req);
       if (!session) return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
+      const me = await getPublicUser(session.username);
+      if (!me || me.disabled) {
+        return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
+      }
       return sendJson(res, 200, {
-        username: 'admin',
-        mustChangePassword: mustChangePasswordFor(),
+        username: me.username,
+        role: me.role,
+        mustChangePassword: await mustChangePasswordFor(me.username),
       });
     }
 
@@ -449,8 +502,68 @@ const server = http.createServer(async (req, res) => {
         throw err;
       }
       const body = await readBody(req);
-      const user = await changeAdminPassword(String(body?.password || ''));
+      const user = await changeOwnPassword(session.username, String(body?.password || ''));
+      await writeAppLog('改密', { 用户: session.username });
       return sendJson(res, 200, { ok: true, user });
+    }
+
+    if (method === 'GET' && pathname === '/api/users') {
+      await assertAdmin(req);
+      return sendJson(res, 200, { users: await listPublicUsers() });
+    }
+
+    if (method === 'POST' && pathname === '/api/users') {
+      await assertAdmin(req);
+      const body = await readBody(req);
+      const user = await createUser({
+        username: body?.username,
+        password: body?.password,
+        role: body?.role,
+      });
+      await writeAppLog('创建用户', {
+        操作者: req.consoleUser,
+        用户: user.username,
+        角色: user.role,
+      });
+      return sendJson(res, 201, { user });
+    }
+
+    const userMatch = pathname.match(/^\/api\/users\/([^/]+)(\/reset-password)?$/);
+    if (userMatch) {
+      await assertAdmin(req);
+      const username = decodeURIComponent(userMatch[1]);
+      const suffix = userMatch[2] || '';
+      if (method === 'POST' && suffix === '/reset-password') {
+        const body = await readBody(req);
+        const user = await resetUserPassword(username, String(body?.password || ''));
+        await writeAppLog('重置密码', { 操作者: req.consoleUser, 用户: user.username });
+        return sendJson(res, 200, { user });
+      }
+      if (method === 'PUT' && !suffix) {
+        const body = await readBody(req);
+        const user = await updateUser(username, {
+          role: body?.role,
+          disabled: body?.disabled,
+        });
+        await writeAppLog('更新用户', {
+          操作者: req.consoleUser,
+          用户: user.username,
+          角色: user.role,
+          禁用: user.disabled,
+        });
+        return sendJson(res, 200, { user });
+      }
+      if (method === 'DELETE' && !suffix) {
+        await removeUser(username);
+        await writeAppLog('删除用户', { 操作者: req.consoleUser, 用户: username });
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
+    if (method === 'GET' && pathname === '/api/switch-logs') {
+      const limit = Number(url.searchParams.get('limit') || 100);
+      const logs = await listAccountSwitchLogs({ limit });
+      return sendJson(res, 200, { logs });
     }
 
     if (method === 'POST' && pathname === '/api/agent/report') {
@@ -479,12 +592,48 @@ const server = http.createServer(async (req, res) => {
           source: created ? '注册' : '上报',
           trigger: '上报后刷新',
         });
-      }      return sendJson(res, created ? 201 : 200, {
+      }
+      return sendJson(res, created ? 201 : 200, {
         ok: true,
         created,
         member: refreshed,
         hostname: body?.hostname || null,
       });
+    }
+
+    if (method === 'POST' && pathname === '/api/agent/switch/claim') {
+      assertAccessKey(req);
+      const body = await readBody(req);
+      const claimed = await claimAccountSwitch({
+        ticketId: body?.ticketId,
+        hostname: body?.hostname,
+      });
+      await writeAppLog('切换领取', {
+        操作者: claimed.operatorUsername,
+        账号: claimed.displayName,
+        主机名: body?.hostname || undefined,
+        票据: claimed.ticketId,
+      });
+      return sendJson(res, 200, { ok: true, ...claimed });
+    }
+
+    if (method === 'POST' && pathname === '/api/agent/switch/result') {
+      assertAccessKey(req);
+      const body = await readBody(req);
+      const log = await finishAccountSwitch({
+        logId: body?.logId,
+        ok: body?.ok !== false,
+        error: body?.error,
+        hostname: body?.hostname,
+      });
+      await writeAppLog('切换结果', {
+        操作者: log.operatorUsername,
+        账号: log.memberDisplayName || log.memberEmail || log.memberId,
+        主机名: log.hostname || undefined,
+        结果: log.status,
+        错误: log.error || undefined,
+      });
+      return sendJson(res, 200, { ok: true, log });
     }
 
     if (method === 'GET' && pathname === '/api/members') {
@@ -552,7 +701,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const memberMatch = pathname.match(
-      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events)?$/,
+      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/switch)?$/,
     );
     if (memberMatch) {
       const id = decodeURIComponent(memberMatch[1]);
@@ -582,12 +731,26 @@ const server = http.createServer(async (req, res) => {
         const member = await refreshOne(id, { source: '控制台', trigger: '单账号刷新' });
         return sendJson(res, 200, { member });
       }
+      if (method === 'POST' && suffix === '/switch') {
+        const result = await createAccountSwitch({
+          memberId: id,
+          operatorUsername: String(req.consoleUser || ''),
+        });
+        await writeAppLog('切换发起', {
+          操作者: req.consoleUser,
+          账号: result.member.displayName || result.member.email || result.member.id,
+          票据: result.ticketId,
+        });
+        return sendJson(res, 200, result);
+      }
       if (method === 'PUT' && !suffix) {
+        await assertAdmin(req);
         const body = await readBody(req);
         const member = await updateMember(id, body);
         return sendJson(res, 200, { member });
       }
       if (method === 'DELETE' && !suffix) {
+        await assertAdmin(req);
         await deleteMember(id);
         return sendJson(res, 200, { ok: true });
       }
@@ -645,7 +808,7 @@ server.listen(PORT, HOST, async () => {
   console.log(
     `插件上报鉴权：${isAccessKeyConfigured() ? '已启用 Access Key' : '未配置（/api/agent/report 不可用）'}`,
   );
-  console.log('控制台登录：默认 admin / admin（首次登录须改密）');
+  console.log('控制台登录：支持多用户；默认 admin / admin（首次登录须改密）');
   await writeAppLog('启动', {
     地址: `http://${HOST}:${PORT}`,
     存储: getStoreDriver(),

@@ -226,6 +226,87 @@ function ensureSchema() {
       must_change_password INTEGER NOT NULL DEFAULT 1
     )
   `);
+  run(`
+    CREATE TABLE IF NOT EXISTS console_users (
+      username TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      created_at TEXT NOT NULL,
+      must_change_password INTEGER NOT NULL DEFAULT 1,
+      disabled INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS account_switch_logs (
+      id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      operator_username TEXT NOT NULL,
+      member_id TEXT,
+      member_display_name TEXT,
+      member_email TEXT,
+      member_user_id TEXT,
+      hostname TEXT,
+      status TEXT NOT NULL,
+      error TEXT,
+      ticket_id TEXT,
+      claimed_at TEXT,
+      finished_at TEXT
+    )
+  `);
+  migrateConsoleAdminToUsers();
+}
+
+/**
+ * 把遗留单行 console_admin 迁入 console_users（role=admin），保留原口令哈希。
+ */
+function migrateConsoleAdminToUsers() {
+  const existing = getOne('SELECT 1 AS x FROM console_users LIMIT 1');
+  if (existing) return;
+  const row = getOne('SELECT * FROM console_admin WHERE username = ?', ['admin']);
+  if (!row) return;
+  run(
+    `INSERT INTO console_users
+      (username, password_hash, salt, role, created_at, must_change_password, disabled)
+     VALUES (?,?,?,?,?,?,0)`,
+    [
+      String(row.username || 'admin'),
+      String(row.password_hash),
+      String(row.salt),
+      'admin',
+      String(row.created_at || new Date().toISOString()),
+      row.must_change_password ? 1 : 0,
+    ],
+  );
+}
+
+/**
+ * @typedef {{
+ *   username: string,
+ *   passwordHash: string,
+ *   salt: string,
+ *   role: 'admin' | 'user',
+ *   createdAt: string,
+ *   mustChangePassword: boolean,
+ *   disabled: boolean,
+ * }} ConsoleUserRow
+ */
+
+/**
+ * @param {any} row
+ * @returns {ConsoleUserRow | null}
+ */
+function rowToConsoleUser(row) {
+  if (!row) return null;
+  return {
+    username: String(row.username),
+    passwordHash: String(row.password_hash),
+    salt: String(row.salt),
+    role: row.role === 'admin' ? 'admin' : 'user',
+    createdAt: String(row.created_at),
+    mustChangePassword: Boolean(row.must_change_password),
+    disabled: Boolean(row.disabled),
+  };
 }
 
 /** 已有行若缺 token_expires_at / 用量列，从 cookie 与 last_snapshot 回填。 */
@@ -521,16 +602,246 @@ export async function saveSyncResult(id, result) {
   return next ? toPublicMember(next) : undefined;
 }
 
+/** @returns {Promise<ConsoleUserRow[]>} */
+export async function listConsoleUsers() {
+  return getAll('SELECT * FROM console_users ORDER BY created_at ASC').map((r) =>
+    /** @type {ConsoleUserRow} */ (rowToConsoleUser(r)),
+  );
+}
+
+/** @param {string} username */
+export async function getConsoleUser(username) {
+  return rowToConsoleUser(
+    getOne('SELECT * FROM console_users WHERE username = ?', [String(username || '')]),
+  );
+}
+
+/**
+ * 新建控制台用户；用户名冲突时抛错。
+ * @param {ConsoleUserRow} user
+ */
+export async function createConsoleUser(user) {
+  const exists = getOne('SELECT 1 AS x FROM console_users WHERE username = ?', [user.username]);
+  if (exists) throw new Error('用户名已存在');
+  run(
+    `INSERT INTO console_users
+      (username, password_hash, salt, role, created_at, must_change_password, disabled)
+     VALUES (?,?,?,?,?,?,?)`,
+    [
+      user.username,
+      user.passwordHash,
+      user.salt,
+      user.role === 'admin' ? 'admin' : 'user',
+      user.createdAt,
+      user.mustChangePassword ? 1 : 0,
+      user.disabled ? 1 : 0,
+    ],
+  );
+  // 同步写回遗留 console_admin，避免旧工具只读那张表时丢 admin
+  if (user.username === 'admin') {
+    run(
+      `INSERT INTO console_admin (username, password_hash, salt, created_at, must_change_password)
+       VALUES (?,?,?,?,?)
+       ON CONFLICT(username) DO UPDATE SET
+         password_hash=excluded.password_hash,
+         salt=excluded.salt,
+         created_at=excluded.created_at,
+         must_change_password=excluded.must_change_password`,
+      [
+        user.username,
+        user.passwordHash,
+        user.salt,
+        user.createdAt,
+        user.mustChangePassword ? 1 : 0,
+      ],
+    );
+  }
+  await persist();
+}
+
+/**
+ * @param {ConsoleUserRow} user
+ */
+export async function saveConsoleUser(user) {
+  run(
+    `INSERT INTO console_users
+      (username, password_hash, salt, role, created_at, must_change_password, disabled)
+     VALUES (?,?,?,?,?,?,?)
+     ON CONFLICT(username) DO UPDATE SET
+       password_hash=excluded.password_hash,
+       salt=excluded.salt,
+       role=excluded.role,
+       created_at=excluded.created_at,
+       must_change_password=excluded.must_change_password,
+       disabled=excluded.disabled`,
+    [
+      user.username,
+      user.passwordHash,
+      user.salt,
+      user.role === 'admin' ? 'admin' : 'user',
+      user.createdAt,
+      user.mustChangePassword ? 1 : 0,
+      user.disabled ? 1 : 0,
+    ],
+  );
+  if (user.username === 'admin') {
+    run(
+      `INSERT INTO console_admin (username, password_hash, salt, created_at, must_change_password)
+       VALUES (?,?,?,?,?)
+       ON CONFLICT(username) DO UPDATE SET
+         password_hash=excluded.password_hash,
+         salt=excluded.salt,
+         created_at=excluded.created_at,
+         must_change_password=excluded.must_change_password`,
+      [
+        user.username,
+        user.passwordHash,
+        user.salt,
+        user.createdAt,
+        user.mustChangePassword ? 1 : 0,
+      ],
+    );
+  }
+  await persist();
+}
+
+/** @param {string} username */
+export async function deleteConsoleUser(username) {
+  const name = String(username || '');
+  if (name === 'admin') throw new Error('不能删除 admin');
+  const before = getOne('SELECT 1 AS x FROM console_users WHERE username = ?', [name]);
+  if (!before) throw new Error('用户不存在');
+  run('DELETE FROM console_users WHERE username = ?', [name]);
+  await persist();
+}
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   createdAt: string,
+ *   operatorUsername: string,
+ *   memberId?: string | null,
+ *   memberDisplayName?: string | null,
+ *   memberEmail?: string | null,
+ *   memberUserId?: string | null,
+ *   hostname?: string | null,
+ *   status: string,
+ *   error?: string | null,
+ *   ticketId?: string | null,
+ *   claimedAt?: string | null,
+ *   finishedAt?: string | null,
+ * }} SwitchLogRow
+ */
+
+/**
+ * @param {any} row
+ * @returns {SwitchLogRow}
+ */
+function rowToSwitchLog(row) {
+  return {
+    id: String(row.id),
+    createdAt: String(row.created_at),
+    operatorUsername: String(row.operator_username),
+    memberId: row.member_id ?? null,
+    memberDisplayName: row.member_display_name ?? null,
+    memberEmail: row.member_email ?? null,
+    memberUserId: row.member_user_id ?? null,
+    hostname: row.hostname ?? null,
+    status: String(row.status),
+    error: row.error ?? null,
+    ticketId: row.ticket_id ?? null,
+    claimedAt: row.claimed_at ?? null,
+    finishedAt: row.finished_at ?? null,
+  };
+}
+
+/**
+ * @param {Omit<SwitchLogRow, 'createdAt'> & { createdAt?: string }} log
+ */
+export async function insertSwitchLog(log) {
+  const createdAt = log.createdAt || new Date().toISOString();
+  run(
+    `INSERT INTO account_switch_logs
+      (id, created_at, operator_username, member_id, member_display_name, member_email,
+       member_user_id, hostname, status, error, ticket_id, claimed_at, finished_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      log.id,
+      createdAt,
+      log.operatorUsername,
+      log.memberId ?? null,
+      log.memberDisplayName ?? null,
+      log.memberEmail ?? null,
+      log.memberUserId ?? null,
+      log.hostname ?? null,
+      log.status,
+      log.error ?? null,
+      log.ticketId ?? null,
+      log.claimedAt ?? null,
+      log.finishedAt ?? null,
+    ],
+  );
+  await persist();
+  return rowToSwitchLog(
+    getOne('SELECT * FROM account_switch_logs WHERE id = ?', [log.id]),
+  );
+}
+
+/**
+ * @param {string} id
+ * @param {Partial<Pick<SwitchLogRow, 'status' | 'error' | 'hostname' | 'claimedAt' | 'finishedAt'>>} patch
+ */
+export async function updateSwitchLog(id, patch) {
+  const before = getOne('SELECT * FROM account_switch_logs WHERE id = ?', [id]);
+  if (!before) throw new Error('切换记录不存在');
+  run(
+    `UPDATE account_switch_logs SET
+      status=?,
+      error=?,
+      hostname=?,
+      claimed_at=?,
+      finished_at=?
+     WHERE id=?`,
+    [
+      patch.status ?? before.status,
+      patch.error !== undefined ? patch.error : before.error,
+      patch.hostname !== undefined ? patch.hostname : before.hostname,
+      patch.claimedAt !== undefined ? patch.claimedAt : before.claimed_at,
+      patch.finishedAt !== undefined ? patch.finishedAt : before.finished_at,
+      id,
+    ],
+  );
+  await persist();
+  return rowToSwitchLog(getOne('SELECT * FROM account_switch_logs WHERE id = ?', [id]));
+}
+
+/**
+ * @param {{ limit?: number }} [opts]
+ */
+export async function listSwitchLogs(opts = {}) {
+  const limit = Math.min(500, Math.max(1, Number(opts.limit) || 100));
+  return getAll(
+    'SELECT * FROM account_switch_logs ORDER BY created_at DESC LIMIT ?',
+    [limit],
+  ).map(rowToSwitchLog);
+}
+
+/** @param {string} id */
+export async function getSwitchLog(id) {
+  const row = getOne('SELECT * FROM account_switch_logs WHERE id = ?', [id]);
+  return row ? rowToSwitchLog(row) : null;
+}
+
 /** @returns {Promise<ConsoleAdmin | null>} */
 export async function getConsoleAdmin() {
-  const row = getOne('SELECT * FROM console_admin WHERE username = ?', ['admin']);
-  if (!row) return null;
+  const user = await getConsoleUser('admin');
+  if (!user) return null;
   return {
-    username: String(row.username),
-    passwordHash: String(row.password_hash),
-    salt: String(row.salt),
-    createdAt: String(row.created_at),
-    mustChangePassword: Boolean(row.must_change_password),
+    username: user.username,
+    passwordHash: user.passwordHash,
+    salt: user.salt,
+    createdAt: user.createdAt,
+    mustChangePassword: user.mustChangePassword,
   };
 }
 
@@ -538,21 +849,13 @@ export async function getConsoleAdmin() {
  * @param {ConsoleAdmin} admin
  */
 export async function saveConsoleAdmin(admin) {
-  run(
-    `INSERT INTO console_admin (username, password_hash, salt, created_at, must_change_password)
-     VALUES (?,?,?,?,?)
-     ON CONFLICT(username) DO UPDATE SET
-       password_hash=excluded.password_hash,
-       salt=excluded.salt,
-       created_at=excluded.created_at,
-       must_change_password=excluded.must_change_password`,
-    [
-      admin.username || 'admin',
-      admin.passwordHash,
-      admin.salt,
-      admin.createdAt,
-      admin.mustChangePassword ? 1 : 0,
-    ],
-  );
-  await persist();
+  await saveConsoleUser({
+    username: admin.username || 'admin',
+    passwordHash: admin.passwordHash,
+    salt: admin.salt,
+    role: 'admin',
+    createdAt: admin.createdAt,
+    mustChangePassword: Boolean(admin.mustChangePassword),
+    disabled: false,
+  });
 }

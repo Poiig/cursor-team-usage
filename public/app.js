@@ -38,6 +38,8 @@ const els = {
   forceNewPassword2: document.getElementById('forceNewPassword2'),
   forcePasswordError: document.getElementById('forcePasswordError'),
   tabAccounts: document.getElementById('tabAccounts'),
+  tabSwitches: document.getElementById('tabSwitches'),
+  tabUsers: document.getElementById('tabUsers'),
   tabHelp: document.getElementById('tabHelp'),
   btnAdd: document.getElementById('btnAdd'),
   btnEmptyAdd: document.getElementById('btnEmptyAdd'),
@@ -54,6 +56,18 @@ const els = {
   todayRankBody: document.getElementById('todayRankBody'),
   btnTodayRankClose: document.getElementById('btnTodayRankClose'),
   btnTodayRankCancel: document.getElementById('btnTodayRankCancel'),
+  switchLogBody: document.getElementById('switchLogBody'),
+  btnRefreshSwitchLogs: document.getElementById('btnRefreshSwitchLogs'),
+  userTableBody: document.getElementById('userTableBody'),
+  userDialog: document.getElementById('userDialog'),
+  userDialogTitle: document.getElementById('userDialogTitle'),
+  fieldUsername: document.getElementById('fieldUsername'),
+  fieldUserPassword: document.getElementById('fieldUserPassword'),
+  fieldUserRole: document.getElementById('fieldUserRole'),
+  btnAddUser: document.getElementById('btnAddUser'),
+  btnSaveUser: document.getElementById('btnSaveUser'),
+  btnUserDialogClose: document.getElementById('btnUserDialogClose'),
+  btnUserDialogCancel: document.getElementById('btnUserDialogCancel'),
 };
 
 const toast = createToast(els.toast);
@@ -67,6 +81,46 @@ let editing = null;
 let refreshingAll = false;
 let settings = loadSettings();
 let forcePasswordRequired = false;
+/** @type {{ username: string, role: string } | null} */
+let currentUser = null;
+/** @type {object[]} */
+let switchLogsCache = [];
+/** @type {object[]} */
+let usersCache = [];
+
+function isAdmin() {
+  return currentUser?.role === 'admin';
+}
+
+/** 按角色显示/隐藏管理入口。 */
+function applyRoleUi() {
+  const admin = isAdmin();
+  document.querySelectorAll('.admin-only').forEach((el) => {
+    el.classList.toggle('hidden', !admin);
+  });
+  if (els.currentUsername) {
+    const name = currentUser?.username || '—';
+    els.currentUsername.textContent = admin ? `${name} · 管理员` : name;
+  }
+}
+
+function switchStatusLabel(status) {
+  const map = {
+    pending: '等待本机领取',
+    claimed: '已领取',
+    success: '成功',
+    failed: '失败',
+    expired: '已过期',
+  };
+  return map[status] || status || '—';
+}
+
+function switchStatusClass(status) {
+  if (status === 'success') return 'ok';
+  if (status === 'failed' || status === 'expired') return 'danger';
+  if (status === 'claimed' || status === 'pending') return 'warn';
+  return 'muted';
+}
 
 function usedPercent(member) {
   const snap = member.lastSnapshot;
@@ -269,9 +323,14 @@ function renderAccountRow(member) {
           </div>
         </div>
         <div class="account-actions">
+          <button type="button" class="btn sm primary" data-action="switch" title="切换本机 Cursor 到此账号">切换</button>
           <button type="button" class="btn icon" data-action="refresh" title="刷新">↻</button>
-          <button type="button" class="btn icon" data-action="edit" title="更新 Token">✎</button>
-          <button type="button" class="btn sm danger" data-action="delete">删除</button>
+          ${
+            isAdmin()
+              ? `<button type="button" class="btn icon" data-action="edit" title="更新 Token">✎</button>
+          <button type="button" class="btn sm danger" data-action="delete">删除</button>`
+              : ''
+          }
         </div>
       </div>
       ${err}
@@ -379,13 +438,20 @@ function renderList() {
 }
 
 function showView(view) {
-  els.tabAccounts.classList.toggle('hidden', view !== 'accounts');
-  els.tabHelp.classList.toggle('hidden', view !== 'help');
-  // 说明页不需要顶部汇总条。
-  if (els.summary) els.summary.classList.toggle('hidden', view !== 'accounts');
+  const allowed = new Set(['accounts', 'switches', 'help']);
+  if (isAdmin()) allowed.add('users');
+  const next = allowed.has(view) ? view : 'accounts';
+  els.tabAccounts?.classList.toggle('hidden', next !== 'accounts');
+  els.tabSwitches?.classList.toggle('hidden', next !== 'switches');
+  els.tabUsers?.classList.toggle('hidden', next !== 'users');
+  els.tabHelp?.classList.toggle('hidden', next !== 'help');
+  // 仅账号列表需要顶部汇总条。
+  if (els.summary) els.summary.classList.toggle('hidden', next !== 'accounts');
   document.querySelectorAll('.nav-item').forEach((b) => {
-    b.classList.toggle('active', b.dataset.tab === view);
+    b.classList.toggle('active', b.dataset.tab === next);
   });
+  if (next === 'switches') void loadSwitchLogs();
+  if (next === 'users' && isAdmin()) void loadUsers();
 }
 
 async function load() {
@@ -425,17 +491,193 @@ function openForcePasswordDialog() {
   els.forceNewPassword?.focus();
 }
 
-/** 启动时检查是否须强制改密。 */
+/** 启动时检查登录身份与是否须强制改密。 */
 async function ensurePasswordPolicy() {
   try {
     const me = await api('/api/auth/me');
-    if (els.currentUsername) els.currentUsername.textContent = me.username || '—';
+    currentUser = { username: me.username || '—', role: me.role || 'user' };
+    applyRoleUi();
     forcePasswordRequired = Boolean(me.mustChangePassword);
     if (forcePasswordRequired || sessionStorage.getItem('ctu_force_password') === '1') {
       openForcePasswordDialog();
     }
   } catch {
     /* 未登录时由 api 跳转登录页 */
+  }
+}
+
+async function loadSwitchLogs() {
+  if (!els.switchLogBody) return;
+  try {
+    const data = await api('/api/switch-logs?limit=100');
+    switchLogsCache = data.logs || [];
+    if (!switchLogsCache.length) {
+      els.switchLogBody.innerHTML = `<tr><td colspan="6" class="muted">暂无切换记录</td></tr>`;
+      return;
+    }
+    els.switchLogBody.innerHTML = switchLogsCache
+      .map((log) => {
+        const account =
+          log.memberDisplayName || log.memberEmail || log.memberUserId || log.memberId || '—';
+        const when = formatDateTimeDot(log.createdAt) || log.createdAt || '—';
+        return `
+          <tr>
+            <td>${escapeHtml(when)}</td>
+            <td>${escapeHtml(log.operatorUsername || '—')}</td>
+            <td>
+              <span class="rank-name">${escapeHtml(account)}</span>
+              ${
+                log.memberEmail && log.memberEmail !== account
+                  ? `<span class="rank-sub">${escapeHtml(log.memberEmail)}</span>`
+                  : ''
+              }
+            </td>
+            <td>${escapeHtml(log.hostname || '—')}</td>
+            <td><span class="badge ${switchStatusClass(log.status)}">${escapeHtml(
+              switchStatusLabel(log.status),
+            )}</span></td>
+            <td class="muted">${escapeHtml(log.error || '—')}</td>
+          </tr>
+        `;
+      })
+      .join('');
+  } catch (e) {
+    toast(e.message || String(e));
+  }
+}
+
+async function loadUsers() {
+  if (!els.userTableBody || !isAdmin()) return;
+  try {
+    const data = await api('/api/users');
+    usersCache = data.users || [];
+    els.userTableBody.innerHTML = usersCache
+      .map((u) => {
+        const created = formatDateTimeDot(u.createdAt) || u.createdAt || '—';
+        const roleLabel = u.role === 'admin' ? '管理员' : '普通用户';
+        const status = u.disabled ? '已禁用' : u.mustChangePassword ? '须改密' : '正常';
+        const canDelete = u.username !== 'admin';
+        return `
+          <tr data-username="${escapeHtml(u.username)}">
+            <td>${escapeHtml(u.username)}</td>
+            <td>${escapeHtml(roleLabel)}</td>
+            <td>${escapeHtml(status)}</td>
+            <td>${escapeHtml(created)}</td>
+            <td class="user-actions">
+              <button type="button" class="btn sm" data-user-action="reset">重置密码</button>
+              ${
+                canDelete
+                  ? `<button type="button" class="btn sm" data-user-action="toggle">${
+                      u.disabled ? '启用' : '禁用'
+                    }</button>
+              <button type="button" class="btn sm danger" data-user-action="delete">删除</button>`
+                  : ''
+              }
+            </td>
+          </tr>
+        `;
+      })
+      .join('');
+  } catch (e) {
+    toast(e.message || String(e));
+  }
+}
+
+function openUserDialog() {
+  if (!els.userDialog) return;
+  if (els.fieldUsername) els.fieldUsername.value = '';
+  if (els.fieldUserPassword) els.fieldUserPassword.value = '';
+  if (els.fieldUserRole) els.fieldUserRole.value = 'user';
+  els.userDialog.showModal();
+  els.fieldUsername?.focus();
+}
+
+function closeUserDialog() {
+  if (els.userDialog?.open) els.userDialog.close();
+}
+
+/** 本机扩展桥默认端口；与扩展设置 cursorTeamUsage.localBridgePort 一致。 */
+const LOCAL_BRIDGE_PORTS = [3781];
+
+/**
+ * 探测并通知本机扩展桥（Agent 模式不走 cursor://）。
+ * @param {string} ticketId
+ */
+async function notifyLocalBridge(ticketId) {
+  for (const port of LOCAL_BRIDGE_PORTS) {
+    try {
+      const health = await fetch(`http://127.0.0.1:${port}/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(800),
+      });
+      if (!health.ok) continue;
+      const res = await fetch(`http://127.0.0.1:${port}/switch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticketId }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok || res.status === 202) {
+        return { ok: true, port };
+      }
+    } catch {
+      /* 本机无桥或端口不对，试下一个 / 回退协议 */
+    }
+  }
+  return { ok: false, port: null };
+}
+
+/**
+ * 发起一键切换：优先本机 HTTP 桥（Agent 可用），再试 cursor://（IDE 模式）。
+ * @param {string} id
+ * @param {HTMLButtonElement} btn
+ */
+async function switchMember(id, btn) {
+  const member = membersCache.find((m) => m.id === id);
+  const label = member?.displayName || member?.email || id;
+  if (
+    !confirm(
+      `将把本机 Cursor 切换到「${label}」。\n需已安装 Reporter 扩展（≥0.2.1）并配置看板地址与 Access Key。\nAgent 模式走本机桥 :3781；请在 Cursor 弹窗中确认。\n继续？`,
+    )
+  ) {
+    return;
+  }
+  setBusy(btn, true, '切换中…');
+  try {
+    const data = await api(`/api/members/${id}/switch`, { method: 'POST', body: '{}' });
+    if (!data?.ticketId) throw new Error('服务端未返回切换票据');
+    const ticketId = String(data.ticketId);
+
+    const bridge = await notifyLocalBridge(ticketId);
+    if (bridge.ok) {
+      toast(`已通知本机 Cursor（桥 :${bridge.port}）切换到「${label}」，请在弹窗中确认`);
+      void loadSwitchLogs();
+      return;
+    }
+
+    // 回退：cursor:// UriHandler（经典 IDE 窗口通常可用；Agent/Glass 往往无效）
+    if (data.uri) {
+      const a = document.createElement('a');
+      a.href = data.uri;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    toast(
+      `未连上本机桥 :3781。已尝试 cursor://。可在 Cursor 命令面板执行「粘贴切换票据」并粘贴：${ticketId}`,
+      8000,
+    );
+    try {
+      await navigator.clipboard.writeText(ticketId);
+    } catch {
+      /* 无剪贴板权限时忽略 */
+    }
+    void loadSwitchLogs();
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(btn, false);
   }
 }
 
@@ -464,13 +706,96 @@ async function importLocalCursor(displayName) {
 
 document.querySelectorAll('.nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
-    showView(btn.dataset.tab === 'help' ? 'help' : 'accounts');
+    showView(btn.dataset.tab || 'accounts');
   });
 });
 
 els.btnHelp.addEventListener('click', () => showView('help'));
-els.btnAdd.addEventListener('click', () => openMemberDialog());
-els.btnEmptyAdd.addEventListener('click', () => openMemberDialog());
+els.btnAdd?.addEventListener('click', () => openMemberDialog());
+els.btnEmptyAdd?.addEventListener('click', () => openMemberDialog());
+els.btnRefreshSwitchLogs?.addEventListener('click', () => loadSwitchLogs());
+els.btnAddUser?.addEventListener('click', () => openUserDialog());
+els.btnUserDialogClose?.addEventListener('click', closeUserDialog);
+els.btnUserDialogCancel?.addEventListener('click', closeUserDialog);
+els.btnSaveUser?.addEventListener('click', async () => {
+  const username = els.fieldUsername?.value.trim() || '';
+  const password = els.fieldUserPassword?.value || '';
+  const role = els.fieldUserRole?.value || 'user';
+  if (!username) return toast('请填写用户名');
+  if (password.length < 4) return toast('密码至少 4 位');
+  setBusy(els.btnSaveUser, true, '创建中…');
+  try {
+    await api('/api/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, role }),
+    });
+    toast(`已创建用户 ${username}`);
+    closeUserDialog();
+    await loadUsers();
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(els.btnSaveUser, false);
+  }
+});
+
+els.userTableBody?.addEventListener('click', async (event) => {
+  const btn = event.target.closest('button[data-user-action]');
+  const row = event.target.closest('tr[data-username]');
+  if (!btn || !row) return;
+  const username = row.dataset.username;
+  const action = btn.dataset.userAction;
+  const user = usersCache.find((u) => u.username === username);
+  if (!username || !user) return;
+
+  if (action === 'reset') {
+    const password = prompt(`为「${username}」设置新密码（至少 4 位）：`);
+    if (password == null) return;
+    if (password.length < 4) return toast('密码至少 4 位');
+    setBusy(btn, true, '…');
+    try {
+      await api(`/api/users/${encodeURIComponent(username)}/reset-password`, {
+        method: 'POST',
+        body: JSON.stringify({ password }),
+      });
+      toast(`已重置 ${username} 的密码`);
+      await loadUsers();
+    } catch (e) {
+      toast(e.message || String(e));
+      setBusy(btn, false);
+    }
+    return;
+  }
+
+  if (action === 'toggle') {
+    setBusy(btn, true, '…');
+    try {
+      await api(`/api/users/${encodeURIComponent(username)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ disabled: !user.disabled }),
+      });
+      toast(user.disabled ? `已启用 ${username}` : `已禁用 ${username}`);
+      await loadUsers();
+    } catch (e) {
+      toast(e.message || String(e));
+      setBusy(btn, false);
+    }
+    return;
+  }
+
+  if (action === 'delete') {
+    if (!confirm(`确定删除用户「${username}」？`)) return;
+    setBusy(btn, true, '删除中…');
+    try {
+      await api(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+      toast(`已删除 ${username}`);
+      await loadUsers();
+    } catch (e) {
+      toast(e.message || String(e));
+      setBusy(btn, false);
+    }
+  }
+});
 els.btnDialogClose.addEventListener('click', closeMemberDialog);
 els.btnDialogCancel.addEventListener('click', closeMemberDialog);
 els.btnTodayRankClose?.addEventListener('click', () => els.todayRankDialog?.close());
@@ -623,6 +948,11 @@ els.list.addEventListener('click', async (event) => {
     const action = btn.dataset.action;
     const member = membersCache.find((m) => m.id === id);
 
+    if (action === 'switch') {
+      await switchMember(id, btn);
+      return;
+    }
+
     if (action === 'refresh') {
       btn.innerHTML = '<span class="spin">↻</span>';
       btn.classList.add('busy');
@@ -642,11 +972,13 @@ els.list.addEventListener('click', async (event) => {
     }
 
     if (action === 'edit') {
+      if (!isAdmin()) return toast('需要管理员权限');
       openMemberDialog({ id, displayName: member?.displayName || '' });
       return;
     }
 
     if (action === 'delete') {
+      if (!isAdmin()) return toast('需要管理员权限');
       if (!confirm('确定删除该账号？不会影响其 Cursor 订阅。')) return;
       setBusy(btn, true, '删除中…');
       try {

@@ -282,36 +282,226 @@ export async function saveSyncResult(id, result) {
  */
 
 /**
- * 仅认单一 { admin }；控制台无多用户。
- * @param {any} parsed
- * @returns {ConsoleAdmin | null}
+ * @typedef {{
+ *   username: string,
+ *   passwordHash: string,
+ *   salt: string,
+ *   role: 'admin' | 'user',
+ *   createdAt: string,
+ *   mustChangePassword: boolean,
+ *   disabled: boolean,
+ * }} ConsoleUserRow
  */
-function pickAdminFromFile(parsed) {
-  if (!parsed?.admin || typeof parsed.admin !== 'object') return null;
-  return {
-    username: 'admin',
-    salt: String(parsed.admin.salt || ''),
-    passwordHash: String(parsed.admin.passwordHash || ''),
-    createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
-    mustChangePassword: Boolean(parsed.admin.mustChangePassword),
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   createdAt: string,
+ *   operatorUsername: string,
+ *   memberId?: string | null,
+ *   memberDisplayName?: string | null,
+ *   memberEmail?: string | null,
+ *   memberUserId?: string | null,
+ *   hostname?: string | null,
+ *   status: string,
+ *   error?: string | null,
+ *   ticketId?: string | null,
+ *   claimedAt?: string | null,
+ *   finishedAt?: string | null,
+ * }} SwitchLogRow
+ */
+
+const SWITCH_LOGS_PATH = path.join(DATA_DIR, 'switch-logs.json');
+
+/**
+ * @returns {Promise<{ users: ConsoleUserRow[], admin?: ConsoleAdmin }>}
+ */
+async function readUsersFile() {
+  try {
+    const raw = await readFile(USERS_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    /** @type {ConsoleUserRow[]} */
+    let users = Array.isArray(parsed.users) ? parsed.users : [];
+    // 遗留 { admin } → 迁入 users
+    if (!users.length && parsed.admin && typeof parsed.admin === 'object') {
+      users = [
+        {
+          username: 'admin',
+          salt: String(parsed.admin.salt || ''),
+          passwordHash: String(parsed.admin.passwordHash || ''),
+          role: 'admin',
+          createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
+          mustChangePassword: Boolean(parsed.admin.mustChangePassword),
+          disabled: false,
+        },
+      ];
+    }
+    return { users, admin: parsed.admin };
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { users: [] };
+    throw e;
+  }
+}
+
+/**
+ * @param {ConsoleUserRow[]} users
+ */
+async function writeUsersFile(users) {
+  await mkdir(DATA_DIR, { recursive: true });
+  const admin = users.find((u) => u.username === 'admin');
+  const payload = {
+    users,
+    admin: admin
+      ? {
+          salt: admin.salt,
+          passwordHash: admin.passwordHash,
+          createdAt: admin.createdAt,
+          mustChangePassword: admin.mustChangePassword,
+        }
+      : undefined,
   };
+  await writeFile(USERS_PATH, JSON.stringify(payload, null, 2), 'utf8');
+}
+
+/** @returns {Promise<ConsoleUserRow[]>} */
+export async function listConsoleUsers() {
+  const { users } = await readUsersFile();
+  return users;
+}
+
+/** @param {string} username */
+export async function getConsoleUser(username) {
+  const { users } = await readUsersFile();
+  return users.find((u) => u.username === String(username || '')) ?? null;
+}
+
+/** @param {ConsoleUserRow} user */
+export async function createConsoleUser(user) {
+  const { users } = await readUsersFile();
+  if (users.some((u) => u.username === user.username)) throw new Error('用户名已存在');
+  users.push(user);
+  await writeUsersFile(users);
+}
+
+/** @param {ConsoleUserRow} user */
+export async function saveConsoleUser(user) {
+  const { users } = await readUsersFile();
+  const idx = users.findIndex((u) => u.username === user.username);
+  if (idx >= 0) users[idx] = user;
+  else users.push(user);
+  await writeUsersFile(users);
+}
+
+/** @param {string} username */
+export async function deleteConsoleUser(username) {
+  const name = String(username || '');
+  if (name === 'admin') throw new Error('不能删除 admin');
+  const { users } = await readUsersFile();
+  const next = users.filter((u) => u.username !== name);
+  if (next.length === users.length) throw new Error('用户不存在');
+  await writeUsersFile(next);
+}
+
+/** @returns {Promise<SwitchLogRow[]>} */
+async function readSwitchLogs() {
+  try {
+    const raw = await readFile(SWITCH_LOGS_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.logs) ? parsed.logs : [];
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return [];
+    throw e;
+  }
+}
+
+/** @param {SwitchLogRow[]} logs */
+async function writeSwitchLogs(logs) {
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(SWITCH_LOGS_PATH, JSON.stringify({ logs }, null, 2), 'utf8');
+}
+
+/** @param {Omit<SwitchLogRow, 'createdAt'> & { createdAt?: string }} log */
+export async function insertSwitchLog(log) {
+  const logs = await readSwitchLogs();
+  /** @type {SwitchLogRow} */
+  const row = {
+    id: log.id,
+    createdAt: log.createdAt || new Date().toISOString(),
+    operatorUsername: log.operatorUsername,
+    memberId: log.memberId ?? null,
+    memberDisplayName: log.memberDisplayName ?? null,
+    memberEmail: log.memberEmail ?? null,
+    memberUserId: log.memberUserId ?? null,
+    hostname: log.hostname ?? null,
+    status: log.status,
+    error: log.error ?? null,
+    ticketId: log.ticketId ?? null,
+    claimedAt: log.claimedAt ?? null,
+    finishedAt: log.finishedAt ?? null,
+  };
+  logs.unshift(row);
+  await writeSwitchLogs(logs.slice(0, 1000));
+  return row;
+}
+
+/**
+ * @param {string} id
+ * @param {Partial<Pick<SwitchLogRow, 'status' | 'error' | 'hostname' | 'claimedAt' | 'finishedAt'>>} patch
+ */
+export async function updateSwitchLog(id, patch) {
+  const logs = await readSwitchLogs();
+  const idx = logs.findIndex((l) => l.id === id);
+  if (idx < 0) throw new Error('切换记录不存在');
+  const before = logs[idx];
+  logs[idx] = {
+    ...before,
+    status: patch.status ?? before.status,
+    error: patch.error !== undefined ? patch.error : before.error,
+    hostname: patch.hostname !== undefined ? patch.hostname : before.hostname,
+    claimedAt: patch.claimedAt !== undefined ? patch.claimedAt : before.claimedAt,
+    finishedAt: patch.finishedAt !== undefined ? patch.finishedAt : before.finishedAt,
+  };
+  await writeSwitchLogs(logs);
+  return logs[idx];
+}
+
+/** @param {{ limit?: number }} [opts] */
+export async function listSwitchLogs(opts = {}) {
+  const limit = Math.min(500, Math.max(1, Number(opts.limit) || 100));
+  const logs = await readSwitchLogs();
+  return logs.slice(0, limit);
+}
+
+/** @param {string} id */
+export async function getSwitchLog(id) {
+  const logs = await readSwitchLogs();
+  return logs.find((l) => l.id === id) ?? null;
 }
 
 /** @returns {Promise<ConsoleAdmin | null>} */
 export async function getConsoleAdmin() {
-  try {
-    const raw = await readFile(USERS_PATH, 'utf8');
-    return pickAdminFromFile(JSON.parse(raw));
-  } catch (e) {
-    if (e && e.code === 'ENOENT') return null;
-    throw e;
-  }
+  const user = await getConsoleUser('admin');
+  if (!user) return null;
+  return {
+    username: user.username,
+    passwordHash: user.passwordHash,
+    salt: user.salt,
+    createdAt: user.createdAt,
+    mustChangePassword: user.mustChangePassword,
+  };
 }
 
 /**
  * @param {ConsoleAdmin} admin
  */
 export async function saveConsoleAdmin(admin) {
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(USERS_PATH, JSON.stringify({ admin }, null, 2), 'utf8');
+  await saveConsoleUser({
+    username: admin.username || 'admin',
+    passwordHash: admin.passwordHash,
+    salt: admin.salt,
+    role: 'admin',
+    createdAt: admin.createdAt,
+    mustChangePassword: Boolean(admin.mustChangePassword),
+    disabled: false,
+  });
 }

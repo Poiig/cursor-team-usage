@@ -87,3 +87,50 @@ export async function getConsoleAdmin() {
 export async function saveConsoleAdmin(admin) {
   return api().saveConsoleAdmin(admin);
 }
+
+export async function listConsoleUsers() {
+  return api().listConsoleUsers();
+}
+
+/** @param {string} username */
+export async function getConsoleUser(username) {
+  return api().getConsoleUser(username);
+}
+
+/** @param {any} user */
+export async function createConsoleUser(user) {
+  return api().createConsoleUser(user);
+}
+
+/** @param {any} user */
+export async function saveConsoleUser(user) {
+  return api().saveConsoleUser(user);
+}
+
+/** @param {string} username */
+export async function deleteConsoleUser(username) {
+  return api().deleteConsoleUser(username);
+}
+
+/** @param {any} log */
+export async function insertSwitchLog(log) {
+  return api().insertSwitchLog(log);
+}
+
+/**
+ * @param {string} id
+ * @param {any} patch
+ */
+export async function updateSwitchLog(id, patch) {
+  return api().updateSwitchLog(id, patch);
+}
+
+/** @param {{ limit?: number }} [opts] */
+export async function listSwitchLogs(opts) {
+  return api().listSwitchLogs(opts);
+}
+
+/** @param {string} id */
+export async function getSwitchLog(id) {
+  return api().getSwitchLog(id);
+}

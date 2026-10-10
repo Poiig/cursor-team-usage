@@ -275,13 +275,17 @@ export function accountIdentity(member, privacyMode) {
   return { title: member.userId || member.id || '账号', subtitle: '' };
 }
 
+/**
+ * @param {HTMLElement | null} el
+ * @returns {(message: string, ms?: number) => void}
+ */
 export function createToast(el) {
-  return function toast(message) {
+  return function toast(message, ms = 3600) {
     if (!el) return;
     el.textContent = message;
     el.classList.remove('hidden');
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => el.classList.add('hidden'), 3600);
+    toast._t = setTimeout(() => el.classList.add('hidden'), Math.max(1200, Number(ms) || 3600));
   };
 }
 

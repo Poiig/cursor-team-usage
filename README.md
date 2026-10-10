@@ -19,10 +19,12 @@
 | 能力 | 说明 |
 | --- | --- |
 | 多账号 | 网页添加 / 本机导入 / 粘贴 Token；或用 Reporter 扩展自动上报 |
+| 一键切换 | 网页点「切换」唤起本机 Cursor，写入目标账号登录态并重启；记入切换日志（谁切到了哪个账号） |
+| 多用户 | 管理员可创建普通用户；普通用户可看用量、刷新、切换；名册与用户管理仅管理员 |
 | 用量总览 | Total / Cursor Models / Other Models；剩余额度、额度重置、Token 有效至 |
 | 详情页 | Grok Bot、日花费 / tokens 图、Top models、请求明细（可 Export CSV） |
 | 隐私模式 | 列表邮箱脱敏 |
-| 控制台 | 固定账号 `admin`，默认密码 `admin`，首次登录强制改密 |
+| 控制台 | 默认 `admin` / `admin`，首次登录强制改密；支持多用户 |
 | 配置 | 仓库根目录 `.env`（模板 `.env.example`），**无网页设置页**，改完重启 |
 | 存储 | 默认本地 SQLite（`data/app.sqlite`，含名册与控制台账号）；可选 PostgreSQL；`file` 为遗留 JSON |
 | 刷新 | 服务端按 `AUTO_REFRESH_SEC` 后台定时刷新（默认 30 分钟）；列表可手动「更新模型」 |
@@ -37,7 +39,14 @@ npm install
 npm start
 ```
 
-浏览器打开 http://127.0.0.1:3780 ，用 `admin` / `admin` 登录并立刻改密。
+浏览器打开 http://127.0.0.1:3780 ，用 `admin` / `admin` 登录并立刻改密。之后可在「用户」页添加普通用户。
+
+### 一键切换本机 Cursor
+
+1. 本机安装 Reporter 扩展（≥ 0.2.1），设置里填好看板 `apiBaseUrl` 与 `ACCESS_KEY`（本地桥默认端口 `3781`）。
+2. 在看板账号卡片点「切换」→ **优先走本机 HTTP 桥**（Agent 模式也可用）→ Cursor 弹窗确认后写入登录态并重启。
+3. 若桥未启动，会尝试 `cursor://`（常需切到 IDE 模式）；仍失败可在命令面板执行「粘贴切换票据」。
+4. 「切换日志」页可查看谁切到了哪个账号（所有登录用户可见）。
 
 ```bash
 npm run dev    # 热重载
@@ -170,7 +179,7 @@ public/              列表 / 详情 / 登录页
 extension/           Reporter 扩展（打 VSIX）
 .env.example         配置模板 → 复制为 .env
 docker-compose.yml   拉取 ghcr.io/poiig/cursor-team-usage
-scripts/             本机读 state.vscdb 等
+scripts/             扩展安装脚本、本机读写 state.vscdb
 docs/screenshots/    README 截图
 data/                运行时数据（app.sqlite、log/ 操作日志，勿提交）
 ```

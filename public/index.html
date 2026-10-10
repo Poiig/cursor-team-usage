@@ -25,6 +25,8 @@
           </div>
           <nav class="app-nav" aria-label="Main">
             <button type="button" class="nav-item active" data-tab="accounts">账号</button>
+            <button type="button" class="nav-item" data-tab="switches">切换日志</button>
+            <button type="button" class="nav-item admin-only hidden" data-tab="users">用户</button>
             <button type="button" class="nav-item" data-tab="help">说明</button>
             <span class="nav-session">
               <span id="currentUsername" class="nav-user">—</span>
@@ -53,18 +55,67 @@
               <span class="switch-track" aria-hidden="true"></span>
               <span class="switch-label">隐私模式</span>
             </label>
-            <button type="button" class="btn" id="btnExport" title="导出账号列表 JSON">导出</button>
+            <button type="button" class="btn admin-only hidden" id="btnExport" title="导出账号列表 JSON">导出</button>
             <button type="button" class="btn" id="btnRefreshAll" title="刷新全部账号用量">更新模型</button>
-            <button type="button" class="btn primary" id="btnAdd">+ 添加账号</button>
+            <button type="button" class="btn primary admin-only hidden" id="btnAdd">+ 添加账号</button>
           </div>
         </div>
         <div id="memberList" class="account-list"></div>
         <div id="emptyState" class="empty hidden">
           <h3>还没有账号</h3>
-          <p>点击「添加账号」可从本机 Cursor 导入，或粘贴其他账号的会话 Token。</p>
-          <div class="empty-actions">
+          <p>管理员可添加账号；普通用户可在账号卡片上点「切换」唤起本机 Cursor。</p>
+          <div class="empty-actions admin-only hidden">
             <button type="button" class="btn primary" id="btnEmptyAdd">+ 添加账号</button>
           </div>
+        </div>
+      </section>
+
+      <section class="panel switches-panel hidden" id="tabSwitches">
+        <div class="panel-head">
+          <h2>切换日志</h2>
+          <div class="toolbar">
+            <button type="button" class="btn" id="btnRefreshSwitchLogs">刷新</button>
+          </div>
+        </div>
+        <p class="hint">记录谁把本机 Cursor 切到了哪个看板账号；所有登录用户可见。</p>
+        <div class="rank-table-wrap">
+          <table class="rank-table" id="switchLogTable">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>操作者</th>
+                <th>目标账号</th>
+                <th>主机</th>
+                <th>状态</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="switchLogBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel users-panel hidden admin-only" id="tabUsers">
+        <div class="panel-head">
+          <h2>用户管理</h2>
+          <div class="toolbar">
+            <button type="button" class="btn primary" id="btnAddUser">+ 添加用户</button>
+          </div>
+        </div>
+        <p class="hint">管理员可添加 / 禁用用户、重置密码。普通用户可看用量、切换账号，不能改名册。</p>
+        <div class="rank-table-wrap">
+          <table class="rank-table" id="userTable">
+            <thead>
+              <tr>
+                <th>用户名</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th>创建时间</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="userTableBody"></tbody>
+          </table>
         </div>
       </section>
 
@@ -75,7 +126,13 @@
             <strong>定位</strong>：本地 / 内网并排看多个 Cursor 账号的用量与花费，不是官方 Team Admin。
           </li>
           <li>
-            <strong>登录</strong>：固定账号 <code>admin</code>，默认密码 <code>admin</code>，首次登录必须改密。
+            <strong>登录</strong>：支持多用户。默认 <code>admin</code> / <code>admin</code>，首次须改密；普通用户由管理员在「用户」页创建。
+          </li>
+          <li>
+            <strong>权限</strong>：普通用户可看全部用量、刷新、一键切换；添加 / 删除账号、导出、用户管理仅管理员。
+          </li>
+          <li>
+            <strong>一键切换</strong>：账号卡片点「切换」→ 优先通知本机扩展桥 <code>127.0.0.1:3781</code>（Agent 模式可用）→ Cursor 弹窗确认后写入登录态并重启。桥不可用时回退 <code>cursor://</code>（多需 IDE 模式），或命令面板「粘贴切换票据」。
           </li>
           <li>
             <strong>服务配置</strong>：改服务器上的 <code>.env</code>（模板
@@ -88,19 +145,42 @@
             <strong>刷新</strong>：服务端按每个账号的上次更新时间错开刷新（间隔见 <code>AUTO_REFRESH_SEC</code>，默认 1800 秒）；上报后会立刻拉一次用量。列表「更新模型」可强制全量更新。
           </li>
           <li>
-            <strong>Token</strong>：落盘 JWT 会过期。看板不刷新 Token；本机再导入，或靠扩展在 Cursor 开着时续报。
-          </li>
-          <li>
-            <strong>面板指标</strong>：Total / Cursor Models / Other Models / Grok Bot（详情页），以及 Today · Yesterday · Last 30 Days。
-          </li>
-          <li>
-            <strong>请求明细</strong>：详情页与
-            <a href="https://cursor.com/dashboard/usage" target="_blank" rel="noreferrer">官方用量页</a>
-            同源逐次请求。
+            <strong>Token</strong>：落盘 JWT 会过期。看板不刷新 Token；靠扩展在 Cursor 开着时续报。关掉 IDE 即停止上报。换号后再登录旧号时，旧会话可能被 Cursor 注销。
           </li>
         </ol>
       </section>
     </div>
+
+    <dialog id="userDialog" class="sheet">
+      <div class="sheet-body">
+        <header>
+          <h3 id="userDialogTitle">添加用户</h3>
+          <button type="button" class="icon-close" id="btnUserDialogClose" aria-label="关闭">×</button>
+        </header>
+        <label>
+          用户名
+          <input id="fieldUsername" maxlength="32" placeholder="例如：zhangsan" autocomplete="off" />
+        </label>
+        <label>
+          初始密码
+          <input id="fieldUserPassword" type="password" placeholder="至少 4 位" autocomplete="new-password" />
+        </label>
+        <label>
+          角色
+          <select id="fieldUserRole">
+            <option value="user" selected>普通用户（可切换账号）</option>
+            <option value="admin">管理员</option>
+          </select>
+        </label>
+        <p class="hint">新建用户首次登录会要求改密。</p>
+        <footer class="sheet-footer">
+          <div class="sheet-footer-right">
+            <button type="button" class="btn" id="btnUserDialogCancel">取消</button>
+            <button type="button" class="btn primary" id="btnSaveUser">创建</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
 
     <dialog id="todayRankDialog" class="sheet sheet-wide">
       <div class="sheet-body">

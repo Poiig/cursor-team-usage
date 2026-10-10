@@ -1,0 +1,219 @@
+/**
+ * 一键切换 Cursor 账号：网页发起 → 一次性票据 → 扩展领取并写入本机登录态。
+ * 票据只活在内存里（含会话 Token），审计轨迹落库 account_switch_logs。
+ */
+
+import { randomUUID } from 'node:crypto';
+import { decodeJwtPayload, jwtFromCookie, sessionFromCookie } from './auth.js';
+import {
+  getMemberInternal,
+  getSwitchLog,
+  insertSwitchLog,
+  listSwitchLogs,
+  updateSwitchLog,
+} from './store.js';
+
+/** 票据有效期：2 分钟，够打开 Cursor 并领取。 */
+const TICKET_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   logId: string,
+ *   memberId: string,
+ *   operatorUsername: string,
+ *   cookieValue: string,
+ *   email?: string | null,
+ *   displayName?: string | null,
+ *   createdAt: number,
+ *   expiresAt: number,
+ *   claimed: boolean,
+ * }} SwitchTicket
+ */
+
+/** @type {Map<string, SwitchTicket>} */
+const tickets = new Map();
+
+/** 清掉过期未领票据，并把对应日志标为 expired。 */
+async function sweepExpiredTickets() {
+  const now = Date.now();
+  for (const [id, t] of tickets) {
+    if (t.claimed) continue;
+    if (t.expiresAt > now) continue;
+    tickets.delete(id);
+    try {
+      const log = await getSwitchLog(t.logId);
+      if (log && log.status === 'pending') {
+        await updateSwitchLog(t.logId, {
+          status: 'expired',
+          error: '切换票据已过期（未在本机 Cursor 领取）',
+          finishedAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      /* 忽略过期清理失败 */
+    }
+  }
+}
+
+/**
+ * 从成员 cookie 抽出扩展写入本机 state.vscdb 所需字段。
+ * @param {string} cookieValue
+ * @param {{ email?: string | null }} [extra]
+ */
+export function buildLocalAuthPayload(cookieValue, extra = {}) {
+  const session = sessionFromCookie(cookieValue);
+  if (!session) throw new Error('会话 Token 无效，无法切换');
+  const jwt = jwtFromCookie(session.cookieValue);
+  if (!jwt) throw new Error('会话 Token 中缺少 JWT');
+  const payload = decodeJwtPayload(jwt);
+  if (!payload?.sub) throw new Error('会话 Token JWT 缺少 sub');
+  const email = String(extra.email || '').trim() || null;
+  const sub = String(payload.sub);
+  const provider = sub.includes('|') ? sub.split('|')[0] : '';
+  return {
+    accessToken: jwt,
+    refreshToken: jwt,
+    cachedEmail: email,
+    stripeMembershipAuthId: sub,
+    cachedSignUpType: provider || null,
+    userId: session.userId,
+  };
+}
+
+/**
+ * 网页侧发起切换：写 pending 日志 + 发票据，返回 cursor:// URI。
+ * @param {{ memberId: string, operatorUsername: string }} input
+ */
+export async function createAccountSwitch(input) {
+  await sweepExpiredTickets();
+  const member = await getMemberInternal(input.memberId);
+  if (!member) throw new Error('成员不存在');
+  // 先校验 Token 能解析，避免发了票据却写不进本机
+  buildLocalAuthPayload(member.cookieValue, { email: member.email });
+
+  const ticketId = randomUUID();
+  const logId = randomUUID();
+  const now = Date.now();
+  const ticket = {
+    id: ticketId,
+    logId,
+    memberId: member.id,
+    operatorUsername: input.operatorUsername,
+    cookieValue: member.cookieValue,
+    email: member.email ?? null,
+    displayName: member.displayName,
+    createdAt: now,
+    expiresAt: now + TICKET_TTL_MS,
+    claimed: false,
+  };
+  tickets.set(ticketId, ticket);
+
+  await insertSwitchLog({
+    id: logId,
+    operatorUsername: input.operatorUsername,
+    memberId: member.id,
+    memberDisplayName: member.displayName,
+    memberEmail: member.email ?? null,
+    memberUserId: member.userId,
+    status: 'pending',
+    ticketId,
+  });
+
+  const uri = `cursor://poiig.cursor-team-usage-reporter/switch?ticket=${encodeURIComponent(ticketId)}`;
+  return {
+    ticketId,
+    logId,
+    expiresAt: new Date(ticket.expiresAt).toISOString(),
+    uri,
+    member: {
+      id: member.id,
+      displayName: member.displayName,
+      email: member.email ?? null,
+    },
+  };
+}
+
+/**
+ * 扩展用 Access Key 领取票据；一次性，领取后内存票据标记 claimed。
+ * @param {{ ticketId: string, hostname?: string }} input
+ */
+export async function claimAccountSwitch(input) {
+  await sweepExpiredTickets();
+  const ticketId = String(input.ticketId || '').trim();
+  const ticket = tickets.get(ticketId);
+  if (!ticket) {
+    const err = new Error('切换票据无效或已过期');
+    err.status = 410;
+    throw err;
+  }
+  if (ticket.claimed) {
+    const err = new Error('切换票据已被领取');
+    err.status = 409;
+    throw err;
+  }
+  if (Date.now() > ticket.expiresAt) {
+    tickets.delete(ticketId);
+    await updateSwitchLog(ticket.logId, {
+      status: 'expired',
+      error: '切换票据已过期',
+      finishedAt: new Date().toISOString(),
+    });
+    const err = new Error('切换票据已过期');
+    err.status = 410;
+    throw err;
+  }
+
+  ticket.claimed = true;
+  const hostname = input.hostname ? String(input.hostname).trim() : null;
+  const claimedAt = new Date().toISOString();
+  await updateSwitchLog(ticket.logId, {
+    status: 'claimed',
+    hostname,
+    claimedAt,
+  });
+
+  const auth = buildLocalAuthPayload(ticket.cookieValue, { email: ticket.email });
+  return {
+    logId: ticket.logId,
+    ticketId: ticket.id,
+    memberId: ticket.memberId,
+    displayName: ticket.displayName,
+    operatorUsername: ticket.operatorUsername,
+    auth,
+  };
+}
+
+/**
+ * 扩展回报切换结果（成功或失败）。
+ * @param {{ logId: string, ok: boolean, error?: string, hostname?: string }} input
+ */
+export async function finishAccountSwitch(input) {
+  const logId = String(input.logId || '').trim();
+  const log = await getSwitchLog(logId);
+  if (!log) throw new Error('切换记录不存在');
+  if (log.status === 'success' || log.status === 'failed') {
+    return log;
+  }
+  const finishedAt = new Date().toISOString();
+  if (input.ok) {
+    return updateSwitchLog(logId, {
+      status: 'success',
+      error: null,
+      hostname: input.hostname ?? log.hostname,
+      finishedAt,
+    });
+  }
+  return updateSwitchLog(logId, {
+    status: 'failed',
+    error: String(input.error || '切换失败'),
+    hostname: input.hostname ?? log.hostname,
+    finishedAt,
+  });
+}
+
+/** @param {{ limit?: number }} [opts] */
+export async function listAccountSwitchLogs(opts) {
+  await sweepExpiredTickets();
+  return listSwitchLogs(opts);
+}

@@ -7,10 +7,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const watch = process.argv.includes('--watch');
 
 mkdirSync(path.join(__dirname, 'dist'), { recursive: true });
-cpSync(
-  path.join(__dirname, '..', 'scripts', 'read_cursor_auth.py'),
-  path.join(__dirname, 'dist', 'read_cursor_auth.py'),
-);
+for (const name of ['read_cursor_auth.py', 'write_cursor_auth.py']) {
+  cpSync(path.join(__dirname, '..', 'scripts', name), path.join(__dirname, 'dist', name));
+}
 
 /** @type {import('esbuild').BuildOptions} */
 const options = {

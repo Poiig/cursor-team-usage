@@ -945,6 +945,14 @@ code {
   background: color-mix(in srgb, var(--accent, #4daafc) 8%, transparent);
 }
 
+.user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
 .sheet::backdrop {
   background: rgba(0, 0, 0, 0.45);
 }
