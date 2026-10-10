@@ -46,6 +46,8 @@ const els = {
   btnEmptyAdd: document.getElementById('btnEmptyAdd'),
   btnImportInDialog: document.getElementById('btnImportInDialog'),
   btnRefreshAll: document.getElementById('btnRefreshAll'),
+  btnRestoreLocal: document.getElementById('btnRestoreLocal'),
+  btnSwitchRecommended: document.getElementById('btnSwitchRecommended'),
   btnExport: document.getElementById('btnExport'),
   btnForceChangePassword: document.getElementById('btnForceChangePassword'),
   btnLogout: document.getElementById('btnLogout'),
@@ -61,15 +63,18 @@ const els = {
   btnRefreshSwitchLogs: document.getElementById('btnRefreshSwitchLogs'),
   reportOperatorBody: document.getElementById('reportOperatorBody'),
   reportRecentBody: document.getElementById('reportRecentBody'),
+  reportLogBody: document.getElementById('reportLogBody'),
   btnRefreshReports: document.getElementById('btnRefreshReports'),
   statusFilter: document.getElementById('statusFilter'),
   userTableBody: document.getElementById('userTableBody'),
+  loginLogBody: document.getElementById('loginLogBody'),
   userDialog: document.getElementById('userDialog'),
   userDialogTitle: document.getElementById('userDialogTitle'),
   fieldUsername: document.getElementById('fieldUsername'),
   fieldUserPassword: document.getElementById('fieldUserPassword'),
   fieldUserRole: document.getElementById('fieldUserRole'),
   btnAddUser: document.getElementById('btnAddUser'),
+  btnInstallExtension: document.getElementById('btnInstallExtension'),
   btnSaveUser: document.getElementById('btnSaveUser'),
   btnUserDialogClose: document.getElementById('btnUserDialogClose'),
   btnUserDialogCancel: document.getElementById('btnUserDialogCancel'),
@@ -92,8 +97,17 @@ let currentUser = null;
 let switchLogsCache = [];
 /** @type {object[]} */
 let usersCache = [];
-/** @type {'all' | 'ok' | 'error'} */
+let recommendedSwitchId = null;
+let currentCursorMemberId = null;
+let currentCursorChecked = false;
+let extensionMeta = null;
+let localExtensionInfo = null;
+let extensionInstallMode = 'install';
+/** @type {'all' | 'ok' | 'expiring' | 'error'} */
 let accountStatusFilter = 'all';
+
+/** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」。 */
+const EXPIRING_WITHIN_DAYS = 7;
 
 function isAdmin() {
   return currentUser?.role === 'admin';
@@ -102,6 +116,37 @@ function isAdmin() {
 /** 有 lastError 的账号视为异常，不可切换。 */
 function isAbnormalMember(member) {
   return Boolean(member?.lastError);
+}
+
+/**
+ * 非异常且额度周期在一周内重置（含已到期）→ 临期。
+ * 异常优先归异常，不重复计入临期。
+ */
+function isExpiringMember(member) {
+  if (!member || isAbnormalMember(member)) return false;
+  const days = daysUntil(member.lastSnapshot?.window?.resetIso);
+  return days != null && days <= EXPIRING_WITHIN_DAYS;
+}
+
+function switchBlockReason(member) {
+  if (!member) return '账号不存在';
+  if (isAbnormalMember(member)) return '同步异常，请先更新 Token';
+  const used = usedPercent(member);
+  if (used == null) return '尚无额度数据，请先刷新';
+  if (used >= 100) return '额度已用完';
+  if (
+    member.maxUsers != null &&
+    Number(member.activeUserCount || 0) >= Number(member.maxUsers)
+  ) {
+    return `使用人数已满（${member.activeUserCount}/${member.maxUsers}）`;
+  }
+  if (member.id === currentCursorMemberId) return '当前正在使用';
+  return '';
+}
+
+/** 正常：既非异常也非临期。 */
+function isOkMember(member) {
+  return !isAbnormalMember(member) && !isExpiringMember(member);
 }
 
 /** 格式化切换时快照的 Total usage。 */
@@ -120,6 +165,7 @@ function applyRoleUi() {
     const name = currentUser?.username || '—';
     els.currentUsername.textContent = admin ? `${name} · 管理员` : name;
   }
+  void loadExtensionInstallState();
 }
 
 function switchStatusLabel(status) {
@@ -164,6 +210,15 @@ function resetMs(member) {
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
 }
 
+function recommendedMemberFromList() {
+  return (
+    [...membersCache]
+      .filter((member) => !switchBlockReason(member))
+      .sort((a, b) => resetMs(a) - resetMs(b) || usedPercent(b) - usedPercent(a))[0] ||
+    null
+  );
+}
+
 /** 今日 tokens，无数据视为 0，便于排行。 */
 function todayTokensOf(member) {
   return Number(member.lastSnapshot?.spend?.today?.tokens) || 0;
@@ -193,15 +248,26 @@ function statusBadgeHtml(member) {
   if (status === 'error') {
     return `<span class="badge danger" title="${escapeHtml(member.lastError || '')}">异常</span>`;
   }
-  if (status === 'pending') return '<span class="badge muted">待同步</span>';
+  const expiring =
+    isExpiringMember(member)
+      ? (() => {
+          const days = daysUntil(member.lastSnapshot?.window?.resetIso);
+          const tip =
+            days === 0
+              ? '额度周期今日重置或已到重置日'
+              : `额度周期 ${days} 天内重置`;
+          return `<span class="badge warn" title="${escapeHtml(tip)}">临期</span>`;
+        })()
+      : '';
+  if (status === 'pending') return `${expiring}<span class="badge muted">待同步</span>`;
   const pace = computeUsagePace(member);
   if (status === 'danger') {
-    return `<span class="badge danger" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '超速')}</span>`;
+    return `${expiring}<span class="badge danger" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '超速')}</span>`;
   }
   if (status === 'warn') {
-    return `<span class="badge warn" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '偏快')}</span>`;
+    return `${expiring}<span class="badge warn" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '偏快')}</span>`;
   }
-  return `<span class="badge ok" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '充足')}</span>`;
+  return `${expiring}<span class="badge ok" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '充足')}</span>`;
 }
 
 function fillClass(pct) {
@@ -234,13 +300,14 @@ function chipClassForTokenExp(iso) {
   return 'neutral';
 }
 
-/** 紧凑色块：剩余额度 / 到期天数+有效期 / Token；更新时间只在详情页展示。 */
+/** 紧凑色块：剩余额度 / 到期天数+有效期 / Token / 额度更新时间。 */
 function metaChips(member) {
   const remain = remainingPercent(member);
   const resetIso = member.lastSnapshot?.window?.resetIso;
   const resetText = formatDateTimeDot(resetIso);
   const resetDays = daysUntil(resetIso);
   const tokenExpText = formatDateTimeDot(member.tokenExpiresAt);
+  const syncedText = formatDateTimeDot(member.lastSyncedAt);
   const remainChip =
     remain == null
       ? ''
@@ -256,7 +323,36 @@ function metaChips(member) {
     tokenExpText == null
       ? ''
       : `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`;
-  return `${remainChip}${resetChip}${tokenChip}`;
+  const syncedChip =
+    syncedText == null
+      ? '<span class="chip neutral">额度尚未更新</span>'
+      : `<span class="chip neutral" title="自动调用 API 获取额度的时间">额度更新 ${escapeHtml(syncedText)}</span>`;
+  return `${remainChip}${resetChip}${tokenChip}${syncedChip}`;
+}
+
+function renderActiveUserSlots(member) {
+  const max = Number(member.maxUsers);
+  if (!Number.isFinite(max) || max <= 0) return '';
+  const users = Array.isArray(member.activeUsers) ? member.activeUsers.slice(0, max) : [];
+  const slots = Array.from({ length: max }, (_, index) => {
+    const user = users[index];
+    if (!user) {
+      return '<div class="user-slot user-slot--empty"><span class="user-avatar">+</span><span class="user-slot-name">空闲</span></div>';
+    }
+    const label = String(user.label || user.hostname || '未知');
+    const initial = Array.from(label.trim())[0] || '?';
+    return `<div class="user-slot" title="${escapeHtml(`${label} · ${user.hostname || ''}`)}">
+      <span class="user-avatar">${escapeHtml(initial.toUpperCase())}</span>
+      <span class="user-slot-name">${escapeHtml(label)}</span>
+    </div>`;
+  }).join('');
+  return `<div class="account-users ${member.capacityFull ? 'account-users--full' : ''}">
+    <div class="account-users-head">
+      <strong>使用人</strong>
+      <span>${users.length}/${max}</span>
+    </div>
+    <div class="user-slots" style="--user-slot-count:${max}">${slots}</div>
+  </div>`;
 }
 
 function renderProgressLine(line) {
@@ -317,6 +413,9 @@ function renderAccountRow(member) {
   const statusBadge = statusBadgeHtml(member);
 
   const idn = accountIdentity(member, settings.privacyMode);
+  const blocked = switchBlockReason(member);
+  const isRecommended = member.id === recommendedSwitchId && !blocked;
+  const isCurrent = member.id === currentCursorMemberId;
   const err = member.lastError
     ? `<div class="error-box">${escapeHtml(member.lastError)}</div>`
     : '';
@@ -329,9 +428,13 @@ function renderAccountRow(member) {
       : `<p class="muted" style="margin-top:10px">尚无面板数据</p>`;
   const spendHtml = spend ? renderSpendRow(spend) : '';
 
-  const errorClass = member.lastError ? ' account--error' : '';
+  const stateClass = isAbnormalMember(member)
+    ? ' account--error'
+    : isExpiringMember(member)
+      ? ' account--expiring'
+      : '';
   return `
-    <article class="account${errorClass}" data-id="${member.id}">
+    <article class="account${stateClass}" data-id="${member.id}">
       <div class="account-top">
         <div class="account-id">
           <div class="account-title">
@@ -340,15 +443,17 @@ function renderAccountRow(member) {
           </div>
           <div class="badges">
             <span class="badge plan">${escapeHtml(plan)}</span>
+            ${isCurrent ? '<span class="badge ok">当前 Cursor</span>' : ''}
+            ${isRecommended ? '<span class="badge warn">推荐</span>' : ''}
             ${statusBadge}
             ${metaChips(member)}
           </div>
         </div>
         <div class="account-actions">
           ${
-            isAbnormalMember(member)
-              ? `<button type="button" class="btn sm" disabled title="异常账号不可切换，请先更新 Token">不可切换</button>`
-              : `<button type="button" class="btn sm primary" data-action="switch" title="切换本机 Cursor 到此账号">切换</button>`
+            blocked
+              ? `<button type="button" class="btn sm" disabled title="${escapeHtml(blocked)}">${escapeHtml(blocked)}</button>`
+              : `<button type="button" class="btn sm primary" data-action="switch" title="切换本机 Cursor 到此账号">${isRecommended ? '推荐切换' : '切换'}</button>`
           }
           <button type="button" class="btn icon" data-action="refresh" title="刷新">↻</button>
           ${
@@ -360,6 +465,7 @@ function renderAccountRow(member) {
         </div>
       </div>
       ${err}
+      ${renderActiveUserSlots(member)}
       ${meters}
       ${spendHtml}
     </article>
@@ -384,8 +490,13 @@ function renderSummary(summary) {
     </button>
     <button type="button" class="stat stat-click" id="btnFilterOk" title="只看正常账号">
       <p class="label">正常</p>
-      <p class="value">${s.syncedOk ?? 0}</p>
+      <p class="value">${membersCache.filter(isOkMember).length}</p>
       <p class="note">点击筛选</p>
+    </button>
+    <button type="button" class="stat stat-click" id="btnFilterExpiring" title="只看一周内额度周期重置的账号">
+      <p class="label">临期</p>
+      <p class="value ${membersCache.some(isExpiringMember) ? 'warn' : ''}">${membersCache.filter(isExpiringMember).length}</p>
+      <p class="note">额度重置 ≤${EXPIRING_WITHIN_DAYS} 天 · 点击筛选</p>
     </button>
     <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号">
       <p class="label">异常</p>
@@ -395,6 +506,9 @@ function renderSummary(summary) {
   `;
   document.getElementById('btnTodayUsage')?.addEventListener('click', openTodayRank);
   document.getElementById('btnFilterOk')?.addEventListener('click', () => setAccountStatusFilter('ok'));
+  document
+    .getElementById('btnFilterExpiring')
+    ?.addEventListener('click', () => setAccountStatusFilter('expiring'));
   document.getElementById('btnFilterError')?.addEventListener('click', () => setAccountStatusFilter('error'));
 }
 
@@ -426,17 +540,15 @@ function openTodayRank() {
       })
       .join('');
   }
-  // 同步列表排序，方便关对话框后继续看列表
-  if (els.sortBy) els.sortBy.value = 'todayTokens';
-  renderList();
   els.todayRankDialog?.showModal();
 }
 
 function filteredMembers() {
   const q = (els.searchInput.value || '').trim().toLowerCase();
-  const sort = els.sortBy?.value || 'remaining';
+  const sort = els.sortBy?.value || 'reset';
   const list = membersCache.filter((m) => {
-    if (accountStatusFilter === 'ok' && isAbnormalMember(m)) return false;
+    if (accountStatusFilter === 'ok' && !isOkMember(m)) return false;
+    if (accountStatusFilter === 'expiring' && !isExpiringMember(m)) return false;
     if (accountStatusFilter === 'error' && !isAbnormalMember(m)) return false;
     if (!q) return true;
     return `${m.displayName} ${m.email || ''} ${m.userId || ''}`.toLowerCase().includes(q);
@@ -449,6 +561,7 @@ function filteredMembers() {
       if (ar == null && br == null) return 0;
       if (ar == null) return 1;
       if (br == null) return -1;
+      if (accountStatusFilter === 'expiring') return br - ar;
       return ar - br;
     }
     if (sort === 'used') {
@@ -472,17 +585,20 @@ function filteredMembers() {
 function syncStatusFilterUi() {
   const all = membersCache.length;
   const bad = membersCache.filter(isAbnormalMember).length;
-  const ok = all - bad;
+  const expiring = membersCache.filter(isExpiringMember).length;
+  const ok = membersCache.filter(isOkMember).length;
   els.statusFilter?.querySelectorAll('.filter-tab').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.status === accountStatusFilter);
   });
   els.statusFilter?.querySelectorAll('[data-count]').forEach((el) => {
     const key = el.getAttribute('data-count');
-    el.textContent = String(key === 'ok' ? ok : key === 'error' ? bad : all);
+    const n =
+      key === 'ok' ? ok : key === 'expiring' ? expiring : key === 'error' ? bad : all;
+    el.textContent = String(n);
   });
 }
 
-/** @param {'all' | 'ok' | 'error'} next */
+/** @param {'all' | 'ok' | 'expiring' | 'error'} next */
 function setAccountStatusFilter(next) {
   accountStatusFilter = next;
   renderList();
@@ -497,14 +613,22 @@ function renderList() {
     els.list.innerHTML = '';
     return;
   }
-  // 「全部」时把异常单独分区，避免和正常账号混在一起扫
+  // 「全部」时按正常 / 临期 / 异常分区，临期夹在中间便于扫
   if (accountStatusFilter === 'all') {
-    const ok = list.filter((m) => !isAbnormalMember(m));
-    const bad = list.filter((m) => isAbnormalMember(m));
+    const ok = list.filter(isOkMember);
+    const expiring = list.filter(isExpiringMember);
+    const bad = list.filter(isAbnormalMember);
     const parts = [];
     if (ok.length) {
       parts.push(
         `<div class="account-section"><h3 class="account-section-title">正常 <span class="muted">${ok.length}</span></h3>${ok
+          .map(renderAccountRow)
+          .join('')}</div>`,
+      );
+    }
+    if (expiring.length) {
+      parts.push(
+        `<div class="account-section account-section--expiring"><h3 class="account-section-title">临期 <span class="muted">${expiring.length}</span></h3>${expiring
           .map(renderAccountRow)
           .join('')}</div>`,
       );
@@ -552,7 +676,9 @@ async function load() {
   const data = await api('/api/members');
   membersCache = data.members || [];
   summaryCache = data.summary || {};
+  recommendedSwitchId = data.recommendedSwitchId || null;
   renderList();
+  if (!currentCursorChecked) void detectCurrentCursorAccount();
 }
 
 async function refreshAll(silent = false) {
@@ -648,7 +774,10 @@ async function loadSwitchLogs() {
 async function loadReports() {
   if (!els.reportOperatorBody || !isAdmin()) return;
   try {
-    const data = await api('/api/reports/switches?limit=500');
+    const [data, reportData] = await Promise.all([
+      api('/api/reports/switches?limit=500'),
+      api('/api/report-logs?limit=200'),
+    ]);
     const operators = data.operators || [];
     const recent = data.recent || [];
     els.reportOperatorBody.innerHTML = operators.length
@@ -691,30 +820,75 @@ async function loadReports() {
             .join('')
         : `<tr><td colspan="7" class="muted">暂无切换记录</td></tr>`;
     }
+    if (els.reportLogBody) {
+      const logs = reportData.logs || [];
+      els.reportLogBody.innerHTML = logs.length
+        ? logs
+            .map(
+              (log) => `
+          <tr>
+            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
+            <td>${escapeHtml(log.operatorUsername || log.hostRemark || '旧版插件')}</td>
+            <td>${escapeHtml(log.memberDisplayName || log.memberEmail || '—')}</td>
+            <td>${escapeHtml(
+              [log.hostname, log.hostRemark].filter(Boolean).join(' / ') || '—',
+            )}</td>
+            <td>${escapeHtml(
+              [log.pluginVersion, log.pluginBuild].filter(Boolean).join(' · ') || '旧版',
+            )}</td>
+            <td><span class="badge ${log.ok ? 'ok' : 'danger'}">${
+              log.ok ? '成功' : '失败'
+            }</span>${log.error ? ` <span class="muted">${escapeHtml(log.error)}</span>` : ''}</td>
+          </tr>`,
+            )
+            .join('')
+        : '<tr><td colspan="6" class="muted">暂无自动上报记录</td></tr>';
+    }
   } catch (e) {
     toast(e.message || String(e));
   }
 }
 
+function pluginCell(plugin) {
+  if (!plugin?.version) return '<span class="muted">未安装</span>';
+  const ver = [plugin.version, plugin.build].filter(Boolean).join(' · ');
+  const when = formatDateTimeDot(plugin.reportedAt || plugin.installedAt);
+  const how = plugin.state === 'reported' ? '已上报' : '已安装';
+  return `${escapeHtml(ver)}<div class="muted">${escapeHtml(how)}${when ? ` ${escapeHtml(when)}` : ''}</div>`;
+}
+
 async function loadUsers() {
   if (!els.userTableBody || !isAdmin()) return;
   try {
-    const data = await api('/api/users');
+    const [data, loginData] = await Promise.all([
+      api('/api/users'),
+      api('/api/login-logs?limit=100'),
+    ]);
     usersCache = data.users || [];
     els.userTableBody.innerHTML = usersCache
       .map((u) => {
         const created = formatDateTimeDot(u.createdAt) || u.createdAt || '—';
         const roleLabel = u.role === 'admin' ? '管理员' : '普通用户';
-        const status = u.disabled ? '已禁用' : u.mustChangePassword ? '须改密' : '正常';
+        const status = u.pending
+          ? '待审批'
+          : u.disabled
+            ? '已禁用'
+            : u.mustChangePassword
+              ? '须改密'
+              : '正常';
         const canDelete = u.username !== 'admin';
-        return `
-          <tr data-username="${escapeHtml(u.username)}">
-            <td>${escapeHtml(u.username)}</td>
-            <td>${escapeHtml(roleLabel)}</td>
-            <td>${escapeHtml(status)}</td>
-            <td>${escapeHtml(created)}</td>
-            <td class="user-actions">
-              <button type="button" class="btn sm" data-user-action="reset">重置密码</button>
+        const activeAccounts = (u.activeAccounts || [])
+          .map(
+            (row) =>
+              `${row.memberDisplayName || row.memberId || '未知账号'} · ${
+                row.hostname || '未知主机'
+              }`,
+          )
+          .join('；');
+        const actions = u.pending
+          ? `<button type="button" class="btn sm primary" data-user-action="approve">同意</button>
+              <button type="button" class="btn sm danger" data-user-action="reject">拒绝</button>`
+          : `<button type="button" class="btn sm" data-user-action="reset">重置密码</button>
               ${
                 canDelete
                   ? `<button type="button" class="btn sm" data-user-action="toggle">${
@@ -722,12 +896,41 @@ async function loadUsers() {
                     }</button>
               <button type="button" class="btn sm danger" data-user-action="delete">删除</button>`
                   : ''
-              }
-            </td>
+              }`;
+        return `
+          <tr data-username="${escapeHtml(u.username)}" class="${u.pending ? 'user-row-pending' : ''}">
+            <td>${escapeHtml(u.username)}</td>
+            <td>${escapeHtml(roleLabel)}</td>
+            <td>${
+              u.pending ? `<span class="badge warn">${escapeHtml(status)}</span>` : escapeHtml(status)
+            }</td>
+            <td>${escapeHtml(activeAccounts || '—')}</td>
+            <td>${pluginCell(u.plugin)}</td>
+            <td>${escapeHtml(created)}</td>
+            <td class="user-actions">${actions}</td>
           </tr>
         `;
       })
       .join('');
+    if (els.loginLogBody) {
+      const logs = loginData.logs || [];
+      els.loginLogBody.innerHTML = logs.length
+        ? logs
+            .map(
+              (log) => `
+          <tr>
+            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
+            <td>${escapeHtml(log.username || '—')}</td>
+            <td><span class="badge ${log.ok ? 'ok' : 'danger'}">${
+              log.ok ? '成功' : '失败'
+            }</span></td>
+            <td>${escapeHtml(log.ip || '—')}</td>
+            <td class="muted">${escapeHtml(log.userAgent || '—')}</td>
+          </tr>`,
+            )
+            .join('')
+        : '<tr><td colspan="5" class="muted">暂无登录记录</td></tr>';
+    }
   } catch (e) {
     toast(e.message || String(e));
   }
@@ -750,31 +953,215 @@ function closeUserDialog() {
 const LOCAL_BRIDGE_PORTS = [3781];
 
 /**
- * 探测并通知本机扩展桥（Agent 模式不走 cursor://）。
- * @param {string} ticketId
+ * 探测本机扩展桥是否可用。
+ * @returns {Promise<number | null>}
  */
-async function notifyLocalBridge(ticketId) {
+async function findLocalBridgePort() {
   for (const port of LOCAL_BRIDGE_PORTS) {
     try {
       const health = await fetch(`http://127.0.0.1:${port}/health`, {
         method: 'GET',
         signal: AbortSignal.timeout(800),
       });
-      if (!health.ok) continue;
-      const res = await fetch(`http://127.0.0.1:${port}/switch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticketId }),
-        signal: AbortSignal.timeout(3000),
-      });
-      if (res.ok || res.status === 202) {
-        return { ok: true, port };
-      }
+      if (health.ok) return port;
     } catch {
-      /* 本机无桥或端口不对，试下一个 / 回退协议 */
+      /* 试下一个 */
     }
   }
+  return null;
+}
+
+/** 登录看板后从本机扩展读取当前 Cursor 账号，并匹配名册人员。 */
+async function detectCurrentCursorAccount() {
+  const port = await findLocalBridgePort();
+  if (port == null) return;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/current-account`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return;
+    const info = await res.json();
+    currentCursorChecked = true;
+    const email = String(info.email || '').toLowerCase();
+    const userId = String(info.userId || '');
+    const member = membersCache.find(
+      (m) =>
+        (userId && String(m.userId || '') === userId) ||
+        (email && String(m.email || '').toLowerCase() === email),
+    );
+    currentCursorMemberId = member?.id || null;
+    recommendedSwitchId = recommendedMemberFromList()?.id || null;
+    renderList();
+
+    const shownKey = `ctu_current_cursor_shown_${currentUser?.username || 'user'}`;
+    if (sessionStorage.getItem(shownKey) !== '1') {
+      sessionStorage.setItem(shownKey, '1');
+      const account = info.email || info.userId || '未识别';
+      const person = member?.displayName || '名册中未匹配到人员';
+      alert(`当前 Cursor 账号：${account}\n对应人员：${person}`);
+    }
+  } catch {
+    /* 旧版扩展尚无 current-account 接口，不阻塞看板 */
+  }
+}
+
+/** 进入页面时只检查一次：未安装 / 可更新 / 已是最新版。 */
+async function loadExtensionInstallState() {
+  if (extensionMeta) return;
+  try {
+    extensionMeta = await api('/api/extension/meta');
+    const port = await findLocalBridgePort();
+    if (port != null) {
+      const res = await fetch(`http://127.0.0.1:${port}/extension-info`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) localExtensionInfo = await res.json();
+      else localExtensionInfo = { version: '已安装版本', build: '' };
+    }
+    if (!localExtensionInfo?.version) {
+      extensionInstallMode = 'install';
+    } else if (
+      localExtensionInfo.version !== extensionMeta.version ||
+      localExtensionInfo.build !== extensionMeta.build ||
+      localExtensionInfo.operatorUsername !== currentUser?.username
+    ) {
+      extensionInstallMode = 'update';
+    } else {
+      extensionInstallMode = 'reinstall';
+    }
+    if (els.btnInstallExtension) {
+      els.btnInstallExtension.textContent =
+        extensionInstallMode === 'install'
+          ? '安装插件'
+          : extensionInstallMode === 'update'
+            ? '更新插件'
+            : '重新安装插件';
+    }
+  } catch {
+    extensionInstallMode = 'install';
+  }
+}
+
+/** 个性化安装：VSIX 写入当前看板用户名，优先走本机桥。 */
+async function oneClickInstallExtension() {
+  const btn = els.btnInstallExtension;
+  setBusy(btn, true, '准备中…');
+  try {
+    await loadExtensionInstallState();
+    const username = currentUser?.username || '当前用户';
+    const action =
+      extensionInstallMode === 'install'
+        ? '安装'
+        : extensionInstallMode === 'update'
+          ? '更新'
+          : '重新安装';
+    const prompt =
+      extensionInstallMode === 'update'
+        ? `将 Reporter 从 ${localExtensionInfo?.version || '旧版本'} 更新到 ${
+            extensionMeta?.version || '最新版'
+          }，并绑定看板用户「${username}」。继续？`
+        : `${action} Reporter，并绑定看板用户「${username}」。继续？`;
+    if (!confirm(prompt)) return;
+
+    const link = await api('/api/extension/install-link', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    const port = await findLocalBridgePort();
+    if (port != null) {
+      const res = await fetch(`http://127.0.0.1:${port}/install-extension`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vsixUrl: link.vsixUrl }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok && body.ok !== false) {
+        toast(`已为「${username}」${action}插件，Cursor 正在自动重载`);
+        return;
+      }
+      toast(body.error || `${action}失败，已复制备用命令`);
+    } else {
+      toast(`未检测到本机桥，已复制 PowerShell ${action}命令`);
+    }
+    try {
+      await navigator.clipboard.writeText(link.oneLiner);
+    } catch {
+      /* 剪贴板失败时仍弹出 */
+    }
+    window.prompt(
+      `在本机 PowerShell 执行${action}（已尝试复制）：`,
+      link.oneLiner,
+    );
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+/**
+ * 探测并通知本机扩展桥（Agent 模式不走 cursor://）。
+ * @param {string} ticketId
+ */
+async function notifyLocalBridge(ticketId) {
+  const port = await findLocalBridgePort();
+  if (port == null) return { ok: false, port: null };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/switch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticketId }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok || res.status === 202) return { ok: true, port };
+  } catch {
+    /* 桥在但切换失败 */
+  }
   return { ok: false, port: null };
+}
+
+/**
+ * 通过本机桥从备份区恢复切换前的 Cursor 账号。
+ */
+async function restoreLastLocalAccount() {
+  const port = await findLocalBridgePort();
+  if (port == null) {
+    toast('未连上本机桥 :3781。请确认已安装 Reporter 扩展（≥0.2.2）并已启动 Cursor，或在命令面板执行「恢复上次账号」。');
+    return;
+  }
+  try {
+    const infoRes = await fetch(`http://127.0.0.1:${port}/backup`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(2000),
+    });
+    const info = await infoRes.json().catch(() => ({}));
+    if (!info.exists) {
+      toast('备份区没有上次账号。请先通过看板「切换」一次，才会生成备份。');
+      return;
+    }
+    const label = info.email || info.userId || '上次账号';
+    const when = info.savedAt ? new Date(info.savedAt).toLocaleString('zh-CN') : '未知时间';
+    if (!confirm(`将从本机备份区恢复「${label}」（备份于 ${when}）并重启 Cursor。\n请在 Cursor 弹窗中确认。继续？`)) {
+      return;
+    }
+    setBusy(els.btnRestoreLocal, true, '恢复中…');
+    const res = await fetch(`http://127.0.0.1:${port}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok && res.status !== 202) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `桥返回 ${res.status}`);
+    }
+    toast(`已通知本机 Cursor 恢复「${label}」，请在弹窗中确认`);
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(els.btnRestoreLocal, false);
+  }
 }
 
 /**
@@ -785,13 +1172,18 @@ async function notifyLocalBridge(ticketId) {
 async function switchMember(id, btn) {
   const member = membersCache.find((m) => m.id === id);
   const label = member?.displayName || member?.email || id;
-  if (isAbnormalMember(member)) {
-    toast('该账号同步异常，请先更新 Token 后再切换');
+  const blocked = switchBlockReason(member);
+  if (blocked) {
+    toast(`${label}：${blocked}`);
     return;
   }
   if (
     !confirm(
-      `将把本机 Cursor 切换到「${label}」。\n需已安装 Reporter 扩展（≥0.2.1）并配置看板地址与 Access Key。\nAgent 模式走本机桥 :3781；请在 Cursor 弹窗中确认。\n继续？`,
+      `切换到「${label}」？\n剩余额度：${
+        remainingPercent(member)?.toFixed(1) ?? '未知'
+      }% · 使用人：${Number(member?.activeUserCount || 0)}/${
+        member?.maxUsers ?? '不限'
+      }`,
     )
   ) {
     return;
@@ -835,6 +1227,15 @@ async function switchMember(id, btn) {
   }
 }
 
+async function switchRecommendedMember() {
+  const member = membersCache.find((m) => m.id === recommendedSwitchId);
+  if (!member) {
+    toast('没有可切换的账号（需同步正常且仍有额度）');
+    return;
+  }
+  await switchMember(member.id, els.btnSwitchRecommended);
+}
+
 function closeMemberDialog() {
   if (els.dialog.open) els.dialog.close();
 }
@@ -867,7 +1268,9 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
 els.statusFilter?.addEventListener('click', (event) => {
   const btn = event.target.closest('.filter-tab');
   if (!btn?.dataset.status) return;
-  setAccountStatusFilter(/** @type {'all' | 'ok' | 'error'} */ (btn.dataset.status));
+  setAccountStatusFilter(
+    /** @type {'all' | 'ok' | 'expiring' | 'error'} */ (btn.dataset.status),
+  );
 });
 
 els.btnHelp.addEventListener('click', () => showView('help'));
@@ -876,6 +1279,7 @@ els.btnEmptyAdd?.addEventListener('click', () => openMemberDialog());
 els.btnRefreshSwitchLogs?.addEventListener('click', () => loadSwitchLogs());
 els.btnRefreshReports?.addEventListener('click', () => loadReports());
 els.btnAddUser?.addEventListener('click', () => openUserDialog());
+els.btnInstallExtension?.addEventListener('click', () => oneClickInstallExtension());
 els.btnUserDialogClose?.addEventListener('click', closeUserDialog);
 els.btnUserDialogCancel?.addEventListener('click', closeUserDialog);
 els.btnSaveUser?.addEventListener('click', async () => {
@@ -908,6 +1312,39 @@ els.userTableBody?.addEventListener('click', async (event) => {
   const action = btn.dataset.userAction;
   const user = usersCache.find((u) => u.username === username);
   if (!username || !user) return;
+
+  if (action === 'approve') {
+    setBusy(btn, true, '…');
+    try {
+      await api(`/api/users/${encodeURIComponent(username)}/approve`, {
+        method: 'POST',
+        body: '{}',
+      });
+      toast(`已同意 ${username} 的注册申请`);
+      await loadUsers();
+    } catch (e) {
+      toast(e.message || String(e));
+      setBusy(btn, false);
+    }
+    return;
+  }
+
+  if (action === 'reject') {
+    if (!confirm(`确定拒绝「${username}」的注册申请？将删除该申请账号。`)) return;
+    setBusy(btn, true, '…');
+    try {
+      await api(`/api/users/${encodeURIComponent(username)}/reject`, {
+        method: 'POST',
+        body: '{}',
+      });
+      toast(`已拒绝 ${username}`);
+      await loadUsers();
+    } catch (e) {
+      toast(e.message || String(e));
+      setBusy(btn, false);
+    }
+    return;
+  }
 
   if (action === 'reset') {
     const password = prompt(`为「${username}」设置新密码（至少 4 位）：`);
@@ -1032,6 +1469,7 @@ els.btnLogout?.addEventListener('click', async () => {
     /* ignore */
   }
   sessionStorage.removeItem('ctu_force_password');
+  sessionStorage.removeItem(`ctu_current_cursor_shown_${currentUser?.username || 'user'}`);
   location.href = '/login.html';
 });
 
@@ -1097,6 +1535,8 @@ els.btnSaveMember.addEventListener('click', async () => {
 });
 
 els.btnRefreshAll.addEventListener('click', () => refreshAll(false));
+els.btnRestoreLocal?.addEventListener('click', () => restoreLastLocalAccount());
+els.btnSwitchRecommended?.addEventListener('click', () => switchRecommendedMember());
 
 els.list.addEventListener('click', async (event) => {
   const btn = event.target.closest('button[data-action]');

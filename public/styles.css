@@ -151,6 +151,13 @@ h3 {
   align-items: center;
 }
 
+.header-help-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
 .btn-link-inline {
   appearance: none;
   border: 0;
@@ -204,9 +211,15 @@ h3 {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 14px;
+}
+
+@media (max-width: 900px) {
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .stat {
@@ -417,6 +430,14 @@ h3 {
   color: var(--red);
 }
 
+.account-section--expiring .account-section-title {
+  color: var(--amber);
+}
+
+.stat .value.warn {
+  color: var(--amber);
+}
+
 .filter-empty {
   padding: 20px 8px;
   text-align: center;
@@ -425,6 +446,18 @@ h3 {
 .report-subhead {
   margin: 18px 0 10px;
   font-size: 14px;
+}
+
+.register-ok {
+  color: var(--green-strong);
+  border: 1px solid color-mix(in srgb, var(--green) 35%, var(--border));
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.user-row-pending td {
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
 }
 
 .stat.stat-click.stat-error {
@@ -518,6 +551,16 @@ h3 {
 
 .account.account--error:hover {
   border-color: color-mix(in srgb, var(--red) 75%, var(--border));
+}
+
+/* Token 一周内过期：琥珀色边框，与异常红区分 */
+.account.account--expiring {
+  border-color: color-mix(in srgb, var(--amber) 55%, var(--border));
+  background: color-mix(in srgb, var(--amber) 7%, var(--panel));
+}
+
+.account.account--expiring:hover {
+  border-color: color-mix(in srgb, var(--amber) 75%, var(--border));
 }
 
 .account-actions {
@@ -794,6 +837,86 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.account-users {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 72%, var(--track));
+}
+
+.account-users--full {
+  border-color: color-mix(in srgb, #ef4444 58%, var(--border));
+}
+
+.account-users-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.user-slots {
+  display: grid;
+  grid-template-columns: repeat(var(--user-slot-count), minmax(0, 1fr));
+  gap: 8px;
+}
+
+.user-slot {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--input-bg);
+}
+
+.user-avatar {
+  width: 27px;
+  height: 27px;
+  flex: 0 0 27px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #07111f;
+  background: linear-gradient(145deg, #38d6c7, #8aa2ff);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.user-slot:not(.user-slot--empty):nth-child(3n + 2) .user-avatar {
+  background: linear-gradient(145deg, #8aa2ff, #c6b5ff);
+}
+
+.user-slot:not(.user-slot--empty):nth-child(3n) .user-avatar {
+  background: linear-gradient(145deg, #ffb86b, #ffe08a);
+}
+
+.user-slot-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.user-slot--empty {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--border) 85%, transparent);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--text) 4%, var(--panel));
+}
+
+.user-slot--empty .user-avatar {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--text) 9%, var(--panel));
+  font-weight: 650;
 }
 
 .badge {
@@ -1323,5 +1446,34 @@ code {
 
 .login-hint {
   margin-top: 14px;
+}
+
+.application-status {
+  margin: 14px 0 0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+
+.application-status[data-status='pending'] {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 40%, var(--border));
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+}
+
+.application-status[data-status='approved'] {
+  color: var(--green-strong);
+  border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+}
+
+.application-status[data-status='rejected'],
+.application-status[data-status='disabled'],
+.application-status[data-status='removed'],
+.application-status[data-status='unknown'] {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 

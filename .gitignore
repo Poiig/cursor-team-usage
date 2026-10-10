@@ -1,7 +1,11 @@
 node_modules/
+__pycache__/
+*.pyc
 extension/node_modules/
 extension/*.vsix
 extension/dist/
+extension/build-info.json
+assets/
 data/*
 !data/.gitkeep
 *.log

@@ -9,17 +9,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
+import type { LocalAuthPayload } from './authReader';
 
 const execFileAsync = promisify(execFile);
 
-export type LocalAuthPayload = {
-  accessToken: string;
-  refreshToken?: string;
-  cachedEmail?: string | null;
-  stripeMembershipAuthId?: string | null;
-  cachedSignUpType?: string | null;
-  userId?: string;
-};
+export type { LocalAuthPayload };
 
 function candidateDbPaths(): string[] {
   const home = os.homedir();
@@ -83,33 +77,49 @@ export async function writeLocalCursorAuth(
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+/** Windows 上 cursor 命令多是 cursor.cmd，Start-Process 会留下乱码 cmd 窗口。 */
+function cursorExePath(): string | null {
+  const local = process.env.LOCALAPPDATA || '';
+  const candidates = [
+    path.join(local, 'Programs', 'cursor', 'Cursor.exe'),
+    path.join(local, 'Programs', 'Cursor', 'Cursor.exe'),
+  ];
+  return candidates.find((p) => existsSync(p)) || null;
+}
+
 /**
- * 后台拉起重启脚本后退出当前 Cursor，使新登录态生效。
- * Windows 用 start 脱离 Job；macOS / Linux 用 sleep + 重新 open。
+ * 后台拉起重启后退出当前 Cursor。
+ * Windows 用 wscript 隐藏启动，避免 cmd/cursor.cmd 占住终端且中文乱码。
  */
 export async function scheduleCursorRestart(): Promise<void> {
   const delaySec = 2;
   if (process.platform === 'win32') {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'ctu-restart-'));
     const ps1 = path.join(dir, 'restart.ps1');
-    const localApp = process.env.LOCALAPPDATA || '';
-    const fallbackExe = path.join(localApp, 'Programs', 'cursor', 'Cursor.exe').replace(/'/g, "''");
+    const vbs = path.join(dir, 'restart.vbs');
+    const exe = (cursorExePath() || '').replace(/'/g, "''");
     const script = [
       '$ErrorActionPreference = "SilentlyContinue"',
       `Start-Sleep -Seconds ${delaySec}`,
       'Get-Process -Name Cursor -ErrorAction SilentlyContinue | Stop-Process -Force',
       'Start-Sleep -Seconds 1',
-      '$cmd = Get-Command cursor -ErrorAction SilentlyContinue',
-      'if ($cmd) { Start-Process $cmd.Source }',
-      `elseif (Test-Path '${fallbackExe}') { Start-Process '${fallbackExe}' }`,
+      exe
+        ? `Start-Process -FilePath '${exe}'`
+        : "Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'Programs\\cursor\\Cursor.exe')",
     ].join('\r\n');
-    await writeFile(ps1, script, 'utf8');
-    // cmd start 脱离当前 Job，避免父进程退出带走重启脚本
-    spawn(
-      'cmd.exe',
-      ['/c', 'start', '', 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1],
-      { detached: true, stdio: 'ignore', windowsHide: true },
-    ).unref();
+    await writeFile(ps1, '\uFEFF' + script, 'utf8');
+    const ps1Quoted = ps1.replace(/"/g, '""');
+    const vbsBody = `CreateObject("Wscript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${ps1Quoted}""", 0, False\r\n`;
+    await writeFile(vbs, vbsBody, 'utf8');
+    // wscript //B 无窗口，且 Run 脱离 Cursor 的 Job，退出 IDE 不会杀掉重启脚本
+    spawn('wscript.exe', ['//B', '//Nologo', vbs], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    }).unref();
+    for (const term of vscode.window.terminals) {
+      if (/cmd\.exe/i.test(term.name)) term.dispose();
+    }
   } else if (process.platform === 'darwin') {
     const bash = `sleep ${delaySec}; osascript -e 'quit app "Cursor"' >/dev/null 2>&1; sleep 1; open -a Cursor`;
     spawn('/bin/bash', ['-lc', bash], { detached: true, stdio: 'ignore' }).unref();

@@ -2,7 +2,7 @@
   "name": "cursor-team-usage-reporter",
   "displayName": "Cursor Team Usage Reporter",
   "description": "上报本机 Cursor 会话到看板，并支持从看板一键切换本机登录账号",
-  "version": "0.2.1",
+  "version": "0.2.8",
   "publisher": "poiig",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -40,6 +40,16 @@
           "default": "ctu-change-me",
           "markdownDescription": "与服务端 `.env` 的 `ACCESS_KEY` 一致。默认 `ctu-change-me` 仅便于开箱试用，**生产环境请务必修改**（服务端与扩展保持一致）。"
         },
+        "cursorTeamUsage.operatorUsername": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "安装此插件的看板用户名，由个性化安装包自动写入，用于识别谁正在使用哪个 Cursor 账号。"
+        },
+        "cursorTeamUsage.operatorProof": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "服务端为该用户签发的签名，由安装包自动写入。不要手改；改了用户名就会校验失败。"
+        },
         "cursorTeamUsage.displayName": {
           "type": "string",
           "default": "",
@@ -76,6 +86,14 @@
       {
         "command": "cursorTeamUsage.claimSwitchTicket",
         "title": "Cursor Team Usage: 粘贴切换票据"
+      },
+      {
+        "command": "cursorTeamUsage.restoreLastAccount",
+        "title": "Cursor Team Usage: 恢复上次账号"
+      },
+      {
+        "command": "cursorTeamUsage.checkUpdate",
+        "title": "Cursor Team Usage: 从看板安装/更新插件"
       }
     ]
   },
@@ -93,7 +111,5 @@
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0"
   },
-  "dependencies": {
-    "cursor-team-usage": "file:.."
-  }
+  "dependencies": {}
 }

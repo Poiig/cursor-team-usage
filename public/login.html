@@ -11,13 +11,13 @@
     <main class="login-card">
       <div class="brand-title login-brand">
         <img class="brand-mark" src="/favicon.svg" width="36" height="36" alt="" />
-        <h1>Cursor Team Usage</h1>
+        <h1>登录</h1>
       </div>
-      <p class="muted">多账号用量管理看板</p>
+      <p id="applicationStatus" class="application-status hidden"></p>
       <form id="loginForm" class="login-form">
         <label>
           用户名
-          <input id="username" name="username" value="admin" autocomplete="username" required />
+          <input id="username" name="username" autocomplete="username" required autofocus />
         </label>
         <label>
           密码
@@ -27,15 +27,13 @@
             type="password"
             autocomplete="current-password"
             required
-            placeholder="默认 admin"
-            autofocus
           />
         </label>
         <p id="loginError" class="error-box hidden"></p>
         <button type="submit" class="btn primary" id="btnLogin">登录</button>
       </form>
       <p class="hint login-hint">
-        支持多用户。首次部署默认 <code>admin</code> / <code>admin</code>，登录后须立即改密；普通用户由管理员创建。
+        <a href="/register.html">申请注册</a>
       </p>
     </main>
     <script type="module" src="/login.js"></script>

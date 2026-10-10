@@ -8,10 +8,13 @@ import sqlite3
 import sys
 
 
+# 与 write_cursor_auth 对齐，便于切换前完整备份、恢复
 KEYS = (
     "cursorAuth/accessToken",
     "cursorAuth/cachedEmail",
     "cursorAuth/refreshToken",
+    "cursorAuth/stripeMembershipAuthId",
+    "cursorAuth/cachedSignUpType",
 )
 
 

@@ -6,6 +6,8 @@ import type { LocalAuthPayload } from './authWriter';
 export type ReporterConfig = {
   apiBaseUrl: string;
   accessKey: string;
+  operatorUsername: string;
+  operatorProof: string;
   displayName: string;
   refreshAfterReport: boolean;
   autoReportIntervalMinutes: number;
@@ -16,6 +18,8 @@ export function readReporterConfig(): ReporterConfig {
   return {
     apiBaseUrl: String(cfg.get('apiBaseUrl') || 'http://127.0.0.1:3780').replace(/\/+$/, ''),
     accessKey: String(cfg.get('accessKey') || '').trim(),
+    operatorUsername: String(cfg.get('operatorUsername') || '').trim(),
+    operatorProof: String(cfg.get('operatorProof') || '').trim(),
     displayName: String(cfg.get('displayName') || '').trim(),
     refreshAfterReport: cfg.get('refreshAfterReport') !== false,
     autoReportIntervalMinutes: Number(cfg.get('autoReportIntervalMinutes') ?? 60),
@@ -41,6 +45,7 @@ export async function reportSession(
   assertReporterConfig(config);
 
   const host = os.hostname();
+  const own = vscode.extensions.getExtension('poiig.cursor-team-usage-reporter');
   const res = await fetch(`${config.apiBaseUrl}/api/agent/report`, {
     method: 'POST',
     headers: {
@@ -53,6 +58,10 @@ export async function reportSession(
       displayName: config.displayName || host || session.email || session.userId,
       email: session.email,
       hostname: host,
+      operatorUsername: config.operatorUsername,
+      operatorProof: config.operatorProof,
+      pluginVersion: String(own?.packageJSON?.version || ''),
+      pluginBuild: String(own?.packageJSON?.ctuBuild || ''),
       refresh: config.refreshAfterReport,
     }),
   });

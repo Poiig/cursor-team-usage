@@ -47,8 +47,26 @@ import {
   finishAccountSwitch,
   getSwitchReport,
   listAccountSwitchLogs,
+  recommendSwitchMember,
 } from './account-switch.js';
 import {
+  enrichMembersWithPresence,
+  hydratePresenceFromAppLog,
+  listPresenceByUsername,
+  recordAccountPresence,
+} from './account-presence.js';
+import { listLoginEvents, recordLoginEvent } from './login-log.js';
+import { createApplication, lookupApplication, markApplication } from './applications.js';
+import { verifyOperatorUsername } from './operator-proof.js';
+import {
+  forgetPluginClient,
+  listPluginClientViews,
+  recordPluginInstall,
+  recordPluginReport,
+} from './plugin-clients.js';
+import { listReportEvents, recordReportEvent } from './report-log.js';
+import {
+  approveUser,
   authenticateUser,
   changeOwnPassword,
   createUser,
@@ -57,10 +75,21 @@ import {
   isAdminUsername,
   listPublicUsers,
   mustChangePasswordFor,
+  registerUser,
+  rejectUser,
   removeUser,
   resetUserPassword,
   updateUser,
 } from './users.js';
+import {
+  buildPatchedVsix,
+  bufferEtag,
+  consumeInstallToken,
+  getExtensionBuildMeta,
+  getConfiguredPublicBaseUrl,
+  issueInstallToken,
+  renderInstallPs1,
+} from './extension-asset.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -80,6 +109,9 @@ const MIME = {
 const PUBLIC_STATIC = new Set([
   '/login.html',
   '/login.js',
+  '/register.html',
+  '/register.js',
+  '/application-status.js',
   '/styles.css',
   '/favicon.svg',
   '/favicon.png',
@@ -97,11 +129,58 @@ const refreshingIds = new Set();
  */
 async function readBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 1_000_000) {
+      const err = new Error('请求体过大');
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString('utf8');
   if (!text) return {};
   return JSON.parse(text);
+}
+
+/** 登录 / 注册按 TCP 对端限流，不信 X-Forwarded-For，避免改头绕过。 */
+const attemptBuckets = new Map();
+
+/**
+ * @param {string} key
+ * @param {number} limit
+ * @param {number} windowMs
+ */
+function allowAttempt(key, limit, windowMs) {
+  const now = Date.now();
+  const fresh = (attemptBuckets.get(key) || []).filter((t) => now - t < windowMs);
+  if (fresh.length >= limit) {
+    attemptBuckets.set(key, fresh);
+    return false;
+  }
+  fresh.push(now);
+  attemptBuckets.set(key, fresh);
+  return true;
+}
+
+/** @param {import('node:http').IncomingMessage} req */
+function peerIp(req) {
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+/**
+ * 只有安装包里的签名对得上、且账号仍可登录，才把上报算到这个人身上。
+ * @param {string} username
+ * @param {string} proof
+ */
+async function trustedOperatorName(username, proof) {
+  const name = String(username || '').trim();
+  if (!verifyOperatorUsername(name, proof)) return null;
+  const user = await getPublicUser(name);
+  if (!user || user.pending || user.disabled) return null;
+  return user.username;
 }
 
 /**
@@ -192,6 +271,10 @@ async function refreshOne(id, ctx = {}) {
         触发: trigger || undefined,
         结果: '成功',
         同步时间: result?.lastSyncedAt || snapshot?.syncedAt,
+        可选接口警告:
+          Array.isArray(snapshot?.warnings) && snapshot.warnings.length
+            ? snapshot.warnings.join(' | ')
+            : undefined,
       });
       return result;
     } catch (e) {
@@ -278,7 +361,11 @@ async function refreshDueMembers(concurrency = 2, ctx = {}) {
 
 /** @param {number} [concurrency] @param {{ source?: string, trigger?: string }} [ctx] */
 async function refreshAll(concurrency = 3, ctx = {}) {
-  const members = await getAllMembersInternal();
+  const members = (await getAllMembersInternal()).sort((a, b) => {
+    const aTime = Date.parse(a.lastSyncedAt || '') || 0;
+    const bTime = Date.parse(b.lastSyncedAt || '') || 0;
+    return aTime - bTime;
+  });
   await writeAppLog('全量刷新', {
     来源: ctx.source || '控制台',
     触发: ctx.trigger || '手动',
@@ -389,8 +476,14 @@ async function serveStatic(urlPath) {
 function requiresConsoleAuth(pathname, method) {
   if (pathname === '/api/health') return false;
   if (pathname === '/api/auth/login' && method === 'POST') return false;
+  if (pathname === '/api/auth/register' && method === 'POST') return false;
+  if (pathname === '/api/auth/application-status' && method === 'POST') return false;
   // 扩展侧用 Access Key，不走控制台 Cookie
   if (pathname.startsWith('/api/agent/')) return false;
+  // 插件元数据 / 凭安装令牌下载：供一键安装脚本与更新检查
+  if (pathname === '/api/extension/meta' && method === 'GET') return false;
+  if (pathname === '/api/extension/reporter.vsix' && method === 'GET') return false;
+  if (pathname === '/api/extension/install.ps1' && method === 'GET') return false;
   if (pathname.startsWith('/api/')) return true;
   if (pathname === '/' || pathname === '/index.html' || pathname === '/detail.html') return true;
   if (pathname === '/app.js' || pathname === '/detail.js' || pathname === '/shared.js') return true;
@@ -407,9 +500,28 @@ function requiresAdmin(pathname, method) {
   if (pathname === '/api/export/accounts') return true;
   if (pathname.startsWith('/api/users')) return true;
   if (pathname.startsWith('/api/reports')) return true;
+  if (pathname === '/api/login-logs') return true;
+  if (pathname === '/api/report-logs') return true;
   const memberWrite = pathname.match(/^\/api\/members\/[^/]+$/);
   if (memberWrite && (method === 'PUT' || method === 'DELETE')) return true;
   return false;
+}
+
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @param {Buffer} buf
+ * @param {string} fileName
+ * @param {string} contentType
+ */
+function sendDownload(res, buf, fileName, contentType) {
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Content-Length': buf.length,
+    'Content-Disposition': `attachment; filename="${fileName}"`,
+    'Cache-Control': 'no-store',
+    ETag: bufferEtag(buf),
+  });
+  res.end(buf);
 }
 
 /**
@@ -454,7 +566,16 @@ const server = http.createServer(async (req, res) => {
         res.end();
         return;
       }
-      req.consoleUser = session.username;
+      const me = await getPublicUser(session.username);
+      if (!me || me.disabled || me.pending) {
+        if (pathname.startsWith('/api/')) {
+          return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
+        }
+        res.writeHead(302, { Location: '/login.html' });
+        res.end();
+        return;
+      }
+      req.consoleUser = me.username;
       if (requiresAdmin(pathname, method)) {
         await assertAdmin(req);
       }
@@ -469,10 +590,117 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (method === 'GET' && pathname === '/api/extension/meta') {
+      const meta = await getExtensionBuildMeta();
+      const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || '')
+        .trim()
+        .replace(/\/+$/, '');
+      return sendJson(res, 200, {
+        ok: true,
+        ...meta,
+        accessKeyConfigured: isAccessKeyConfigured(),
+        publicBaseUrl,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/extension/install-link') {
+      const apiBaseUrl = getConfiguredPublicBaseUrl();
+      const meta = await getExtensionBuildMeta();
+      if (!meta.available) {
+        const err = new Error('当前镜像未附带插件资产，请用含扩展构建的镜像重新部署');
+        err.status = 503;
+        throw err;
+      }
+      if (!isAccessKeyConfigured()) {
+        const err = new Error('未配置 ACCESS_KEY，无法生成与看板一致的插件');
+        err.status = 503;
+        throw err;
+      }
+      const operatorUsername = String(req.consoleUser || '').trim();
+      const token = issueInstallToken(apiBaseUrl, operatorUsername);
+      const vsixPath = `/api/extension/reporter.vsix?token=${encodeURIComponent(token)}`;
+      const ps1Path = `/api/extension/install.ps1?token=${encodeURIComponent(token)}`;
+      await writeAppLog('签发插件安装链', {
+        操作者: req.consoleUser,
+        看板地址: apiBaseUrl,
+        构建号: meta.build,
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        apiBaseUrl,
+        version: meta.version,
+        build: meta.build,
+        operatorUsername,
+        token,
+        vsixUrl: `${apiBaseUrl}${vsixPath}`,
+        installPs1Url: `${apiBaseUrl}${ps1Path}`,
+        // Windows 一行安装（下载脚本并执行）
+        oneLiner: `irm '${apiBaseUrl}${ps1Path}' | iex`,
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/extension/reporter.vsix') {
+      const token = String(url.searchParams.get('token') || '');
+      const row = consumeInstallToken(token);
+      if (!row) {
+        // 已登录管理员也可直接拉（面板调试）
+        const session = readSessionFromRequest(req);
+        if (!session || !(await isAdminUsername(session.username))) {
+          return sendJson(res, 401, { error: '安装令牌无效或已过期', code: 'INSTALL_TOKEN' });
+        }
+        const apiBaseUrl = getConfiguredPublicBaseUrl();
+        const packed = await buildPatchedVsix({
+          apiBaseUrl,
+          operatorUsername: session.username,
+        });
+        await recordPluginInstall(session.username, packed);
+        return sendDownload(
+          res,
+          packed.buffer,
+          packed.fileName,
+          'application/octet-stream',
+        );
+      }
+      const packed = await buildPatchedVsix({
+        apiBaseUrl: row.apiBaseUrl,
+        operatorUsername: row.operatorUsername,
+      });
+      await recordPluginInstall(row.operatorUsername, packed);
+      return sendDownload(res, packed.buffer, packed.fileName, 'application/octet-stream');
+    }
+
+    if (method === 'GET' && pathname === '/api/extension/install.ps1') {
+      const token = String(url.searchParams.get('token') || '');
+      const row = consumeInstallToken(token);
+      if (!row) {
+        return sendJson(res, 401, { error: '安装令牌无效或已过期', code: 'INSTALL_TOKEN' });
+      }
+      const meta = await getExtensionBuildMeta();
+      const downloadUrl = `${row.apiBaseUrl}/api/extension/reporter.vsix?token=${encodeURIComponent(token)}`;
+      const ps1 = renderInstallPs1({
+        downloadUrl,
+        version: meta.version,
+        build: meta.build,
+      });
+      const buf = Buffer.from(ps1, 'utf8');
+      return sendDownload(res, buf, 'install-cursor-team-usage-reporter.ps1', 'text/plain; charset=utf-8');
+    }
+
     if (method === 'POST' && pathname === '/api/auth/login') {
+      if (!allowAttempt(`login:${peerIp(req)}`, 30, 10 * 60 * 1000)) {
+        const err = new Error('尝试过于频繁，请稍后再试');
+        err.status = 429;
+        throw err;
+      }
       const body = await readBody(req);
       const user = await authenticateUser(body?.username, body?.password);
       if (!user) {
+        await recordLoginEvent({
+          username: body?.username,
+          ok: false,
+          ip: clientIpOf(req),
+          userAgent: req.headers['user-agent'],
+        });
         const err = new Error('用户名或密码错误');
         err.status = 401;
         throw err;
@@ -482,6 +710,14 @@ const server = http.createServer(async (req, res) => {
       await writeAppLog('登录', {
         用户: user.username,
         角色: user.role,
+        IP: clientIpOf(req) || undefined,
+      });
+      await recordLoginEvent({
+        username: user.username,
+        ok: true,
+        role: user.role,
+        ip: clientIpOf(req),
+        userAgent: req.headers['user-agent'],
       });
       return sendJson(res, 200, {
         ok: true,
@@ -489,6 +725,37 @@ const server = http.createServer(async (req, res) => {
         role: user.role,
         mustChangePassword: Boolean(user.mustChangePassword),
       });
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/register') {
+      if (!allowAttempt(`register:${peerIp(req)}`, 10, 10 * 60 * 1000)) {
+        const err = new Error('申请过于频繁，请稍后再试');
+        err.status = 429;
+        throw err;
+      }
+      const body = await readBody(req);
+      const user = await registerUser({
+        username: body?.username,
+        password: body?.password,
+      });
+      const application = await createApplication(user.username);
+      await writeAppLog('注册申请', {
+        用户: user.username,
+        IP: clientIpOf(req) || undefined,
+      });
+      return sendJson(res, 201, {
+        ok: true,
+        user,
+        token: application.token,
+        message: '已提交注册申请，请等待管理员审批后再登录',
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/application-status') {
+      const body = await readBody(req);
+      const view = await lookupApplication(body?.token);
+      if (!view) return sendJson(res, 404, { error: '未找到申请', status: 'unknown' });
+      return sendJson(res, 200, view);
     }
 
     if (method === 'POST' && pathname === '/api/auth/logout') {
@@ -500,7 +767,7 @@ const server = http.createServer(async (req, res) => {
       const session = readSessionFromRequest(req);
       if (!session) return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
       const me = await getPublicUser(session.username);
-      if (!me || me.disabled) {
+      if (!me || me.disabled || me.pending) {
         return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
       }
       return sendJson(res, 200, {
@@ -525,7 +792,32 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'GET' && pathname === '/api/users') {
       await assertAdmin(req);
-      return sendJson(res, 200, { users: await listPublicUsers() });
+      const users = await listPublicUsers();
+      const presence = await listPresenceByUsername();
+      const plugins = await listPluginClientViews();
+      return sendJson(
+        res,
+        200,
+        {
+          users: users.map((user) => ({
+            ...user,
+            activeAccounts: presence[user.username] || [],
+            plugin: plugins[user.username] || null,
+          })),
+        },
+      );
+    }
+
+    if (method === 'GET' && pathname === '/api/login-logs') {
+      await assertAdmin(req);
+      const limit = Number(url.searchParams.get('limit') || 200);
+      return sendJson(res, 200, { logs: await listLoginEvents(limit) });
+    }
+
+    if (method === 'GET' && pathname === '/api/report-logs') {
+      await assertAdmin(req);
+      const limit = Number(url.searchParams.get('limit') || 200);
+      return sendJson(res, 200, { logs: await listReportEvents(limit) });
     }
 
     if (method === 'POST' && pathname === '/api/users') {
@@ -544,7 +836,9 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 201, { user });
     }
 
-    const userMatch = pathname.match(/^\/api\/users\/([^/]+)(\/reset-password)?$/);
+    const userMatch = pathname.match(
+      /^\/api\/users\/([^/]+)(\/reset-password|\/approve|\/reject)?$/,
+    );
     if (userMatch) {
       await assertAdmin(req);
       const username = decodeURIComponent(userMatch[1]);
@@ -554,6 +848,19 @@ const server = http.createServer(async (req, res) => {
         const user = await resetUserPassword(username, String(body?.password || ''));
         await writeAppLog('重置密码', { 操作者: req.consoleUser, 用户: user.username });
         return sendJson(res, 200, { user });
+      }
+      if (method === 'POST' && suffix === '/approve') {
+        const user = await approveUser(username);
+        await markApplication(user.username, 'approved');
+        await writeAppLog('同意注册', { 操作者: req.consoleUser, 用户: user.username });
+        return sendJson(res, 200, { user });
+      }
+      if (method === 'POST' && suffix === '/reject') {
+        await markApplication(username, 'rejected');
+        await forgetPluginClient(username);
+        await rejectUser(username);
+        await writeAppLog('拒绝注册', { 操作者: req.consoleUser, 用户: username });
+        return sendJson(res, 200, { ok: true });
       }
       if (method === 'PUT' && !suffix) {
         const body = await readBody(req);
@@ -570,6 +877,8 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { user });
       }
       if (method === 'DELETE' && !suffix) {
+        await markApplication(username, 'removed');
+        await forgetPluginClient(username);
         await removeUser(username);
         await writeAppLog('删除用户', { 操作者: req.consoleUser, 用户: username });
         return sendJson(res, 200, { ok: true });
@@ -594,6 +903,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const sessionToken = String(body?.sessionToken || '').trim();
       if (!sessionToken) throw new Error('缺少 sessionToken');
+      const operatorUsername = await trustedOperatorName(body?.operatorUsername, body?.operatorProof);
       // upsert：新建写入显示名/主机名；已有账号只轮换 Token，不覆盖人工改名
       const { member, created } = await upsertMemberBySession({
         sessionToken,
@@ -601,12 +911,30 @@ const server = http.createServer(async (req, res) => {
         email: body?.email,
         hostname: body?.hostname,
       });
+      await recordAccountPresence({
+        memberId: member.id,
+        memberDisplayName: member.displayName,
+        hostname: body?.hostname,
+        username: operatorUsername,
+        label: operatorUsername || body?.displayName || body?.hostname,
+      });
+      if (operatorUsername) {
+        await recordPluginReport(operatorUsername, {
+          version: body?.pluginVersion,
+          build: body?.pluginBuild,
+          hostname: body?.hostname,
+        });
+      }
       await writeAppLog(created ? '注册' : '上报', {
         账号: memberLogLabel(member),
         操作: created ? '新建账号' : '更新Token',
+        使用人: operatorUsername || undefined,
+        使用人校验: body?.operatorUsername && !operatorUsername ? '失败' : undefined,
         主机名: body?.hostname || member?.hostname || undefined,
         邮箱: body?.email || member?.email || undefined,
         显示名请求: body?.displayName || undefined,
+        插件版本: body?.pluginVersion || undefined,
+        插件构建: body?.pluginBuild || undefined,
       });
       const shouldRefresh = body?.refresh !== false;
       let refreshed = member;
@@ -616,6 +944,18 @@ const server = http.createServer(async (req, res) => {
           trigger: '上报后刷新',
         });
       }
+      await recordReportEvent({
+        operatorUsername,
+        memberId: member.id,
+        memberDisplayName: member.displayName,
+        memberEmail: body?.email || member.email || null,
+        hostname: String(body?.hostname || '').trim() || null,
+        hostRemark: String(body?.displayName || '').trim() || null,
+        pluginVersion: String(body?.pluginVersion || '').trim() || null,
+        pluginBuild: String(body?.pluginBuild || '').trim() || null,
+        ok: !refreshed?.lastError,
+        error: refreshed?.lastError || null,
+      });
       return sendJson(res, created ? 201 : 200, {
         ok: true,
         created,
@@ -640,6 +980,24 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, ...claimed });
     }
 
+    if (method === 'GET' && pathname === '/api/agent/extension/vsix') {
+      assertAccessKey(req);
+      const apiBaseUrl = getConfiguredPublicBaseUrl();
+      const operatorUsername = await trustedOperatorName(
+        req.headers['x-console-user'],
+        req.headers['x-operator-proof'],
+      );
+      if (!operatorUsername) {
+        return sendJson(res, 401, { error: '插件使用人签名无效', code: 'OPERATOR_PROOF' });
+      }
+      const packed = await buildPatchedVsix({
+        apiBaseUrl,
+        operatorUsername,
+      });
+      await recordPluginInstall(operatorUsername, packed);
+      return sendDownload(res, packed.buffer, packed.fileName, 'application/octet-stream');
+    }
+
     if (method === 'POST' && pathname === '/api/agent/switch/result') {
       assertAccessKey(req);
       const body = await readBody(req);
@@ -649,6 +1007,15 @@ const server = http.createServer(async (req, res) => {
         error: body?.error,
         hostname: body?.hostname,
       });
+      if (log.status === 'success') {
+        await recordAccountPresence({
+          memberId: log.memberId,
+          memberDisplayName: log.memberDisplayName,
+          hostname: log.hostname,
+          username: log.operatorUsername,
+          label: log.operatorUsername || log.hostname,
+        });
+      }
       await writeAppLog('切换结果', {
         操作者: log.operatorUsername,
         账号: log.memberDisplayName || log.memberEmail || log.memberId,
@@ -660,8 +1027,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (method === 'GET' && pathname === '/api/members') {
-      const members = await listMembers();
-      return sendJson(res, 200, { members, summary: buildTeamSummary(members) });
+      const members = await enrichMembersWithPresence(await listMembers());
+      const recommended = recommendSwitchMember(members);
+      return sendJson(res, 200, {
+        members,
+        summary: buildTeamSummary(members),
+        recommendedSwitchId: recommended?.id || null,
+      });
     }
 
     if (method === 'GET' && pathname === '/api/local-session') {
@@ -782,7 +1154,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (method === 'POST' && pathname === '/api/refresh-all') {
-      const members = await refreshAll(3, { source: '控制台', trigger: '更新模型' });
+      const members = await refreshAll(1, { source: '控制台', trigger: '刷新用量' });
       return sendJson(res, 200, {
         members,
         summary: buildTeamSummary(members.map((m) => m || {}).filter(Boolean)),
@@ -821,6 +1193,7 @@ const server = http.createServer(async (req, res) => {
 
 await loadAppConfig();
 await initAppLog();
+await hydratePresenceFromAppLog();
 // 控制台账号落在存储驱动内，须先开库再建默认 admin。
 await initStore();
 await initUsers();

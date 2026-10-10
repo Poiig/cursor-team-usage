@@ -5,6 +5,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { decodeJwtPayload, jwtFromCookie, sessionFromCookie } from './auth.js';
+import { getMemberCapacity } from './account-presence.js';
+import { getPublicUser } from './users.js';
 import {
   getMemberInternal,
   getSwitchLog,
@@ -99,6 +101,43 @@ export function usageTotalPercentOf(member) {
 }
 
 /**
+ * 切换前的统一可用性检查。额度已用完、尚无额度数据或同步异常都不能切换。
+ * @param {any} member
+ * @returns {string | null}
+ */
+export function switchBlockReason(member) {
+  if (!member) return '成员不存在';
+  if (member.lastError) return '该账号同步异常，请先更新 Token 后再切换';
+  const used = usageTotalPercentOf(member);
+  if (used == null) return '该账号尚无额度数据，请先刷新后再切换';
+  if (used >= 100) return '该账号额度已用完，不能切换';
+  if (
+    member.maxUsers != null &&
+    Number(member.activeUserCount || 0) >= Number(member.maxUsers)
+  ) {
+    return `当前使用人数已满（${member.activeUserCount}/${member.maxUsers}）`;
+  }
+  return null;
+}
+
+/**
+ * 推荐最早到期且仍有额度的账号；没有重置日时排到最后。
+ * @param {any[]} members
+ */
+export function recommendSwitchMember(members) {
+  return (
+    [...(members || [])]
+      .filter((member) => !switchBlockReason(member))
+      .sort((a, b) => {
+        const aReset = Date.parse(a?.lastSnapshot?.window?.resetIso || '') || Infinity;
+        const bReset = Date.parse(b?.lastSnapshot?.window?.resetIso || '') || Infinity;
+        if (aReset !== bReset) return aReset - bReset;
+        return (usageTotalPercentOf(b) || 0) - (usageTotalPercentOf(a) || 0);
+      })[0] || null
+  );
+}
+
+/**
  * 按操作者汇总切换报表（次数、用过几个号、IP、主机名）。
  * @param {import('./store-sqlite.js').SwitchLogRow[] | object[]} logs
  */
@@ -143,11 +182,18 @@ export function buildSwitchReport(logs) {
  */
 export async function createAccountSwitch(input) {
   await sweepExpiredTickets();
+  const operator = await getPublicUser(input.operatorUsername);
+  if (!operator || operator.disabled || operator.pending) {
+    const err = new Error('当前账号不能切换');
+    err.status = 403;
+    throw err;
+  }
   const member = await getMemberInternal(input.memberId);
-  if (!member) throw new Error('成员不存在');
-  // 异常账号（同步失败 / Token 失效）禁止切换，避免把坏会话写进本机
-  if (member.lastError) {
-    const err = new Error('该账号同步异常，请先更新 Token 后再切换');
+  const capacity = member ? await getMemberCapacity(member) : {};
+  const checkedMember = member ? { ...member, ...capacity } : null;
+  const blocked = switchBlockReason(checkedMember);
+  if (blocked) {
+    const err = new Error(blocked);
     err.status = 400;
     throw err;
   }
@@ -225,6 +271,18 @@ export async function claimAccountSwitch(input) {
     });
     const err = new Error('切换票据已过期');
     err.status = 410;
+    throw err;
+  }
+  const operator = await getPublicUser(ticket.operatorUsername);
+  if (!operator || operator.disabled || operator.pending) {
+    tickets.delete(ticketId);
+    await updateSwitchLog(ticket.logId, {
+      status: 'failed',
+      error: '操作者已禁用或未审批',
+      finishedAt: new Date().toISOString(),
+    });
+    const err = new Error('操作者已禁用或未审批');
+    err.status = 403;
     throw err;
   }
 

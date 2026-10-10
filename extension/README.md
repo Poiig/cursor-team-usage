@@ -4,46 +4,30 @@
 
 ## 使用前
 
-1. 看板已启动；默认 Access Key 为 `ctu-change-me`（与扩展默认一致）。**生产环境请同时修改**服务端 `.env` 的 `ACCESS_KEY` 与扩展设置。
-2. 若扩展不在本机访问看板，看板需监听可达地址（如 `HOST=0.0.0.0`）。
+1. 看板已启动；`ACCESS_KEY` 与扩展 `accessKey` 须一致（一键安装会自动注入）。
+2. 若扩展不在本机访问看板，看板需监听可达地址，并建议设置 `PUBLIC_BASE_URL`。
 3. 本机安装 **Python 3**（读写 `state.vscdb`：上报只读，切换会写入）。
 4. Cursor **开着**时扩展才会上报；关掉 IDE 即停止（这是正常行为）。
 
 ## 安装（推荐）
 
-不需要本机构建。PowerShell 从固定地址下载成品 VSIX 并安装到 Cursor：
+管理员登录看板 →「用户」→「一键安装插件」：
 
-```powershell
-# 默认地址
-irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1 | iex
+- 本机 Cursor 已开且本地桥 `:3781` 可用时，直接安装注入密钥后的 VSIX；
+- 否则按提示在 PowerShell 执行一行命令（下载 → `cursor --install-extension` → 启动 Cursor）。
 
-# 指定 VSIX 下载地址
-iex "& { $(irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1) } -Url 'https://example.com/reporter.vsix'"
-```
-
-或克隆仓库后：
-
-```powershell
-.\scripts\install-reporter.ps1
-.\scripts\install-reporter.ps1 -Url https://example.com/reporter.vsix
-```
-
-默认 VSIX：
-
-`https://github.com/Poiig/cursor-team-usage/releases/download/extension-latest/cursor-team-usage-reporter.vsix`
-
-安装后执行 **Developer: Reload Window**。
+安装后执行 **Developer: Reload Window**。扩展启动会对照看板构建号提示更新；也可命令面板「从看板安装/更新插件」。
 
 ## 开发者打包
 
-仓库根目录（需要 Node 20+）。打包前可按环境改 `package.json` 里的默认 `apiBaseUrl` / `accessKey`，再：
+镜像构建会执行 `npm run ext:asset`（仓库根），产出 `assets/reporter-base.vsix` + 构建号；运行时再注入 secret。本地：
 
 ```bash
 npm run ext:install
-npm run ext:package
+npm run ext:asset          # → assets/reporter-base.vsix
+# 或仅打扩展包：
+npm run ext:package        # → extension/*.vsix
 ```
-
-生成 `extension/cursor-team-usage-reporter-*.vsix`，自行放到上述下载地址对应位置。
 
 开发调试：
 
@@ -58,40 +42,15 @@ npm run watch
 
 安装后在设置中搜索 `cursorTeamUsage`：
 
-| 键 | 说明 | 默认 |
-| --- | --- | --- |
-| `apiBaseUrl` | 看板根 URL（无末尾 `/`） | `http://127.0.0.1:3780` |
-| `accessKey` | 与看板 `ACCESS_KEY` 一致 | `ctu-change-me`（生产请改） |
-| `displayName` | 仅**新建**时作显示名；已有账号上报不覆盖人工改名 | 空 → **用本机机器名** |
-| `autoReportIntervalMinutes` | 自动上报间隔（分钟）；**启动先报一次**，之后按此间隔；`0`=仅手动 | `30` |
-| `refreshAfterReport` | 上报后让看板立刻刷该账号用量 | `true` |
-| `localBridgePort` | 本机切换桥端口（仅 127.0.0.1）；`0`=关闭 | `3781` |
+| 键 | 说明 |
+| --- | --- |
+| `apiBaseUrl` | 看板根地址 |
+| `accessKey` | 与服务端 `ACCESS_KEY` 一致 |
+| `operatorUsername` | 安装插件的看板用户名；个性化安装包自动注入 |
+| `displayName` | 可选显示名；留空用机器名 |
+| `autoReportIntervalMinutes` | 自动上报间隔（分钟）；`0`=仅手动 |
+| `localBridgePort` | 本机桥端口，默认 `3781`；`0`=关闭 |
 
-> 已有账号再次上报只更新会话 Token；`displayName` / `hostname` 不会被覆盖。
+## 本地桥
 
-要把 `accessKey` / `apiBaseUrl` 打进 VSIX：打包前改 `package.json` → `contributes.configuration.properties` 里对应项的 `default`。公开仓库不要提交真实密钥。
-
-## 行为说明
-
-- 扩展激活约 8 秒后自动上报一次，之后按间隔执行（默认 30 分钟）。
-- 命令：`Cursor Team Usage: 立即上报本机账号` / `查看上报状态`；状态栏有 `CTU`。
-- 上报接口：`POST /api/agent/report`，请求头 `X-Access-Key`。
-- **一键切换**：看板优先 `POST http://127.0.0.1:3781/switch`（本机桥，**Agent 模式可用**）；回退 `cursor://…/switch?ticket=…`（多需 IDE 模式）。领取票据 → 写入本机 auth → 重启 Cursor；结果回报 `POST /api/agent/switch/result`。
-- 命令：`Cursor Team Usage: 粘贴切换票据`（桥与协议都失败时的兜底）。
-- 看板落盘的仍是 JWT；扩展只是在 Cursor 开着时把本地续期后的 Token 推上去，**关机期间不会续**。
-
-## 上报体示例
-
-```http
-POST /api/agent/report
-X-Access-Key: <accessKey>
-Content-Type: application/json
-
-{
-  "sessionToken": "...",
-  "displayName": "<机器名或自定义>",
-  "email": "...",
-  "hostname": "<机器名>",
-  "refresh": true
-}
-```
+看板「切换 / 恢复 / 一键安装插件」优先 `POST http://127.0.0.1:3781/...`，Agent 模式也可用。

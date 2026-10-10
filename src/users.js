@@ -1,6 +1,6 @@
 /**
  * 控制台多用户：admin 可管账号；普通用户可看用量并一键切换 Cursor 登录态。
- * 启动时把遗留 console_admin 迁到 console_users，保留既有口令。
+ * 支持自行注册，管理员审批通过后才可登录。
  */
 
 import { hashPassword, newSalt, verifyPassword } from './password.js';
@@ -21,6 +21,7 @@ import {
  *   createdAt: string,
  *   mustChangePassword: boolean,
  *   disabled: boolean,
+ *   pending: boolean,
  * }} ConsoleUser
  */
 
@@ -38,6 +39,7 @@ export function toPublicUser(user) {
     createdAt: user.createdAt,
     mustChangePassword: Boolean(user.mustChangePassword),
     disabled: Boolean(user.disabled),
+    pending: Boolean(user.pending),
   };
 }
 
@@ -81,6 +83,7 @@ function createDefaultAdmin() {
     createdAt: new Date().toISOString(),
     mustChangePassword: true,
     disabled: false,
+    pending: false,
   };
 }
 
@@ -98,6 +101,7 @@ export async function initUsers() {
   if (admin && (admin.mustChangePassword || isDefaultPassword(admin))) {
     admin.mustChangePassword = true;
     admin.role = 'admin';
+    admin.pending = false;
     await saveConsoleUser(admin);
   }
 }
@@ -111,8 +115,20 @@ export async function authenticateUser(username, password) {
   const name = normalizeUsername(username);
   if (!name) return null;
   const user = await getConsoleUser(name);
-  if (!user || user.disabled) return null;
-  if (!verifyPassword(String(password || ''), user)) return null;
+  if (!user || !verifyPassword(String(password || ''), user)) return null;
+  // 待审批 / 已禁用给出明确提示，避免与「账号密码错误」混淆
+  if (user.pending) {
+    const err = new Error('账号待管理员审批，通过后即可登录');
+    err.status = 403;
+    err.code = 'PENDING_APPROVAL';
+    throw err;
+  }
+  if (user.disabled) {
+    const err = new Error('账号已禁用');
+    err.status = 403;
+    err.code = 'DISABLED';
+    throw err;
+  }
   return {
     ...user,
     mustChangePassword: Boolean(user.mustChangePassword) || isDefaultPassword(user),
@@ -140,11 +156,70 @@ export async function getPublicUser(username) {
 /** @returns {Promise<ReturnType<typeof toPublicUser>[]>} */
 export async function listPublicUsers() {
   const users = await listConsoleUsers();
-  return users.map(toPublicUser);
+  // 待审批排前面，方便管理员处理
+  return users
+    .map(toPublicUser)
+    .sort((a, b) => Number(b.pending) - Number(a.pending) || a.username.localeCompare(b.username, 'zh'));
 }
 
 /**
- * 管理员新建普通用户或额外管理员。
+ * 公开自助注册：写入待审批用户，审批通过前不可登录。
+ * @param {{ username: string, password: string }} input
+ */
+export async function registerUser(input) {
+  const username = assertValidUsername(input.username);
+  if (username === ADMIN_NAME) throw new Error('admin 为系统保留账号，不可注册');
+  const password = assertValidPassword(input.password, { allowDefault: false });
+  if (await getConsoleUser(username)) throw new Error('用户名已存在');
+
+  const salt = newSalt();
+  /** @type {ConsoleUser} */
+  const user = {
+    username,
+    salt,
+    passwordHash: hashPassword(password, salt),
+    role: 'user',
+    createdAt: new Date().toISOString(),
+    mustChangePassword: false,
+    disabled: false,
+    pending: true,
+  };
+  await createConsoleUser(user);
+  return toPublicUser(user);
+}
+
+/**
+ * 管理员同意注册申请，之后可登录。
+ * @param {string} username
+ */
+export async function approveUser(username) {
+  const name = assertValidUsername(username);
+  if (name === ADMIN_NAME) throw new Error('admin 无需审批');
+  const user = await getConsoleUser(name);
+  if (!user) throw new Error('用户不存在');
+  if (!user.pending) throw new Error('该用户不在待审批状态');
+  user.pending = false;
+  user.disabled = false;
+  await saveConsoleUser(user);
+  return toPublicUser(user);
+}
+
+/**
+ * 管理员拒绝注册：直接删除待审批账号。
+ * @param {string} username
+ */
+export async function rejectUser(username) {
+  const name = assertValidUsername(username);
+  if (name === ADMIN_NAME) throw new Error('不能拒绝 admin');
+  const user = await getConsoleUser(name);
+  if (!user) throw new Error('用户不存在');
+  if (!user.pending) throw new Error('只能拒绝待审批用户');
+  await deleteConsoleUser(name);
+  return { ok: true, username: name };
+}
+
+/**
+ * 管理员新建普通用户或额外管理员（直接可登录，无需审批）。
  * @param {{ username: string, password: string, role?: 'admin' | 'user' }} input
  */
 export async function createUser(input) {
@@ -164,6 +239,7 @@ export async function createUser(input) {
     createdAt: new Date().toISOString(),
     mustChangePassword: true,
     disabled: false,
+    pending: false,
   };
   await createConsoleUser(user);
   return toPublicUser(user);
@@ -211,6 +287,7 @@ export async function updateUser(username, patch) {
   const name = assertValidUsername(username);
   const user = await getConsoleUser(name);
   if (!user) throw new Error('用户不存在');
+  if (user.pending) throw new Error('待审批用户请先同意或拒绝，不能直接改状态');
 
   if (patch.role != null) {
     const role = patch.role === 'admin' ? 'admin' : 'user';
@@ -244,7 +321,7 @@ export async function removeUser(username) {
 /** @param {string | undefined} username */
 export async function isAdminUsername(username) {
   const user = await getConsoleUser(normalizeUsername(username || ''));
-  return Boolean(user && user.role === 'admin' && !user.disabled);
+  return Boolean(user && user.role === 'admin' && !user.disabled && !user.pending);
 }
 
 /** 兼容旧调用：改 admin 自己的口令。 */

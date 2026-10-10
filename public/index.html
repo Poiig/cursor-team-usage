@@ -23,7 +23,10 @@
               <span>·</span>
               <a href="https://cursor.com/docs/models-and-pricing" target="_blank" rel="noreferrer">Model pricing ↗</a>
               <span>·</span>
-              <button type="button" class="btn-link-inline" id="btnHelp">使用说明</button>
+              <span class="header-help-actions">
+                <button type="button" class="btn-link-inline" id="btnHelp">使用说明</button>
+                <button type="button" class="btn sm primary" id="btnInstallExtension" title="安装个性化 Reporter">安装插件</button>
+              </span>
             </p>
           </div>
           <nav class="app-nav" aria-label="Main">
@@ -53,25 +56,30 @@
               <button type="button" class="filter-tab" data-status="ok">
                 正常 <span class="filter-count" data-count="ok">0</span>
               </button>
+              <button type="button" class="filter-tab" data-status="expiring" title="会话 Token 一周内过期">
+                临期 <span class="filter-count" data-count="expiring">0</span>
+              </button>
               <button type="button" class="filter-tab" data-status="error">
                 异常 <span class="filter-count" data-count="error">0</span>
               </button>
             </div>
             <input type="search" id="searchInput" placeholder="搜索账号名称 / 邮箱…" />
             <select id="sortBy" aria-label="排序">
-              <option value="remaining" selected>按剩余额度</option>
+              <option value="remaining">按剩余额度</option>
               <option value="todayTokens">按今日 tokens</option>
               <option value="name">按名称</option>
               <option value="used">按已用额度</option>
-              <option value="reset">按重置时间</option>
+              <option value="reset" selected>按重置时间</option>
             </select>
             <label class="switch" title="开启后邮箱将脱敏显示">
               <input type="checkbox" id="privacyMode" checked />
               <span class="switch-track" aria-hidden="true"></span>
               <span class="switch-label">隐私模式</span>
             </label>
+            <button type="button" class="btn primary" id="btnSwitchRecommended" title="切换到额度最早到期且仍有额度的账号">推荐切换</button>
+            <button type="button" class="btn" id="btnRestoreLocal" title="从本机备份区恢复切换前的 Cursor 账号">恢复上次账号</button>
             <button type="button" class="btn admin-only hidden" id="btnExport" title="导出账号列表 JSON">导出</button>
-            <button type="button" class="btn" id="btnRefreshAll" title="刷新全部账号用量">更新模型</button>
+            <button type="button" class="btn" id="btnRefreshAll" title="从额度更新时间最早的账号开始逐个刷新">刷新用量</button>
             <button type="button" class="btn primary admin-only hidden" id="btnAdd">+ 添加账号</button>
           </div>
         </div>
@@ -152,6 +160,22 @@
             <tbody id="reportRecentBody"></tbody>
           </table>
         </div>
+        <h3 class="report-subhead">最近自动上报</h3>
+        <div class="rank-table-wrap">
+          <table class="rank-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>使用人</th>
+                <th>Cursor 账号</th>
+                <th>主机 / 备注</th>
+                <th>插件</th>
+                <th>结果</th>
+              </tr>
+            </thead>
+            <tbody id="reportLogBody"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel users-panel hidden" id="tabUsers">
@@ -161,7 +185,7 @@
             <button type="button" class="btn primary" id="btnAddUser">+ 添加用户</button>
           </div>
         </div>
-        <p class="hint">管理员可添加 / 禁用用户、重置密码。普通用户可看用量、切换账号，不能改名册。</p>
+        <p class="hint">插件列在每次安装或签名上报后更新。未安装表示这个人还没用过插件。</p>
         <div class="rank-table-wrap">
           <table class="rank-table" id="userTable">
             <thead>
@@ -169,11 +193,28 @@
                 <th>用户名</th>
                 <th>角色</th>
                 <th>状态</th>
+                <th>当前使用账号</th>
+                <th>插件</th>
                 <th>创建时间</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="userTableBody"></tbody>
+          </table>
+        </div>
+        <h3 class="report-subhead">最近登录日志</h3>
+        <div class="rank-table-wrap">
+          <table class="rank-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>用户</th>
+                <th>结果</th>
+                <th>IP</th>
+                <th>客户端</th>
+              </tr>
+            </thead>
+            <tbody id="loginLogBody"></tbody>
           </table>
         </div>
       </section>
@@ -185,13 +226,13 @@
             <strong>定位</strong>：本地 / 内网并排看多个 Cursor 账号的用量与花费，不是官方 Team Admin。
           </li>
           <li>
-            <strong>登录</strong>：支持多用户。默认 <code>admin</code> / <code>admin</code>，首次须改密；普通用户由管理员在「用户」页创建。
+            <strong>登录</strong>：在登录页进入，或申请注册，管理员在「用户」页同意后即可登录。禁用后立即失去访问。
           </li>
           <li>
             <strong>权限</strong>：普通用户可看全部用量、刷新、一键切换；添加 / 删除账号、导出、用户管理、报表中心仅管理员。异常账号（同步失败）不可切换。
           </li>
           <li>
-            <strong>一键切换</strong>：账号卡片点「切换」→ 优先通知本机扩展桥 <code>127.0.0.1:3781</code>（Agent 模式可用）→ Cursor 弹窗确认后写入登录态并重启。桥不可用时回退 <code>cursor://</code>（多需 IDE 模式），或命令面板「粘贴切换票据」。
+            <strong>一键切换</strong>：账号卡片点「切换」→ 优先通知本机扩展桥 <code>127.0.0.1:3781</code>（Agent 模式可用）→ Cursor 弹窗确认后<strong>先备份当前本机登录态</strong>，再写入目标账号并重启。可用列表「恢复上次账号」或命令面板「恢复上次账号」从备份区还原。桥不可用时回退 <code>cursor://</code>，或「粘贴切换票据」。
           </li>
           <li>
             <strong>服务配置</strong>：改服务器上的 <code>.env</code>（模板
@@ -201,7 +242,10 @@
             <strong>录入账号</strong>：本机导入 / 粘贴 Token；多机用 Reporter 扩展定时上报（显示名默认机器名）。
           </li>
           <li>
-            <strong>刷新</strong>：服务端按每个账号的上次更新时间错开刷新（间隔见 <code>AUTO_REFRESH_SEC</code>，默认 1800 秒）；上报后会立刻拉一次用量。列表「更新模型」可强制全量更新。
+            <strong>插件安装</strong>：登录后在账号页点「安装插件」。安装包绑定当前用户并写入签名；用户页能看到版本。地址只认 <code>PUBLIC_BASE_URL</code>。优先本机桥 <code>:3781</code>，否则复制 PowerShell 一行命令。扩展启动会检查更新。
+          </li>
+          <li>
+            <strong>刷新</strong>：服务端按每个账号的上次更新时间错开刷新（间隔见 <code>AUTO_REFRESH_SEC</code>，默认 900 秒）；上报后会立刻拉一次用量。列表「刷新用量」会从最久未更新的账号开始逐个刷新。
           </li>
           <li>
             <strong>Token</strong>：落盘 JWT 会过期。看板不刷新 Token；靠扩展在 Cursor 开着时续报。关掉 IDE 即停止上报。换号后再登录旧号时，旧会话可能被 Cursor 注销。

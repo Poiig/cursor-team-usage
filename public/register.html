@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>申请注册 · Cursor Team Usage</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="standalone login-body">
+    <main class="login-card">
+      <div class="brand-title login-brand">
+        <img class="brand-mark" src="/favicon.svg" width="36" height="36" alt="" />
+        <h1>申请注册</h1>
+      </div>
+      <p class="muted">提交后需管理员同意才能登录。本机会记住申请，回来即可查看是否通过。</p>
+      <p id="applicationStatus" class="application-status hidden"></p>
+      <form id="registerForm" class="login-form">
+        <label>
+          用户名
+          <input
+            id="username"
+            name="username"
+            maxlength="32"
+            placeholder="例如：zhangsan"
+            autocomplete="username"
+            required
+            autofocus
+          />
+        </label>
+        <label>
+          密码
+          <input
+            id="password"
+            name="password"
+            type="password"
+            minlength="4"
+            placeholder="至少 4 位"
+            autocomplete="new-password"
+            required
+          />
+        </label>
+        <label>
+          确认密码
+          <input
+            id="password2"
+            name="password2"
+            type="password"
+            minlength="4"
+            placeholder="再输入一次"
+            autocomplete="new-password"
+            required
+          />
+        </label>
+        <p id="registerError" class="error-box hidden"></p>
+        <button type="submit" class="btn primary" id="btnRegister">提交申请</button>
+      </form>
+      <p class="hint login-hint">
+        已有账号？<a href="/login.html">返回登录</a>
+      </p>
+    </main>
+    <script type="module" src="/register.js"></script>
+  </body>
+</html>

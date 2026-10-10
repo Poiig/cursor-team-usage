@@ -234,9 +234,11 @@ function ensureSchema() {
       role TEXT NOT NULL DEFAULT 'user',
       created_at TEXT NOT NULL,
       must_change_password INTEGER NOT NULL DEFAULT 1,
-      disabled INTEGER NOT NULL DEFAULT 0
+      disabled INTEGER NOT NULL DEFAULT 0,
+      pending INTEGER NOT NULL DEFAULT 0
     )
   `);
+  ensureConsoleUserColumns();
   run(`
     CREATE TABLE IF NOT EXISTS account_switch_logs (
       id TEXT PRIMARY KEY,
@@ -285,8 +287,8 @@ function migrateConsoleAdminToUsers() {
   if (!row) return;
   run(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled)
-     VALUES (?,?,?,?,?,?,0)`,
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
+     VALUES (?,?,?,?,?,?,0,0)`,
     [
       String(row.username || 'admin'),
       String(row.password_hash),
@@ -307,8 +309,17 @@ function migrateConsoleAdminToUsers() {
  *   createdAt: string,
  *   mustChangePassword: boolean,
  *   disabled: boolean,
+ *   pending: boolean,
  * }} ConsoleUserRow
  */
+
+/** 旧库补齐注册审批列。 */
+function ensureConsoleUserColumns() {
+  const cols = new Set(getAll('PRAGMA table_info(console_users)').map((c) => String(c.name)));
+  if (!cols.has('pending')) {
+    run('ALTER TABLE console_users ADD COLUMN pending INTEGER NOT NULL DEFAULT 0');
+  }
+}
 
 /**
  * @param {any} row
@@ -324,6 +335,7 @@ function rowToConsoleUser(row) {
     createdAt: String(row.created_at),
     mustChangePassword: Boolean(row.must_change_password),
     disabled: Boolean(row.disabled),
+    pending: Boolean(row.pending),
   };
 }
 
@@ -643,8 +655,8 @@ export async function createConsoleUser(user) {
   if (exists) throw new Error('用户名已存在');
   run(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled)
-     VALUES (?,?,?,?,?,?,?)`,
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
+     VALUES (?,?,?,?,?,?,?,?)`,
     [
       user.username,
       user.passwordHash,
@@ -653,6 +665,7 @@ export async function createConsoleUser(user) {
       user.createdAt,
       user.mustChangePassword ? 1 : 0,
       user.disabled ? 1 : 0,
+      user.pending ? 1 : 0,
     ],
   );
   // 同步写回遗留 console_admin，避免旧工具只读那张表时丢 admin
@@ -683,15 +696,16 @@ export async function createConsoleUser(user) {
 export async function saveConsoleUser(user) {
   run(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled)
-     VALUES (?,?,?,?,?,?,?)
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
+     VALUES (?,?,?,?,?,?,?,?)
      ON CONFLICT(username) DO UPDATE SET
        password_hash=excluded.password_hash,
        salt=excluded.salt,
        role=excluded.role,
        created_at=excluded.created_at,
        must_change_password=excluded.must_change_password,
-       disabled=excluded.disabled`,
+       disabled=excluded.disabled,
+       pending=excluded.pending`,
     [
       user.username,
       user.passwordHash,
@@ -700,6 +714,7 @@ export async function saveConsoleUser(user) {
       user.createdAt,
       user.mustChangePassword ? 1 : 0,
       user.disabled ? 1 : 0,
+      user.pending ? 1 : 0,
     ],
   );
   if (user.username === 'admin') {
@@ -885,5 +900,6 @@ export async function saveConsoleAdmin(admin) {
     createdAt: admin.createdAt,
     mustChangePassword: Boolean(admin.mustChangePassword),
     disabled: false,
+    pending: false,
   });
 }

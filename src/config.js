@@ -30,6 +30,8 @@ export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
  *   autoRefreshSec: number,
  *   sessionSecret: string,
  *   logRetentionDays: number,
+ *   proMaxUsers: number,
+ *   proPlusMaxUsers: number,
  * }} AppConfig
  */
 
@@ -39,9 +41,11 @@ let runtime = {
   databaseUrl: '',
   sqlitePath: DEFAULT_SQLITE,
   accessKey: DEFAULT_ACCESS_KEY,
-  autoRefreshSec: 1800,
+  autoRefreshSec: 900,
   sessionSecret: '',
   logRetentionDays: 30,
+  proMaxUsers: 3,
+  proPlusMaxUsers: 5,
 };
 
 /**
@@ -92,9 +96,11 @@ function defaults() {
     databaseUrl: '',
     sqlitePath: DEFAULT_SQLITE,
     accessKey: DEFAULT_ACCESS_KEY,
-    autoRefreshSec: 1800, // 每账号距上次同步的刷新间隔（秒）
+    autoRefreshSec: 900, // 每账号距上次同步的刷新间隔（秒）
     sessionSecret: '',
     logRetentionDays: 30, // data/log 下日志保留天数，0=不自动删除
+    proMaxUsers: 3,
+    proPlusMaxUsers: 5,
   };
 }
 
@@ -149,6 +155,14 @@ function configFromProcessEnv() {
   if (process.env.LOG_RETENTION_DAYS != null && process.env.LOG_RETENTION_DAYS !== '') {
     const n = Number(process.env.LOG_RETENTION_DAYS);
     if (Number.isFinite(n) && n >= 0) next.logRetentionDays = Math.floor(n);
+  }
+  if (process.env.PRO_MAX_USERS != null && process.env.PRO_MAX_USERS !== '') {
+    const n = Number(process.env.PRO_MAX_USERS);
+    if (Number.isFinite(n) && n > 0) next.proMaxUsers = Math.floor(n);
+  }
+  if (process.env.PRO_PLUS_MAX_USERS != null && process.env.PRO_PLUS_MAX_USERS !== '') {
+    const n = Number(process.env.PRO_PLUS_MAX_USERS);
+    if (Number.isFinite(n) && n > 0) next.proPlusMaxUsers = Math.floor(n);
   }
   return next;
 }
@@ -266,6 +280,14 @@ export function getSessionSecret() {
 export function getLogRetentionDays() {
   const n = getAppConfig().logRetentionDays;
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 30;
+}
+
+export function getAccountUserLimits() {
+  const config = getAppConfig();
+  return {
+    pro: config.proMaxUsers,
+    proPlus: config.proPlusMaxUsers,
+  };
 }
 
 export function getConfigPath() {

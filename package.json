@@ -18,7 +18,8 @@
     "ext:install": "npm install --prefix extension",
     "ext:compile": "npm run compile --prefix extension",
     "ext:watch": "npm run watch --prefix extension",
-    "ext:package": "npm run package --prefix extension"
+    "ext:package": "npm run package --prefix extension",
+    "ext:asset": "node scripts/build-extension-asset.mjs"
   },
   "engines": {
     "node": ">=20"

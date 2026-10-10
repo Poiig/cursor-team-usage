@@ -13,6 +13,23 @@ export type LocalSession = {
   exp?: number;
 };
 
+/** 与 writeLocalCursorAuth 字段对齐，供备份 / 恢复复用。 */
+export type LocalAuthPayload = {
+  accessToken: string;
+  refreshToken?: string;
+  cachedEmail?: string | null;
+  stripeMembershipAuthId?: string | null;
+  cachedSignUpType?: string | null;
+  userId?: string;
+};
+
+/** 含完整 auth 字段的本机快照；备份时即使 Token 已过期也保留。 */
+export type LocalAuthSnapshot = {
+  dbPath: string;
+  auth: LocalAuthPayload;
+  exp?: number;
+};
+
 function candidateDbPaths(): string[] {
   const home = os.homedir();
   const list: string[] = [];
@@ -90,23 +107,45 @@ async function readAuthViaPython(dbPath: string, readerPy: string): Promise<Map<
 }
 
 /**
- * 解析本机 Cursor 登录态；过期 JWT 丢弃。
+ * 读本机 cursorAuth 全量（不过滤过期），供切换前备份。
  */
-export async function resolveLocalCursorSession(readerPy: string): Promise<LocalSession | null> {
+export async function readLocalAuthSnapshot(readerPy: string): Promise<LocalAuthSnapshot | null> {
   for (const dbPath of candidateDbPaths()) {
     const values = await readAuthViaPython(dbPath, readerPy);
     const token = values.get('cursorAuth/accessToken');
     if (!token) continue;
     const payload = decodeJwtPayload(token);
-    if (!payload?.sub) continue;
-    if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) continue;
-    const userId = userIdFromSub(String(payload.sub));
+    const sub = payload?.sub ? String(payload.sub) : '';
+    const userId = sub ? userIdFromSub(sub) : undefined;
+    const provider = sub.includes('|') ? sub.split('|')[0] : '';
     return {
-      cookieValue: buildCookieValue(userId, token),
-      userId,
-      email: values.get('cursorAuth/cachedEmail'),
-      exp: typeof payload.exp === 'number' ? payload.exp : undefined,
+      dbPath,
+      exp: typeof payload?.exp === 'number' ? payload.exp : undefined,
+      auth: {
+        accessToken: token,
+        refreshToken: values.get('cursorAuth/refreshToken') || token,
+        cachedEmail: values.get('cursorAuth/cachedEmail') || null,
+        stripeMembershipAuthId:
+          values.get('cursorAuth/stripeMembershipAuthId') || (sub || null),
+        cachedSignUpType: values.get('cursorAuth/cachedSignUpType') || provider || null,
+        userId,
+      },
     };
   }
   return null;
+}
+
+/**
+ * 解析本机 Cursor 登录态；过期 JWT 丢弃。
+ */
+export async function resolveLocalCursorSession(readerPy: string): Promise<LocalSession | null> {
+  const snap = await readLocalAuthSnapshot(readerPy);
+  if (!snap?.auth.accessToken || !snap.auth.userId) return null;
+  if (typeof snap.exp === 'number' && snap.exp * 1000 < Date.now()) return null;
+  return {
+    cookieValue: buildCookieValue(snap.auth.userId, snap.auth.accessToken),
+    userId: snap.auth.userId,
+    email: snap.auth.cachedEmail || undefined,
+    exp: snap.exp,
+  };
 }

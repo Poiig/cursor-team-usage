@@ -278,6 +278,26 @@ test('请求失败时错误信息带上接口地址与真实原因', async () =>
   }
 });
 
+test('Cursor API 瞬时网络错误会重试并恢复', async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  try {
+    globalThis.fetch = async () => {
+      calls++;
+      if (calls < 2) {
+        const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+        throw new TypeError('fetch failed', { cause });
+      }
+      return new Response(JSON.stringify({ email: 'ok@example.com', name: 'OK' }));
+    };
+    const me = await fetchMe({ cookieValue: 'x' });
+    assert.equal(me.email, 'ok@example.com');
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test('countWorkingDaysInclusive / computeUsagePace 按工作日节奏预警', async () => {
   const { countWorkingDaysInclusive, computeUsagePace } = await import('../public/shared.js');
   // 用本地正午构造日期，避免 CI（UTC）与 +08 偏移把边界日算错
@@ -345,14 +365,21 @@ test('用户名与密码校验', async () => {
     createdAt: '2026-01-01T00:00:00.000Z',
     mustChangePassword: true,
     disabled: false,
+    pending: true,
   });
   assert.equal(pub.username, 'u1');
   assert.equal(pub.role, 'user');
+  assert.equal(pub.pending, true);
   assert.equal('passwordHash' in pub, false);
 });
 
 test('切换报表汇总与 Total usage 快照', async () => {
-  const { buildSwitchReport, usageTotalPercentOf } = await import('../src/account-switch.js');
+  const {
+    buildSwitchReport,
+    recommendSwitchMember,
+    switchBlockReason,
+    usageTotalPercentOf,
+  } = await import('../src/account-switch.js');
 
   assert.equal(
     usageTotalPercentOf({
@@ -363,6 +390,65 @@ test('切换报表汇总与 Total usage 快照', async () => {
   );
   assert.equal(usageTotalPercentOf({ lastError: 'x' }), null);
   assert.equal(usageTotalPercentOf({ totalPercentUsed: 8 }), 8);
+  assert.match(
+    switchBlockReason({ lastSnapshot: { meters: { totalPercentUsed: 100 } } }),
+    /额度已用完/,
+  );
+  const recommended = recommendSwitchMember([
+    {
+      id: 'empty',
+      lastSnapshot: {
+        meters: { totalPercentUsed: 100 },
+        window: { resetIso: '2026-10-11T00:00:00Z' },
+      },
+    },
+    {
+      id: 'later',
+      lastSnapshot: {
+        meters: { totalPercentUsed: 5 },
+        window: { resetIso: '2026-10-20T00:00:00Z' },
+      },
+    },
+    {
+      id: 'soon',
+      lastSnapshot: {
+        meters: { totalPercentUsed: 56 },
+        window: { resetIso: '2026-10-11T00:00:00Z' },
+      },
+    },
+  ]);
+  assert.equal(recommended.id, 'soon');
+  assert.match(
+    switchBlockReason({
+      activeUserCount: 3,
+      maxUsers: 3,
+      lastSnapshot: { meters: { totalPercentUsed: 10 } },
+    }),
+    /使用人数已满/,
+  );
+
+  const { maxUsersForMember, resolvePresenceIdentity } = await import(
+    '../src/account-presence.js'
+  );
+  assert.equal(maxUsersForMember({ planName: 'Pro' }), 3);
+  assert.equal(maxUsersForMember({ planName: 'Pro+' }), 5);
+  assert.equal(maxUsersForMember({ planName: 'Free' }), null);
+  assert.deepEqual(
+    resolvePresenceIdentity({
+      username: '',
+      label: '张三的开发机',
+      hostname: 'DESKTOP-ABC',
+    }),
+    { username: null, label: '张三的开发机' },
+  );
+  assert.deepEqual(
+    resolvePresenceIdentity({
+      username: 'zhangsan',
+      label: '张三的开发机',
+      hostname: 'DESKTOP-ABC',
+    }),
+    { username: 'zhangsan', label: 'zhangsan' },
+  );
 
   const report = buildSwitchReport([
     {
@@ -396,6 +482,74 @@ test('切换报表汇总与 Total usage 快照', async () => {
   assert.deepEqual(report[0].hostnames, ['PC-A']);
   assert.equal(report[1].username, 'bob');
   assert.equal(report[1].memberCount, 1);
+});
+
+test('插件使用人签名与版本展示', async () => {
+  const { loadAppConfig } = await import('../src/config.js');
+  await loadAppConfig();
+  const { signOperatorUsername, verifyOperatorUsername } = await import('../src/operator-proof.js');
+  const proof = signOperatorUsername('张三');
+  assert.equal(verifyOperatorUsername('张三', proof), true);
+  assert.equal(verifyOperatorUsername('李四', proof), false);
+  assert.equal(verifyOperatorUsername('张三', `${proof}x`), false);
+
+  const {
+    pluginClientView,
+    recordPluginInstall,
+    recordPluginReport,
+    forgetPluginClient,
+    listPluginClientViews,
+  } = await import('../src/plugin-clients.js');
+  assert.equal(
+    pluginClientView({
+      version: '0.2.8',
+      build: 'new',
+      installedAt: '2026-10-10T02:00:00.000Z',
+      reportVersion: '0.2.7',
+      reportedAt: '2026-10-10T01:00:00.000Z',
+    }).version,
+    '0.2.8',
+  );
+  assert.equal(
+    pluginClientView({
+      version: '0.2.7',
+      installedAt: '2026-10-10T01:00:00.000Z',
+      reportVersion: '0.2.8',
+      reportBuild: 'run',
+      reportedAt: '2026-10-10T02:00:00.000Z',
+    }).build,
+    'run',
+  );
+
+  const name = '__plugin_client_test__';
+  await forgetPluginClient(name);
+  const installed = await recordPluginInstall(name, { version: '0.2.8', build: 'abc' });
+  assert.equal(installed.state, 'installed');
+  assert.equal(installed.version, '0.2.8');
+  const reported = await recordPluginReport(name, {
+    version: '0.2.8',
+    build: 'def',
+    hostname: 'PC-1',
+  });
+  assert.equal(reported.state, 'reported');
+  assert.equal(reported.hostname, 'PC-1');
+  await recordPluginReport(name, { version: '<bad>', build: 'def' });
+  const views = await listPluginClientViews();
+  assert.equal(views[name].version, '0.2.8');
+  await forgetPluginClient(name);
+  const left = await listPluginClientViews();
+  assert.equal(left[name], undefined);
+});
+
+test('注册申请状态：通过、拒绝、删除后的展示', async () => {
+  const { applicationMessage, reconcileStatus } = await import('../src/applications.js');
+  assert.equal(reconcileStatus('pending', { pending: true }), 'pending');
+  assert.equal(reconcileStatus('pending', { pending: false, disabled: false }), 'approved');
+  assert.equal(reconcileStatus('approved', { disabled: true }), 'disabled');
+  assert.equal(reconcileStatus('pending', null), 'rejected');
+  assert.equal(reconcileStatus('approved', null), 'removed');
+  assert.match(applicationMessage('approved', '张三'), /张三/);
+  assert.match(applicationMessage('approved', '张三'), /可以直接登录/);
 });
 
 test('app-log 日期键、账号标签与过期清理', async () => {

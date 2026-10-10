@@ -160,8 +160,13 @@ export async function init() {
       role TEXT NOT NULL DEFAULT 'user',
       created_at TIMESTAMPTZ NOT NULL,
       must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
-      disabled BOOLEAN NOT NULL DEFAULT FALSE
+      disabled BOOLEAN NOT NULL DEFAULT FALSE,
+      pending BOOLEAN NOT NULL DEFAULT FALSE
     )
+  `);
+  await db().query(`
+    ALTER TABLE console_users
+      ADD COLUMN IF NOT EXISTS pending BOOLEAN NOT NULL DEFAULT FALSE
   `);
   await db().query(`
     CREATE TABLE IF NOT EXISTS account_switch_logs (
@@ -199,8 +204,8 @@ async function migrateConsoleAdminToUsers() {
   if (!row) return;
   await db().query(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled)
-     VALUES ($1,$2,$3,'admin',$4,$5,FALSE)`,
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
+     VALUES ($1,$2,$3,'admin',$4,$5,FALSE,FALSE)`,
     [
       String(row.username || 'admin'),
       String(row.password_hash),
@@ -453,6 +458,7 @@ export async function saveSyncResult(id, result) {
  *   createdAt: string,
  *   mustChangePassword: boolean,
  *   disabled: boolean,
+ *   pending: boolean,
  * }} ConsoleUserRow
  */
 
@@ -470,6 +476,7 @@ function rowToConsoleUser(row) {
     createdAt: new Date(row.created_at).toISOString(),
     mustChangePassword: Boolean(row.must_change_password),
     disabled: Boolean(row.disabled),
+    pending: Boolean(row.pending),
   };
 }
 
@@ -493,8 +500,8 @@ export async function createConsoleUser(user) {
   if (existing) throw new Error('用户名已存在');
   await db().query(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
     [
       user.username,
       user.passwordHash,
@@ -503,6 +510,7 @@ export async function createConsoleUser(user) {
       user.createdAt,
       Boolean(user.mustChangePassword),
       Boolean(user.disabled),
+      Boolean(user.pending),
     ],
   );
   if (user.username === 'admin') await saveConsoleAdminMirror(user);
@@ -512,15 +520,16 @@ export async function createConsoleUser(user) {
 export async function saveConsoleUser(user) {
   await db().query(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (username) DO UPDATE SET
        password_hash = EXCLUDED.password_hash,
        salt = EXCLUDED.salt,
        role = EXCLUDED.role,
        created_at = EXCLUDED.created_at,
        must_change_password = EXCLUDED.must_change_password,
-       disabled = EXCLUDED.disabled`,
+       disabled = EXCLUDED.disabled,
+       pending = EXCLUDED.pending`,
     [
       user.username,
       user.passwordHash,
@@ -529,6 +538,7 @@ export async function saveConsoleUser(user) {
       user.createdAt,
       Boolean(user.mustChangePassword),
       Boolean(user.disabled),
+      Boolean(user.pending),
     ],
   );
   if (user.username === 'admin') await saveConsoleAdminMirror(user);
@@ -700,5 +710,6 @@ export async function saveConsoleAdmin(admin) {
     createdAt: admin.createdAt,
     mustChangePassword: Boolean(admin.mustChangePassword),
     disabled: false,
+    pending: false,
   });
 }

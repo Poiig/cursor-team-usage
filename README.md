@@ -19,7 +19,7 @@
 | 能力 | 说明 |
 | --- | --- |
 | 多账号 | 网页添加 / 本机导入 / 粘贴 Token；或用 Reporter 扩展自动上报 |
-| 一键切换 | 网页点「切换」唤起本机 Cursor，写入目标账号登录态并重启；记入切换日志（谁切到了哪个账号） |
+| 一键切换 | 网页点「切换」唤起本机 Cursor，先备份当前登录态再写入目标账号并重启；可「恢复上次账号」；记入切换日志 |
 | 多用户 | 管理员可创建普通用户；普通用户可看用量、刷新、切换；名册与用户管理仅管理员 |
 | 用量总览 | Total / Cursor Models / Other Models；剩余额度、额度重置、Token 有效至 |
 | 详情页 | Grok Bot、日花费 / tokens 图、Top models、请求明细（可 Export CSV） |
@@ -27,7 +27,7 @@
 | 控制台 | 默认 `admin` / `admin`，首次登录强制改密；支持多用户 |
 | 配置 | 仓库根目录 `.env`（模板 `.env.example`），**无网页设置页**，改完重启 |
 | 存储 | 默认本地 SQLite（`data/app.sqlite`，含名册与控制台账号）；可选 PostgreSQL；`file` 为遗留 JSON |
-| 刷新 | 服务端按 `AUTO_REFRESH_SEC` 后台定时刷新（默认 30 分钟）；列表可手动「更新模型」 |
+| 刷新 | 服务端按 `AUTO_REFRESH_SEC` 后台定时刷新（默认 15 分钟）；「刷新用量」按最久未更新顺序逐个刷新 |
 
 ## 快速开始
 
@@ -43,10 +43,11 @@ npm start
 
 ### 一键切换本机 Cursor
 
-1. 本机安装 Reporter 扩展（≥ 0.2.1），设置里填好看板 `apiBaseUrl` 与 `ACCESS_KEY`（本地桥默认端口 `3781`）。
-2. 在看板账号卡片点「切换」→ **优先走本机 HTTP 桥**（Agent 模式也可用）→ Cursor 弹窗确认后写入登录态并重启。
-3. 若桥未启动，会尝试 `cursor://`（常需切到 IDE 模式）；仍失败可在命令面板执行「粘贴切换票据」。
-4. 「切换日志」页可查看谁切到了哪个账号（所有登录用户可见）。
+1. 管理员在看板「用户」页「一键安装插件」（注入当前 `ACCESS_KEY`）；或已装扩展后用命令面板检查更新。本地桥默认端口 `3781`。
+2. 在看板账号卡片点「切换」→ **优先走本机 HTTP 桥**（Agent 模式也可用）→ Cursor 弹窗确认后**备份当前登录态**，再写入目标账号并重启。
+3. 列表「恢复上次账号」或命令面板「Cursor Team Usage: 恢复上次账号」可从本机备份区还原切换前账号。
+4. 若桥未启动，会尝试 `cursor://`（常需切到 IDE 模式）；仍失败可在命令面板执行「粘贴切换票据」。
+5. 「切换日志」页可查看谁切到了哪个账号（所有登录用户可见）。
 
 ```bash
 npm run dev    # 热重载
@@ -62,7 +63,9 @@ npm run dev    # 热重载
 | `SQLITE_PATH` | SQLite 库路径，默认 `data/app.sqlite` |
 | `DATABASE_URL` | PG 连接串；也可用 `PGHOST` 等拆分变量 |
 | `ACCESS_KEY` | Reporter 扩展上报密钥；默认 `ctu-change-me`（**生产请改**）；显式设空则关闭上报 |
-| `AUTO_REFRESH_SEC` | 服务端定时刷全员用量（秒），默认 `1800`（30 分钟），`0`=关 |
+| `AUTO_REFRESH_SEC` | 服务端定时刷全员用量（秒），默认 `900`（15 分钟），`0`=关 |
+| `PRO_MAX_USERS` / `PRO_PLUS_MAX_USERS` | Pro / Pro+ 同时活跃使用人数上限，默认 `3` / `5` |
+| `PUBLIC_BASE_URL` | 看板对外地址，用于一键安装脚本与插件配置 |
 | `SESSION_SECRET` | 登录 Cookie 签名；空则首次启动自动生成并写入 `.env` |
 | `HOST` / `PORT` | 监听地址端口（默认 `127.0.0.1:3780`） |
 
@@ -123,33 +126,22 @@ cd D:\AppData\wslc\cursor-team-usage
 
 ### Reporter 扩展
 
-1. 服务端 `.env` 设好 `ACCESS_KEY`，并视需要 `HOST=0.0.0.0` 供局域网访问。
-2. 各开发机安装 Reporter 扩展（下载成品，无需本机构建）：
+插件在 **Docker 镜像构建时**打进 `assets/reporter-base.vsix`（`BUILD_NUMBER`=git sha），运行时按当前 `ACCESS_KEY` 与看板地址注入后再分发。
 
-```powershell
-# 默认地址
-irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1 | iex
-
-# 指定 VSIX 下载地址
-iex "& { $(irm https://raw.githubusercontent.com/Poiig/cursor-team-usage/master/scripts/install-reporter.ps1) } -Url 'https://example.com/reporter.vsix'"
-```
-
-安装后 **Developer: Reload Window**。默认 VSIX：
-
-`https://github.com/Poiig/cursor-team-usage/releases/download/extension-latest/cursor-team-usage-reporter.vsix`
-
-3. 设置里填写（与看板一致）：
+1. 服务端 `.env` 设好 `ACCESS_KEY`；局域网访问时建议设 `PUBLIC_BASE_URL`（如 `http://192.168.1.10:3780`）。
+2. **管理员**登录看板 →「用户」→「一键安装插件」：
+   - 若本机 Cursor 已开且桥 `:3781` 可用：直接下载并安装，提示重载窗口；
+   - 否则复制 PowerShell 一行命令（`irm …/install.ps1?token=… | iex`），会下载 VSIX、`cursor --install-extension` 并启动 Cursor。
+3. 已安装扩展会在启动时对照 `/api/extension/meta` 的构建号提示更新；也可命令面板「从看板安装/更新插件」。
 
 | 键 | 说明 |
 | --- | --- |
-| `cursorTeamUsage.apiBaseUrl` | 如 `http://192.168.1.10:3780` |
-| `cursorTeamUsage.accessKey` | 与 `.env` 的 `ACCESS_KEY` 相同（默认均为 `ctu-change-me`，生产请改） |
-| `cursorTeamUsage.displayName` | 可选；**仅新建时**用作显示名（留空则机器名）；已有账号不覆盖 |
+| `cursorTeamUsage.apiBaseUrl` | 一键安装已写入默认值；也可手改 |
+| `cursorTeamUsage.accessKey` | 与 `.env` 的 `ACCESS_KEY` 相同（安装包已注入） |
+| `cursorTeamUsage.displayName` | 可选；**仅新建时**用作显示名（留空则机器名） |
 | `cursorTeamUsage.autoReportIntervalMinutes` | 启动先报一次，之后按间隔（分钟）；默认 30；`0`=仅手动 |
 
-打包发布时自行改 `extension/package.json` 默认值后 `npm run ext:package`，再把 VSIX 放到上述地址对应位置。
-
-详情见 [extension/README.md](./extension/README.md)。
+本地开发可 `npm run ext:asset` 生成 `assets/`，再 `npm start`。详情见 [extension/README.md](./extension/README.md)。
 
 ## 安全
 

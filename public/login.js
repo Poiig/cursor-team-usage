@@ -1,6 +1,8 @@
 /**
- * 控制台登录页；默认密码登录后由首页强制改密。
+ * 控制台登录页。本机若有注册申请，打开页面即显示审批结果。
  */
+
+import { clearApplication, readApplication, renderApplicationStatus } from './application-status.js';
 
 const form = document.getElementById('loginForm');
 const errEl = document.getElementById('loginError');
@@ -31,6 +33,8 @@ form?.addEventListener('submit', async (e) => {
     } else {
       sessionStorage.removeItem('ctu_force_password');
     }
+    const cached = readApplication();
+    if (cached && cached.username === data.username) clearApplication();
     location.href = '/';
   } catch (err) {
     if (errEl) {
@@ -44,3 +48,5 @@ form?.addEventListener('submit', async (e) => {
     }
   }
 });
+
+renderApplicationStatus(document.getElementById('applicationStatus'), { prefillUsername: true });

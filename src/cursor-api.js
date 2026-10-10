@@ -17,14 +17,25 @@ const BROWSER_HEADERS = {
   'User-Agent': USER_AGENT,
 };
 
+/** @param {number} ms */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 网络抖动、限流和服务端错误可重试；401/403 没有刷新 Token 时重试无意义。 */
+function isRetryableError(error) {
+  if (error?.retryable === true) return true;
+  const status = Number(error?.status);
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 /**
- * 带超时的 JSON 请求；非 2xx 与网络层异常都收成「原因: 接口地址」形式的错误，
- * 让成员卡片和操作日志能区分 Token 失效、服务端报错、连接被重置等不同失败。
+ * 单次带超时请求。
  * @param {string} url
  * @param {RequestInit} options
- * @param {number} [timeoutMs]
+ * @param {number} timeoutMs
  */
-async function fetchJson(url, options, timeoutMs = 20000) {
+async function fetchJsonOnce(url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -45,21 +56,51 @@ async function fetchJson(url, options, timeoutMs = 20000) {
         reason ? `${reason} (HTTP ${res.status}): ${url}` : `HTTP ${res.status}: ${url}`,
       );
       err.status = res.status;
+      const retryAfter = Number(res.headers.get('retry-after'));
+      if (Number.isFinite(retryAfter) && retryAfter > 0) {
+        err.retryAfterMs = Math.min(retryAfter * 1000, 5000);
+      }
       throw err;
     }
     return data;
   } catch (e) {
-    if (e?.name === 'AbortError') throw new Error(`请求超时: ${url}`);
+    if (e?.name === 'AbortError') {
+      const err = new Error(`请求超时: ${url}`);
+      err.retryable = true;
+      throw err;
+    }
     // fetch 的网络层异常只报笼统的 fetch failed / terminated，真实原因（ECONNRESET、连接超时等）在 cause 里
     if (e instanceof TypeError && e.cause) {
       const cause = e.cause;
-      throw new Error(`${e.message} (${cause.code || cause.message || cause.name}): ${url}`, {
+      const err = new Error(`${e.message} (${cause.code || cause.message || cause.name}): ${url}`, {
         cause,
       });
+      err.retryable = true;
+      throw err;
     }
     throw e;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Cursor 接口统一重试：首次失败后 250ms、750ms 退避。参考 OpenUsage：
+ * 认证失败只在能刷新 Token 时才重试；本服务没有 refresh 流程，因此 401/403 直接返回。
+ * @param {string} url
+ * @param {RequestInit} options
+ * @param {number} [timeoutMs]
+ */
+async function fetchJson(url, options, timeoutMs = 20000) {
+  const maxRetries = 2;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchJsonOnce(url, options, timeoutMs);
+    } catch (error) {
+      if (attempt >= maxRetries || !isRetryableError(error)) throw error;
+      const delay = error?.retryAfterMs || (attempt === 0 ? 250 : 750);
+      await sleep(delay);
+    }
   }
 }
 
@@ -929,13 +970,28 @@ export async function fetchMemberSnapshot(cookieValue) {
   const session = sessionFromCookie(cookieValue);
   if (!session) throw new Error('会话 Token 格式无效');
 
+  const warnings = [];
+  const optional = async (label, promise, fallback) => {
+    try {
+      return await promise;
+    } catch (error) {
+      warnings.push(`${label}: ${error?.message || String(error)}`);
+      return fallback;
+    }
+  };
+
   const [me, plan, quota, hardLimit, usageSummary, periodUsage, grokBot, planInfo] =
     await Promise.all([
       fetchMe(session),
-      fetchStripeProfile(session),
-      fetchPlanQuota(session),
-      fetchHardLimit(session),
-      fetchUsageSummary(session).catch(() => null),
+      optional('套餐', fetchStripeProfile(session), {
+        membershipType: 'unknown',
+        daysRemainingOnTrial: null,
+        teamId: null,
+        isTeamMember: false,
+      }),
+      optional('请求额度', fetchPlanQuota(session), null),
+      optional('按量上限', fetchHardLimit(session), null),
+      optional('用量摘要', fetchUsageSummary(session), null),
       fetchCurrentPeriodUsage(session),
       fetchGrokBotUsage(session),
       fetchPlanInfo(session),
@@ -964,7 +1020,21 @@ export async function fetchMemberSnapshot(cookieValue) {
   const { last30Start } = localDayBounds();
   const fetchStart = Math.min(window.start, last30Start);
   const fetchEnd = Math.max(Date.now(), Math.min(window.end, Date.now()));
-  const allEvents = await fetchDashboardUsage(session, fetchStart, fetchEnd);
+  const allEvents = await optional(
+    '用量事件',
+    fetchDashboardUsage(session, fetchStart, fetchEnd),
+    [],
+  );
+  const authFailures = warnings.filter((warning) =>
+    /not_authenticated|HTTP 40[13]/i.test(warning),
+  );
+  if (authFailures.length >= 3) {
+    throw new Error(
+      `会话鉴权失效：${authFailures
+        .map((warning) => warning.split(': ')[0])
+        .join('、')}返回未认证，请更新 Token`,
+    );
+  }
 
   const cycleEvents = allEvents.filter((e) => {
     const ts = eventTimestampMs(e.timestamp);
@@ -1016,6 +1086,7 @@ export async function fetchMemberSnapshot(cookieValue) {
     panelLines,
     window: windowMeta,
     usage,
+    warnings,
     meters: {
       primaryPercent,
       totalPercentUsed: planMeters.totalPercentUsed,

@@ -159,21 +159,13 @@ function renderHorizontalBars(el, items, color) {
   `;
 }
 
-/** 官方 Date 列风格：本地时区短日期时间。 */
+/** 用量事件时间：毫秒时间戳 → 本地 yyyy-MM-dd HH.mm（与看板其它时间列一致）。 */
 function formatEventDate(timestamp) {
   let ms = Number(timestamp);
   if (!Number.isFinite(ms)) ms = Date.parse(String(timestamp));
-  if (!Number.isFinite(ms)) return '—';
-  // 偶发秒级时间戳
+  if (!Number.isFinite(ms) || ms <= 0) return '—';
   if (ms < 1e12) ms *= 1000;
-  const d = new Date(ms);
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true,
-  });
+  return formatDateTimeDot(new Date(ms).toISOString()) || '—';
 }
 
 function eventRowHtml(e) {

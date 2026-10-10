@@ -1,7 +1,8 @@
 .git
 .gitignore
 data
-*.md
+README.md
+LICENSE
 test
 scripts/probe-*.js
 scripts/_*.py
@@ -9,3 +10,7 @@ scripts/_*.py
 .env
 .env.*
 node_modules
+extension/node_modules
+extension/*.vsix
+extension/dist
+assets

@@ -1,8 +1,20 @@
 import * as vscode from 'vscode';
 import type { Server } from 'node:http';
 import path from 'node:path';
+import {
+  backupCurrentLocalAuth,
+  loadLastAuthBackup,
+  summarizeBackup,
+} from './authBackup';
 import { resolveLocalCursorSession } from './authReader';
 import { scheduleCursorRestart, writeLocalCursorAuth } from './authWriter';
+import {
+  downloadAndInstallVsix,
+  fetchRemoteBuildMeta,
+  installFromBoardWithAccessKey,
+  maybePromptUpdate,
+  readLocalBuildInfo,
+} from './extensionInstall';
 import { readLocalBridgePort, startLocalBridge } from './localBridge';
 import {
   claimSwitchTicket,
@@ -24,6 +36,10 @@ function readerScriptPath(context: vscode.ExtensionContext): string {
 
 function writerScriptPath(context: vscode.ExtensionContext): string {
   return path.join(context.extensionPath, 'dist', 'write_cursor_auth.py');
+}
+
+function storageRoot(context: vscode.ExtensionContext): string {
+  return context.globalStorageUri.fsPath;
 }
 
 function updateStatus(text: string) {
@@ -60,7 +76,7 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
 }
 
 /**
- * 处理看板一键切换：领票据 → 写本机 auth → 回报 → 重启 Cursor。
+ * 处理看板一键切换：备份当前 → 领票据 → 写本机 auth → 回报 → 重启 Cursor。
  */
 async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: string) {
   if (switching) {
@@ -76,7 +92,7 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     logId = claimed.logId;
     const label = claimed.displayName || claimed.auth.cachedEmail || claimed.memberId;
     const confirm = await vscode.window.showInformationMessage(
-      `即将切换到「${label}」并重启 Cursor。未保存的编辑请先保存。`,
+      `即将切换到「${label}」并重启 Cursor。\n切换前会备份当前本机登录态，之后可用「恢复上次账号」还原。\n未保存的编辑请先保存。`,
       { modal: true },
       '继续切换',
     );
@@ -90,11 +106,21 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
       return;
     }
 
+    // 先备份当前本机账号，再写入目标；无当前登录态时跳过备份
+    const backup = await backupCurrentLocalAuth(
+      readerScriptPath(context),
+      storageRoot(context),
+      `切换前备份 → ${label}`,
+    );
+    if (backup) {
+      updateStatus(`已备份 ${backup.email || backup.userId || '当前账号'}，正在写入…`);
+    }
+
     await writeLocalCursorAuth(writerScriptPath(context), claimed.auth);
     await reportSwitchResult(config, { logId, ok: true });
     updateStatus(`已写入 ${label}，正在重启 Cursor…`);
     void vscode.window.showInformationMessage(
-      `Cursor Team Usage：已切换到 ${label}，即将重启 Cursor`,
+      `Cursor Team Usage：已切换到 ${label}${backup ? '（当前账号已备份）' : ''}，即将重启 Cursor`,
     );
     await scheduleCursorRestart();
   } catch (e) {
@@ -108,6 +134,59 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     }
     updateStatus(`切换失败：${msg}`);
     void vscode.window.showErrorMessage(`Cursor Team Usage 切换失败：${msg}`);
+  } finally {
+    switching = false;
+  }
+}
+
+/**
+ * 从备份区恢复「上次」本机账号：先备份当前，再写回 last.json，然后重启。
+ */
+async function handleRestoreLastAccount(context: vscode.ExtensionContext) {
+  if (switching) {
+    void vscode.window.showWarningMessage('Cursor Team Usage：已有切换正在进行');
+    return;
+  }
+  const last = await loadLastAuthBackup(storageRoot(context));
+  if (!last) {
+    void vscode.window.showWarningMessage(
+      'Cursor Team Usage：备份区没有上次账号。请先通过看板「切换」一次，才会生成备份。',
+    );
+    return;
+  }
+
+  switching = true;
+  try {
+    const label = last.email || last.userId || '上次账号';
+    const when = last.savedAt
+      ? new Date(last.savedAt).toLocaleString('zh-CN')
+      : '未知时间';
+    const confirm = await vscode.window.showInformationMessage(
+      `即将从备份区恢复「${label}」（备份于 ${when}）并重启 Cursor。\n恢复前会先备份当前本机登录态。`,
+      { modal: true },
+      '恢复上次账号',
+    );
+    if (confirm !== '恢复上次账号') {
+      updateStatus('已取消恢复');
+      return;
+    }
+
+    // 恢复前备份当前，便于再次「恢复」回到此刻
+    await backupCurrentLocalAuth(
+      readerScriptPath(context),
+      storageRoot(context),
+      `恢复前备份 ← ${label}`,
+    );
+    await writeLocalCursorAuth(writerScriptPath(context), last.auth);
+    updateStatus(`已恢复 ${label}，正在重启 Cursor…`);
+    void vscode.window.showInformationMessage(
+      `Cursor Team Usage：已恢复 ${label}，即将重启 Cursor`,
+    );
+    await scheduleCursorRestart();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    updateStatus(`恢复失败：${msg}`);
+    void vscode.window.showErrorMessage(`Cursor Team Usage 恢复失败：${msg}`);
   } finally {
     switching = false;
   }
@@ -140,8 +219,46 @@ async function setupLocalBridge(context: vscode.ExtensionContext) {
     return;
   }
   try {
-    const { server, port: bound } = await startLocalBridge(port, (ticketId) =>
-      handleAccountSwitch(context, ticketId),
+    const { server, port: bound } = await startLocalBridge(
+      port,
+      (ticketId) => handleAccountSwitch(context, ticketId),
+      () => handleRestoreLastAccount(context),
+      async () => {
+        const last = await loadLastAuthBackup(storageRoot(context));
+        return summarizeBackup(last);
+      },
+      async (body) => {
+        const vsixUrl = String(body?.vsixUrl || '').trim();
+        if (vsixUrl) {
+          await downloadAndInstallVsix(vsixUrl);
+        } else {
+          await installFromBoardWithAccessKey();
+        }
+        // 让 HTTP 响应先返回给页面，再自动重载；否则运行中的旧扩展仍会报告旧版本。
+        setTimeout(() => {
+          void vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }, 800);
+        return { ok: true, message: 'installed', reloadScheduled: true };
+      },
+      async () => {
+        const session = await resolveLocalCursorSession(readerScriptPath(context));
+        if (!session) return { available: false };
+        return {
+          available: true,
+          userId: session.userId,
+          email: session.email || null,
+          expiresAt: session.exp ? new Date(session.exp * 1000).toISOString() : null,
+        };
+      },
+      async () => {
+        const build = await readLocalBuildInfo(context.extensionPath);
+        const config = readReporterConfig();
+        return {
+          version: build.version,
+          build: build.build,
+          operatorUsername: config.operatorUsername,
+        };
+      },
     );
     bridgeServer = server;
     context.subscriptions.push({
@@ -166,6 +283,9 @@ export function activate(context: vscode.ExtensionContext) {
   statusBar.show();
   updateStatus('就绪 · 点击查看状态');
 
+  // 确保 globalStorage 目录存在，备份可写入
+  void vscode.workspace.fs.createDirectory(context.globalStorageUri);
+
   context.subscriptions.push(
     statusBar,
     vscode.commands.registerCommand('cursorTeamUsage.reportNow', () => doReport(context, false)),
@@ -181,6 +301,40 @@ export function activate(context: vscode.ExtensionContext) {
       });
       if (!ticketId?.trim()) return;
       await handleAccountSwitch(context, ticketId.trim());
+    }),
+    vscode.commands.registerCommand('cursorTeamUsage.restoreLastAccount', () =>
+      handleRestoreLastAccount(context),
+    ),
+    vscode.commands.registerCommand('cursorTeamUsage.checkUpdate', async () => {
+      try {
+        const config = readReporterConfig();
+        const local = await readLocalBuildInfo(context.extensionPath);
+        const remote = await fetchRemoteBuildMeta(config.apiBaseUrl);
+        if (!remote.build || remote.available === false) {
+          void vscode.window.showWarningMessage('看板未附带可安装的插件资产');
+          return;
+        }
+        const same = remote.version === local.version && remote.build === local.build;
+        const choice = await vscode.window.showInformationMessage(
+          same
+            ? `已是最新构建 ${local.build}。仍要重装以刷新密钥/地址？`
+            : `发现新构建 ${remote.version} (${remote.build})，当前 ${local.build}`,
+          same ? '重装' : '立即更新',
+          '取消',
+        );
+        if (choice !== '重装' && choice !== '立即更新') return;
+        const meta = await installFromBoardWithAccessKey();
+        const reload = await vscode.window.showInformationMessage(
+          `已安装 ${meta.version} (${meta.build})，需重载窗口`,
+          '重载窗口',
+        );
+        if (reload === '重载窗口') {
+          await vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        void vscode.window.showErrorMessage(`Cursor Team Usage 更新失败：${msg}`);
+      }
     }),
     vscode.window.registerUriHandler({
       handleUri(uri: vscode.Uri) {
@@ -207,6 +361,7 @@ export function activate(context: vscode.ExtensionContext) {
   void setupLocalBridge(context);
   // 启动后稍后自动报一次，避开扩展激活尖峰。
   setTimeout(() => void doReport(context, true), 8000);
+  setTimeout(() => void maybePromptUpdate(context.extensionPath), 12_000);
 }
 
 export function deactivate() {

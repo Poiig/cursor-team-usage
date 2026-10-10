@@ -290,6 +290,7 @@ export async function saveSyncResult(id, result) {
  *   createdAt: string,
  *   mustChangePassword: boolean,
  *   disabled: boolean,
+ *   pending: boolean,
  * }} ConsoleUserRow
  */
 
@@ -335,9 +336,12 @@ async function readUsersFile() {
           createdAt: String(parsed.admin.createdAt || new Date().toISOString()),
           mustChangePassword: Boolean(parsed.admin.mustChangePassword),
           disabled: false,
+          pending: false,
         },
       ];
     }
+    // 旧 JSON 无 pending 时按已通过处理
+    users = users.map((u) => ({ ...u, pending: Boolean(u.pending) }));
     return { users, admin: parsed.admin };
   } catch (e) {
     if (e && e.code === 'ENOENT') return { users: [] };
@@ -507,5 +511,6 @@ export async function saveConsoleAdmin(admin) {
     createdAt: admin.createdAt,
     mustChangePassword: Boolean(admin.mustChangePassword),
     disabled: false,
+    pending: false,
   });
 }

@@ -1,12 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Cursor Team Usage">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Cursor Team Usage">
   <defs>
-    <linearGradient id="g" x1="7" y1="16" x2="25" y2="16" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#4daafc"/>
-      <stop offset="1" stop-color="#2dd4bf"/>
+    <linearGradient id="bg" x1="64" y1="32" x2="448" y2="480" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#172340"/>
+      <stop offset="1" stop-color="#09101F"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="96" y1="96" x2="430" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38D6C7"/>
+      <stop offset="1" stop-color="#6C8CFF"/>
     </linearGradient>
   </defs>
-  <rect width="32" height="32" rx="7" fill="#0f1419"/>
-  <rect x="7" y="18" width="4" height="7" rx="1.2" fill="url(#g)"/>
-  <rect x="14" y="12" width="4" height="13" rx="1.2" fill="url(#g)"/>
-  <rect x="21" y="7" width="4" height="18" rx="1.2" fill="url(#g)"/>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <path d="M130 368A184 184 0 1 1 397 363" fill="none" stroke="#273654" stroke-width="38" stroke-linecap="round"/>
+  <path d="M130 368A184 184 0 1 1 397 363" fill="none" stroke="url(#arc)" stroke-width="38" stroke-linecap="round" stroke-dasharray="830 330"/>
+  <path d="M177 194L256 259L335 194M256 259V343" fill="none" stroke="#AFC3FF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="177" cy="194" r="43" fill="#38D6C7" stroke="#D7FFFA" stroke-width="10"/>
+  <circle cx="335" cy="194" r="43" fill="#6C8CFF" stroke="#E2E8FF" stroke-width="10"/>
+  <circle cx="256" cy="343" r="43" fill="#FFB86B" stroke="#FFF0D9" stroke-width="10"/>
+  <circle cx="256" cy="259" r="30" fill="#F5F8FF" stroke="#172340" stroke-width="12"/>
 </svg>
