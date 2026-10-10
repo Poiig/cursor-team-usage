@@ -13,7 +13,10 @@
       <header class="header">
         <div class="header-top">
           <div class="brand">
-            <h1>Cursor Team Usage</h1>
+            <div class="brand-title">
+              <img class="brand-mark" src="/favicon.svg" width="28" height="28" alt="" />
+              <h1>Cursor Team Usage</h1>
+            </div>
             <p id="authLabel">多账号用量管理看板</p>
             <p class="footer-links">
               <a href="https://cursor.com/dashboard/usage" target="_blank" rel="noreferrer">Official usage dashboard ↗</a>
@@ -26,6 +29,7 @@
           <nav class="app-nav" aria-label="Main">
             <button type="button" class="nav-item active" data-tab="accounts">账号</button>
             <button type="button" class="nav-item" data-tab="switches">切换日志</button>
+            <button type="button" class="nav-item admin-only hidden" data-tab="reports">报表</button>
             <button type="button" class="nav-item admin-only hidden" data-tab="users">用户</button>
             <button type="button" class="nav-item" data-tab="help">说明</button>
             <span class="nav-session">
@@ -42,6 +46,17 @@
         <div class="panel-head">
           <h2>账号列表</h2>
           <div class="toolbar">
+            <div class="filter-tabs" id="statusFilter" role="tablist" aria-label="账号状态筛选">
+              <button type="button" class="filter-tab active" data-status="all">
+                全部 <span class="filter-count" data-count="all">0</span>
+              </button>
+              <button type="button" class="filter-tab" data-status="ok">
+                正常 <span class="filter-count" data-count="ok">0</span>
+              </button>
+              <button type="button" class="filter-tab" data-status="error">
+                异常 <span class="filter-count" data-count="error">0</span>
+              </button>
+            </div>
             <input type="search" id="searchInput" placeholder="搜索账号名称 / 邮箱…" />
             <select id="sortBy" aria-label="排序">
               <option value="remaining" selected>按剩余额度</option>
@@ -77,7 +92,7 @@
             <button type="button" class="btn" id="btnRefreshSwitchLogs">刷新</button>
           </div>
         </div>
-        <p class="hint">记录谁把本机 Cursor 切到了哪个看板账号；所有登录用户可见。</p>
+        <p class="hint">记录谁把本机 Cursor 切到了哪个看板账号；切换时会快照 Total usage。所有登录用户可见。</p>
         <div class="rank-table-wrap">
           <table class="rank-table" id="switchLogTable">
             <thead>
@@ -85,7 +100,9 @@
                 <th>时间</th>
                 <th>操作者</th>
                 <th>目标账号</th>
+                <th>Total usage</th>
                 <th>主机</th>
+                <th>IP</th>
                 <th>状态</th>
                 <th>说明</th>
               </tr>
@@ -95,7 +112,49 @@
         </div>
       </section>
 
-      <section class="panel users-panel hidden admin-only" id="tabUsers">
+      <section class="panel reports-panel hidden" id="tabReports">
+        <div class="panel-head">
+          <h2>报表中心</h2>
+          <div class="toolbar">
+            <button type="button" class="btn" id="btnRefreshReports">刷新</button>
+          </div>
+        </div>
+        <p class="hint">按操作者汇总切换次数、用过几个号、点击切换时的 IP，以及本机扩展回报的主机名。仅管理员可见。</p>
+        <div class="rank-table-wrap">
+          <table class="rank-table" id="reportOperatorTable">
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>切换次数</th>
+                <th>成功</th>
+                <th>用过账号数</th>
+                <th>IP</th>
+                <th>主机名</th>
+              </tr>
+            </thead>
+            <tbody id="reportOperatorBody"></tbody>
+          </table>
+        </div>
+        <h3 class="report-subhead">最近切换明细</h3>
+        <div class="rank-table-wrap">
+          <table class="rank-table" id="reportRecentTable">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>操作者</th>
+                <th>目标账号</th>
+                <th>Total usage</th>
+                <th>主机</th>
+                <th>IP</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="reportRecentBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel users-panel hidden" id="tabUsers">
         <div class="panel-head">
           <h2>用户管理</h2>
           <div class="toolbar">
@@ -129,7 +188,7 @@
             <strong>登录</strong>：支持多用户。默认 <code>admin</code> / <code>admin</code>，首次须改密；普通用户由管理员在「用户」页创建。
           </li>
           <li>
-            <strong>权限</strong>：普通用户可看全部用量、刷新、一键切换；添加 / 删除账号、导出、用户管理仅管理员。
+            <strong>权限</strong>：普通用户可看全部用量、刷新、一键切换；添加 / 删除账号、导出、用户管理、报表中心仅管理员。异常账号（同步失败）不可切换。
           </li>
           <li>
             <strong>一键切换</strong>：账号卡片点「切换」→ 优先通知本机扩展桥 <code>127.0.0.1:3781</code>（Agent 模式可用）→ Cursor 弹窗确认后写入登录态并重启。桥不可用时回退 <code>cursor://</code>（多需 IDE 模式），或命令面板「粘贴切换票据」。

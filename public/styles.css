@@ -110,9 +110,31 @@ h3 {
   flex-wrap: wrap;
 }
 
-.brand h1 {
+.brand-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-mark {
+  flex-shrink: 0;
+  border-radius: 7px;
+  display: block;
+}
+
+.brand h1,
+.login-brand h1 {
   font-size: 22px;
   letter-spacing: -0.02em;
+}
+
+.login-brand {
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.login-brand h1 {
+  font-size: 20px;
 }
 
 .brand #authLabel {
@@ -345,7 +367,68 @@ h3 {
 
 .account-list {
   display: grid;
+  gap: 14px;
+}
+
+.filter-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+.filter-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 500 12px inherit;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.filter-tab.active {
+  background: var(--btn-primary-bg);
+  color: var(--accent-fg);
+}
+
+.filter-count {
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-section {
+  display: grid;
   gap: 10px;
+}
+
+.account-section-title {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.account-section--error .account-section-title {
+  color: var(--red);
+}
+
+.filter-empty {
+  padding: 20px 8px;
+  text-align: center;
+}
+
+.report-subhead {
+  margin: 18px 0 10px;
+  font-size: 14px;
+}
+
+.stat.stat-click.stat-error {
+  text-align: left;
 }
 
 .spend-row {
@@ -425,6 +508,16 @@ h3 {
 
 .account:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+/* 同步失败 / Token 异常：用边框与底色和正常卡区分开 */
+.account.account--error {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  background: color-mix(in srgb, var(--red) 7%, var(--panel));
+}
+
+.account.account--error:hover {
+  border-color: color-mix(in srgb, var(--red) 75%, var(--border));
 }
 
 .account-actions {

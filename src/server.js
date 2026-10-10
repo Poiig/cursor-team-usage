@@ -45,6 +45,7 @@ import {
   claimAccountSwitch,
   createAccountSwitch,
   finishAccountSwitch,
+  getSwitchReport,
   listAccountSwitchLogs,
 } from './account-switch.js';
 import {
@@ -133,7 +134,8 @@ function buildTeamSummary(members) {
   let errored = 0;
 
   for (const m of members) {
-    if (m.lastError && !m.lastSnapshot) errored++;
+    // 有错误即算异常（含仍保留旧快照），与列表「异常」徽章一致
+    if (m.lastError) errored++;
     else if (m.lastSnapshot) ok++;
 
     const snap = m.lastSnapshot;
@@ -404,9 +406,23 @@ function requiresAdmin(pathname, method) {
   if (pathname === '/api/members' && method === 'POST') return true;
   if (pathname === '/api/export/accounts') return true;
   if (pathname.startsWith('/api/users')) return true;
+  if (pathname.startsWith('/api/reports')) return true;
   const memberWrite = pathname.match(/^\/api\/members\/[^/]+$/);
   if (memberWrite && (method === 'PUT' || method === 'DELETE')) return true;
   return false;
+}
+
+/**
+ * 取点击切换时的客户端 IP（优先反代头，再退回 socket）。
+ * @param {import('node:http').IncomingMessage} req
+ */
+function clientIpOf(req) {
+  const xf = req.headers['x-forwarded-for'];
+  if (typeof xf === 'string' && xf.trim()) return xf.split(',')[0].trim();
+  if (Array.isArray(xf) && xf[0]) return String(xf[0]).split(',')[0].trim();
+  const real = req.headers['x-real-ip'];
+  if (typeof real === 'string' && real.trim()) return real.trim();
+  return req.socket?.remoteAddress || null;
 }
 
 /**
@@ -564,6 +580,13 @@ const server = http.createServer(async (req, res) => {
       const limit = Number(url.searchParams.get('limit') || 100);
       const logs = await listAccountSwitchLogs({ limit });
       return sendJson(res, 200, { logs });
+    }
+
+    if (method === 'GET' && pathname === '/api/reports/switches') {
+      await assertAdmin(req);
+      const limit = Number(url.searchParams.get('limit') || 500);
+      const report = await getSwitchReport({ limit });
+      return sendJson(res, 200, report);
     }
 
     if (method === 'POST' && pathname === '/api/agent/report') {
@@ -735,11 +758,13 @@ const server = http.createServer(async (req, res) => {
         const result = await createAccountSwitch({
           memberId: id,
           operatorUsername: String(req.consoleUser || ''),
+          clientIp: clientIpOf(req),
         });
         await writeAppLog('切换发起', {
           操作者: req.consoleUser,
           账号: result.member.displayName || result.member.email || result.member.id,
           票据: result.ticketId,
+          IP: clientIpOf(req) || undefined,
         });
         return sendJson(res, 200, result);
       }

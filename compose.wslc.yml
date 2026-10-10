@@ -1,0 +1,13 @@
+# 本机默认部署已迁到 D:\AppData\wslc\cursor-team-usage\
+# 请在该目录执行 .\up.ps1（compose.yml / data / .env 均在那里）。
+#
+# 本文件仅作仓库内指针，避免再从源码目录误起一套。
+# 若必须从仓库试跑：复制环境到 AppData 后用那边的 compose。
+
+name: cursor-team-usage-from-repo-do-not-use
+
+services:
+  cursor-team-usage:
+    image: cursor-team-usage:local
+    profiles: ["disabled"]
+    command: ["sh", "-c", "echo Use D:/AppData/wslc/cursor-team-usage/up.ps1 && exit 1"]

@@ -1,6 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Cursor Team Usage">
+  <defs>
+    <linearGradient id="g" x1="7" y1="16" x2="25" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4daafc"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+  </defs>
   <rect width="32" height="32" rx="7" fill="#0f1419"/>
-  <rect x="7" y="18" width="4" height="7" rx="1.2" fill="#4daafc"/>
-  <rect x="14" y="12" width="4" height="13" rx="1.2" fill="#4daafc"/>
-  <rect x="21" y="7" width="4" height="18" rx="1.2" fill="#2dd4bf"/>
+  <rect x="7" y="18" width="4" height="7" rx="1.2" fill="url(#g)"/>
+  <rect x="14" y="12" width="4" height="13" rx="1.2" fill="url(#g)"/>
+  <rect x="21" y="7" width="4" height="18" rx="1.2" fill="url(#g)"/>
 </svg>

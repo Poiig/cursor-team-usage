@@ -351,6 +351,53 @@ test('用户名与密码校验', async () => {
   assert.equal('passwordHash' in pub, false);
 });
 
+test('切换报表汇总与 Total usage 快照', async () => {
+  const { buildSwitchReport, usageTotalPercentOf } = await import('../src/account-switch.js');
+
+  assert.equal(
+    usageTotalPercentOf({
+      totalPercentUsed: 12,
+      lastSnapshot: { meters: { totalPercentUsed: 45.67, primaryPercent: 10 } },
+    }),
+    45.7,
+  );
+  assert.equal(usageTotalPercentOf({ lastError: 'x' }), null);
+  assert.equal(usageTotalPercentOf({ totalPercentUsed: 8 }), 8);
+
+  const report = buildSwitchReport([
+    {
+      operatorUsername: 'alice',
+      memberId: 'm1',
+      status: 'success',
+      clientIp: '10.0.0.1',
+      hostname: 'PC-A',
+    },
+    {
+      operatorUsername: 'alice',
+      memberId: 'm2',
+      status: 'failed',
+      clientIp: '10.0.0.1',
+      hostname: 'PC-A',
+    },
+    {
+      operatorUsername: 'bob',
+      memberId: 'm1',
+      status: 'success',
+      clientIp: '10.0.0.2',
+      hostname: null,
+    },
+  ]);
+  assert.equal(report.length, 2);
+  assert.equal(report[0].username, 'alice');
+  assert.equal(report[0].switchCount, 2);
+  assert.equal(report[0].successCount, 1);
+  assert.equal(report[0].memberCount, 2);
+  assert.deepEqual(report[0].ips, ['10.0.0.1']);
+  assert.deepEqual(report[0].hostnames, ['PC-A']);
+  assert.equal(report[1].username, 'bob');
+  assert.equal(report[1].memberCount, 1);
+});
+
 test('app-log 日期键、账号标签与过期清理', async () => {
   const { mkdtemp, writeFile, readdir } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

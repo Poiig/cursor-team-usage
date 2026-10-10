@@ -247,6 +247,8 @@ function ensureSchema() {
       member_email TEXT,
       member_user_id TEXT,
       hostname TEXT,
+      client_ip TEXT,
+      usage_total_percent REAL,
       status TEXT NOT NULL,
       error TEXT,
       ticket_id TEXT,
@@ -254,7 +256,23 @@ function ensureSchema() {
       finished_at TEXT
     )
   `);
+  ensureSwitchLogColumns();
   migrateConsoleAdminToUsers();
+}
+
+/** 旧库补齐切换日志的 IP / Total usage 列。 */
+function ensureSwitchLogColumns() {
+  const cols = new Set(
+    getAll('PRAGMA table_info(account_switch_logs)').map((c) => String(c.name)),
+  );
+  /** @type {Array<[string, string]>} */
+  const extras = [
+    ['client_ip', 'TEXT'],
+    ['usage_total_percent', 'REAL'],
+  ];
+  for (const [name, type] of extras) {
+    if (!cols.has(name)) run(`ALTER TABLE account_switch_logs ADD COLUMN ${name} ${type}`);
+  }
 }
 
 /**
@@ -725,6 +743,8 @@ export async function deleteConsoleUser(username) {
  *   memberEmail?: string | null,
  *   memberUserId?: string | null,
  *   hostname?: string | null,
+ *   clientIp?: string | null,
+ *   usageTotalPercent?: number | null,
  *   status: string,
  *   error?: string | null,
  *   ticketId?: string | null,
@@ -747,6 +767,11 @@ function rowToSwitchLog(row) {
     memberEmail: row.member_email ?? null,
     memberUserId: row.member_user_id ?? null,
     hostname: row.hostname ?? null,
+    clientIp: row.client_ip ?? null,
+    usageTotalPercent:
+      row.usage_total_percent != null && !Number.isNaN(Number(row.usage_total_percent))
+        ? Number(row.usage_total_percent)
+        : null,
     status: String(row.status),
     error: row.error ?? null,
     ticketId: row.ticket_id ?? null,
@@ -763,8 +788,9 @@ export async function insertSwitchLog(log) {
   run(
     `INSERT INTO account_switch_logs
       (id, created_at, operator_username, member_id, member_display_name, member_email,
-       member_user_id, hostname, status, error, ticket_id, claimed_at, finished_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       member_user_id, hostname, client_ip, usage_total_percent, status, error, ticket_id,
+       claimed_at, finished_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       log.id,
       createdAt,
@@ -774,6 +800,8 @@ export async function insertSwitchLog(log) {
       log.memberEmail ?? null,
       log.memberUserId ?? null,
       log.hostname ?? null,
+      log.clientIp ?? null,
+      log.usageTotalPercent ?? null,
       log.status,
       log.error ?? null,
       log.ticketId ?? null,

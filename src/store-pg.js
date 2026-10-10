@@ -173,12 +173,19 @@ export async function init() {
       member_email TEXT,
       member_user_id TEXT,
       hostname TEXT,
+      client_ip TEXT,
+      usage_total_percent DOUBLE PRECISION,
       status TEXT NOT NULL,
       error TEXT,
       ticket_id TEXT,
       claimed_at TIMESTAMPTZ,
       finished_at TIMESTAMPTZ
     )
+  `);
+  await db().query(`
+    ALTER TABLE account_switch_logs
+      ADD COLUMN IF NOT EXISTS client_ip TEXT,
+      ADD COLUMN IF NOT EXISTS usage_total_percent DOUBLE PRECISION
   `);
   await migrateConsoleAdminToUsers();
 }
@@ -565,6 +572,8 @@ export async function deleteConsoleUser(username) {
  *   memberEmail?: string | null,
  *   memberUserId?: string | null,
  *   hostname?: string | null,
+ *   clientIp?: string | null,
+ *   usageTotalPercent?: number | null,
  *   status: string,
  *   error?: string | null,
  *   ticketId?: string | null,
@@ -584,6 +593,11 @@ function rowToSwitchLog(row) {
     memberEmail: row.member_email ?? null,
     memberUserId: row.member_user_id ?? null,
     hostname: row.hostname ?? null,
+    clientIp: row.client_ip ?? null,
+    usageTotalPercent:
+      row.usage_total_percent != null && !Number.isNaN(Number(row.usage_total_percent))
+        ? Number(row.usage_total_percent)
+        : null,
     status: String(row.status),
     error: row.error ?? null,
     ticketId: row.ticket_id ?? null,
@@ -598,8 +612,9 @@ export async function insertSwitchLog(log) {
   await db().query(
     `INSERT INTO account_switch_logs
       (id, created_at, operator_username, member_id, member_display_name, member_email,
-       member_user_id, hostname, status, error, ticket_id, claimed_at, finished_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+       member_user_id, hostname, client_ip, usage_total_percent, status, error, ticket_id,
+       claimed_at, finished_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
     [
       log.id,
       createdAt,
@@ -609,6 +624,8 @@ export async function insertSwitchLog(log) {
       log.memberEmail ?? null,
       log.memberUserId ?? null,
       log.hostname ?? null,
+      log.clientIp ?? null,
+      log.usageTotalPercent ?? null,
       log.status,
       log.error ?? null,
       log.ticketId ?? null,

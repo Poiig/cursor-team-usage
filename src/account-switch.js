@@ -82,13 +82,75 @@ export function buildLocalAuthPayload(cookieValue, extra = {}) {
 }
 
 /**
+ * 从成员快照取 Total usage 百分比，写入切换日志做审计快照。
+ * @param {{ lastSnapshot?: any, totalPercentUsed?: number | null } | null | undefined} member
+ * @returns {number | null}
+ */
+export function usageTotalPercentOf(member) {
+  if (!member) return null;
+  const snap = member.lastSnapshot;
+  const raw =
+    snap?.meters?.totalPercentUsed ??
+    snap?.meters?.primaryPercent ??
+    member.totalPercentUsed ??
+    null;
+  if (raw == null || Number.isNaN(Number(raw))) return null;
+  return Math.round(Number(raw) * 10) / 10;
+}
+
+/**
+ * 按操作者汇总切换报表（次数、用过几个号、IP、主机名）。
+ * @param {import('./store-sqlite.js').SwitchLogRow[] | object[]} logs
+ */
+export function buildSwitchReport(logs) {
+  /** @type {Map<string, { username: string, switchCount: number, successCount: number, memberIds: Set<string>, ips: Set<string>, hostnames: Set<string> }>} */
+  const byUser = new Map();
+  for (const log of logs || []) {
+    const username = String(log.operatorUsername || '—');
+    let row = byUser.get(username);
+    if (!row) {
+      row = {
+        username,
+        switchCount: 0,
+        successCount: 0,
+        memberIds: new Set(),
+        ips: new Set(),
+        hostnames: new Set(),
+      };
+      byUser.set(username, row);
+    }
+    row.switchCount += 1;
+    if (log.status === 'success') row.successCount += 1;
+    if (log.memberId) row.memberIds.add(String(log.memberId));
+    if (log.clientIp) row.ips.add(String(log.clientIp));
+    if (log.hostname) row.hostnames.add(String(log.hostname));
+  }
+  return [...byUser.values()]
+    .map((r) => ({
+      username: r.username,
+      switchCount: r.switchCount,
+      successCount: r.successCount,
+      memberCount: r.memberIds.size,
+      ips: [...r.ips].sort(),
+      hostnames: [...r.hostnames].sort(),
+    }))
+    .sort((a, b) => b.switchCount - a.switchCount || a.username.localeCompare(b.username, 'zh'));
+}
+
+/**
  * 网页侧发起切换：写 pending 日志 + 发票据，返回 cursor:// URI。
- * @param {{ memberId: string, operatorUsername: string }} input
+ * @param {{ memberId: string, operatorUsername: string, clientIp?: string | null }} input
  */
 export async function createAccountSwitch(input) {
   await sweepExpiredTickets();
   const member = await getMemberInternal(input.memberId);
   if (!member) throw new Error('成员不存在');
+  // 异常账号（同步失败 / Token 失效）禁止切换，避免把坏会话写进本机
+  if (member.lastError) {
+    const err = new Error('该账号同步异常，请先更新 Token 后再切换');
+    err.status = 400;
+    throw err;
+  }
   // 先校验 Token 能解析，避免发了票据却写不进本机
   buildLocalAuthPayload(member.cookieValue, { email: member.email });
 
@@ -118,6 +180,8 @@ export async function createAccountSwitch(input) {
     memberUserId: member.userId,
     status: 'pending',
     ticketId,
+    clientIp: input.clientIp ? String(input.clientIp).trim() || null : null,
+    usageTotalPercent: usageTotalPercentOf(member),
   });
 
   const uri = `cursor://poiig.cursor-team-usage-reporter/switch?ticket=${encodeURIComponent(ticketId)}`;
@@ -216,4 +280,19 @@ export async function finishAccountSwitch(input) {
 export async function listAccountSwitchLogs(opts) {
   await sweepExpiredTickets();
   return listSwitchLogs(opts);
+}
+
+/**
+ * 管理员报表：操作者维度汇总 + 最近明细（含 IP / 主机 / Total usage）。
+ * @param {{ limit?: number }} [opts]
+ */
+export async function getSwitchReport(opts = {}) {
+  await sweepExpiredTickets();
+  const limit = Math.min(500, Math.max(1, Number(opts.limit) || 500));
+  const logs = await listSwitchLogs({ limit });
+  return {
+    operators: buildSwitchReport(logs),
+    recent: logs.slice(0, 100),
+    sampled: logs.length,
+  };
 }

@@ -75,7 +75,9 @@ STORE_DRIVER=postgres
 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/cursor_team_usage
 ```
 
-## Docker
+## Docker / 本机 WSLc
+
+### 部署机（Docker + GHCR）
 
 直接拉取 GHCR 镜像，**不在本机构建**：
 
@@ -85,23 +87,22 @@ docker compose pull
 docker compose up -d
 ```
 
-打开 http://localhost:3780 。数据在 `./data`（已 gitignore）。
+打开 http://localhost:3780 。数据在 `./data`（已 gitignore）。包页：https://github.com/Poiig/cursor-team-usage/pkgs/container/cursor-team-usage
 
-```bash
-# 指定某次 CI 构建的 commit sha
-# 改 docker-compose.yml 中 image 标签，或：
-docker pull ghcr.io/poiig/cursor-team-usage:<commit-sha>
+若 `pull` 失败，先 `docker login ghcr.io`（Token 需 `read:packages`）。仅本机访问时可改 ports 为 `"127.0.0.1:3780:3780"`。
+
+### 本机联调（WSLc，不发版）
+
+**默认部署根**：`D:\AppData\wslc\cursor-team-usage\`（`compose.yml`、`.env`、`data/`、`up.ps1` 都在这里）。
+
+```powershell
+pipx install git+https://github.com/bacarndiaye/wslc-compose   # 首次
+cd D:\AppData\wslc\cursor-team-usage
+.\up.ps1            # 需要重建镜像时: .\up.ps1 --build
+.\down.ps1          # 停容器，保留 data
 ```
 
-包页：https://github.com/Poiig/cursor-team-usage/pkgs/container/cursor-team-usage
-
-若 `pull` 失败，先登录 GHCR（Token 需 `read:packages`）：
-
-```bash
-docker login ghcr.io -u YOUR_GITHUB_USERNAME
-```
-
-仅本机访问时可改 ports 为 `"127.0.0.1:3780:3780"`。`docker-compose.yml` 里可取消注释 Postgres。
+浏览器打开 http://127.0.0.1:3780 。源码仍在本仓库；compose 的 build context 指向仓库根。
 
 ## 如何录入账号
 
