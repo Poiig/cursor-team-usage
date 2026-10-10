@@ -291,6 +291,7 @@ export async function saveSyncResult(id, result) {
  *   mustChangePassword: boolean,
  *   disabled: boolean,
  *   pending: boolean,
+ *   alias: string,
  * }} ConsoleUserRow
  */
 
@@ -341,7 +342,11 @@ async function readUsersFile() {
       ];
     }
     // 旧 JSON 无 pending 时按已通过处理
-    users = users.map((u) => ({ ...u, pending: Boolean(u.pending) }));
+    users = users.map((u) => ({
+      ...u,
+      pending: Boolean(u.pending),
+      alias: String(u.alias || ''),
+    }));
     return { users, admin: parsed.admin };
   } catch (e) {
     if (e && e.code === 'ENOENT') return { users: [] };

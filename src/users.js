@@ -22,6 +22,7 @@ import {
  *   mustChangePassword: boolean,
  *   disabled: boolean,
  *   pending: boolean,
+ *   alias: string,
  * }} ConsoleUser
  */
 
@@ -40,6 +41,7 @@ export function toPublicUser(user) {
     mustChangePassword: Boolean(user.mustChangePassword),
     disabled: Boolean(user.disabled),
     pending: Boolean(user.pending),
+    alias: String(user.alias || '').trim(),
   };
 }
 
@@ -183,6 +185,7 @@ export async function registerUser(input) {
     mustChangePassword: false,
     disabled: false,
     pending: true,
+    alias: '',
   };
   await createConsoleUser(user);
   return toPublicUser(user);
@@ -240,6 +243,7 @@ export async function createUser(input) {
     mustChangePassword: true,
     disabled: false,
     pending: false,
+    alias: '',
   };
   await createConsoleUser(user);
   return toPublicUser(user);
@@ -281,13 +285,15 @@ export async function resetUserPassword(username, password) {
 
 /**
  * @param {string} username
- * @param {{ role?: 'admin' | 'user', disabled?: boolean }} patch
+ * @param {{ role?: 'admin' | 'user', disabled?: boolean, alias?: string }} patch
  */
 export async function updateUser(username, patch) {
   const name = assertValidUsername(username);
   const user = await getConsoleUser(name);
   if (!user) throw new Error('用户不存在');
-  if (user.pending) throw new Error('待审批用户请先同意或拒绝，不能直接改状态');
+  if (user.pending && (patch.role != null || patch.disabled != null)) {
+    throw new Error('待审批用户请先同意或拒绝，不能直接改状态');
+  }
 
   if (patch.role != null) {
     const role = patch.role === 'admin' ? 'admin' : 'user';
@@ -301,6 +307,11 @@ export async function updateUser(username, patch) {
       throw new Error('不能禁用 admin');
     }
     user.disabled = Boolean(patch.disabled);
+  }
+  if (patch.alias != null) {
+    const alias = String(patch.alias).trim();
+    if (alias.length > 32) throw new Error('别名最多 32 个字');
+    user.alias = alias;
   }
   await saveConsoleUser(user);
   return toPublicUser(user);

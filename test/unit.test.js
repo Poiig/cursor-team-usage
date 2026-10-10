@@ -484,6 +484,33 @@ test('切换报表汇总与 Total usage 快照', async () => {
   assert.equal(report[1].memberCount, 1);
 });
 
+test('使用人席位：别名优先，老插件回退主机中文备注', async () => {
+  const { displayPresenceLabel } = await import('../src/account-presence.js');
+  const aliasByUsername = new Map([['lukezhang', '陆克']]);
+  const nameByHostname = new Map([['allengao-pc', '高山']]);
+  assert.equal(
+    displayPresenceLabel(
+      { username: 'lukezhang', hostname: 'LUKE-PC', label: 'lukezhang' },
+      { aliasByUsername, nameByHostname },
+    ),
+    '陆克',
+  );
+  assert.equal(
+    displayPresenceLabel(
+      { username: null, hostname: 'allengao-pc', label: 'allengao-pc' },
+      { aliasByUsername, nameByHostname },
+    ),
+    '高山',
+  );
+  assert.equal(
+    displayPresenceLabel(
+      { username: 'zephyrwang', hostname: 'DESKTOP-Q6VL93B', label: 'zephyrwang' },
+      { aliasByUsername, nameByHostname },
+    ),
+    'zephyrwang',
+  );
+});
+
 test('插件使用人签名与版本展示', async () => {
   const { loadAppConfig } = await import('../src/config.js');
   await loadAppConfig();

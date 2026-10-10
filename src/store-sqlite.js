@@ -310,6 +310,7 @@ function migrateConsoleAdminToUsers() {
  *   mustChangePassword: boolean,
  *   disabled: boolean,
  *   pending: boolean,
+ *   alias: string,
  * }} ConsoleUserRow
  */
 
@@ -318,6 +319,9 @@ function ensureConsoleUserColumns() {
   const cols = new Set(getAll('PRAGMA table_info(console_users)').map((c) => String(c.name)));
   if (!cols.has('pending')) {
     run('ALTER TABLE console_users ADD COLUMN pending INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!cols.has('alias')) {
+    run("ALTER TABLE console_users ADD COLUMN alias TEXT NOT NULL DEFAULT ''");
   }
 }
 
@@ -336,6 +340,7 @@ function rowToConsoleUser(row) {
     mustChangePassword: Boolean(row.must_change_password),
     disabled: Boolean(row.disabled),
     pending: Boolean(row.pending),
+    alias: String(row.alias || ''),
   };
 }
 
@@ -655,8 +660,8 @@ export async function createConsoleUser(user) {
   if (exists) throw new Error('用户名已存在');
   run(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
-     VALUES (?,?,?,?,?,?,?,?)`,
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
     [
       user.username,
       user.passwordHash,
@@ -666,6 +671,7 @@ export async function createConsoleUser(user) {
       user.mustChangePassword ? 1 : 0,
       user.disabled ? 1 : 0,
       user.pending ? 1 : 0,
+      String(user.alias || ''),
     ],
   );
   // 同步写回遗留 console_admin，避免旧工具只读那张表时丢 admin
@@ -696,8 +702,8 @@ export async function createConsoleUser(user) {
 export async function saveConsoleUser(user) {
   run(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending)
-     VALUES (?,?,?,?,?,?,?,?)
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias)
+     VALUES (?,?,?,?,?,?,?,?,?)
      ON CONFLICT(username) DO UPDATE SET
        password_hash=excluded.password_hash,
        salt=excluded.salt,
@@ -705,7 +711,8 @@ export async function saveConsoleUser(user) {
        created_at=excluded.created_at,
        must_change_password=excluded.must_change_password,
        disabled=excluded.disabled,
-       pending=excluded.pending`,
+       pending=excluded.pending,
+       alias=excluded.alias`,
     [
       user.username,
       user.passwordHash,
@@ -715,6 +722,7 @@ export async function saveConsoleUser(user) {
       user.mustChangePassword ? 1 : 0,
       user.disabled ? 1 : 0,
       user.pending ? 1 : 0,
+      String(user.alias || ''),
     ],
   );
   if (user.username === 'admin') {

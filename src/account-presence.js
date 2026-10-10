@@ -56,6 +56,45 @@ export function maxUsersForMember(member) {
   return null;
 }
 
+/**
+ * 席位上给人看的名字。
+ * 有看板用户且设了别名时用别名；老插件没有用户名时，用主机名对应账号的中文备注。
+ * @param {{ username?: string|null, hostname?: string|null, label?: string|null }} row
+ * @param {{ aliasByUsername?: Map<string, string>, nameByHostname?: Map<string, string> }} [ctx]
+ */
+export function displayPresenceLabel(row, ctx = {}) {
+  const username = String(row?.username || '').trim();
+  const alias = username ? ctx.aliasByUsername?.get(username.toLowerCase()) : '';
+  if (alias) return alias;
+  if (username) return username;
+  const host = String(row?.hostname || '').trim().toLowerCase();
+  const chinese = host ? ctx.nameByHostname?.get(host) : '';
+  if (chinese) return chinese;
+  return String(row?.label || row?.hostname || '').trim();
+}
+
+/**
+ * 给一批账号的使用人席位套上别名 / 中文备注。
+ * @param {any[]} members
+ * @param {Map<string, string>} aliasByUsername
+ */
+export function applyPresenceDisplayNames(members, aliasByUsername) {
+  /** @type {Map<string, string>} */
+  const nameByHostname = new Map();
+  for (const member of members || []) {
+    const host = String(member?.hostname || '').trim().toLowerCase();
+    const name = String(member?.displayName || '').trim();
+    if (host && name && !nameByHostname.has(host)) nameByHostname.set(host, name);
+  }
+  return (members || []).map((member) => ({
+    ...member,
+    activeUsers: (member.activeUsers || []).map((user) => ({
+      ...user,
+      label: displayPresenceLabel(user, { aliasByUsername, nameByHostname }) || user.label,
+    })),
+  }));
+}
+
 /** 新插件优先看板用户名；旧插件使用本次上报的主机备注。 */
 export function resolvePresenceIdentity(input) {
   const username = String(input?.username || '').trim();
@@ -107,6 +146,7 @@ export async function getMemberCapacity(member, now = Date.now()) {
     )
     .map((row) => ({
       hostname: row.hostname,
+      username: row.username || null,
       label: row.label || row.hostname,
       lastSeenAt: row.lastSeenAt,
     }));

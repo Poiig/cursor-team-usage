@@ -50,6 +50,7 @@ import {
   recommendSwitchMember,
 } from './account-switch.js';
 import {
+  applyPresenceDisplayNames,
   enrichMembersWithPresence,
   hydratePresenceFromAppLog,
   listPresenceByUsername,
@@ -864,10 +865,11 @@ const server = http.createServer(async (req, res) => {
       }
       if (method === 'PUT' && !suffix) {
         const body = await readBody(req);
-        const user = await updateUser(username, {
-          role: body?.role,
-          disabled: body?.disabled,
-        });
+        const patch = {};
+        if (body?.role != null) patch.role = body.role;
+        if (body?.disabled != null) patch.disabled = body.disabled;
+        if (body?.alias != null) patch.alias = body.alias;
+        const user = await updateUser(username, patch);
         await writeAppLog('更新用户', {
           操作者: req.consoleUser,
           用户: user.username,
@@ -1027,7 +1029,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (method === 'GET' && pathname === '/api/members') {
-      const members = await enrichMembersWithPresence(await listMembers());
+      const named = applyPresenceDisplayNames(
+        await enrichMembersWithPresence(await listMembers()),
+        new Map(
+          (await listPublicUsers())
+            .filter((user) => user.alias)
+            .map((user) => [user.username.toLowerCase(), user.alias]),
+        ),
+      );
+      const members = named;
       const recommended = recommendSwitchMember(members);
       return sendJson(res, 200, {
         members,

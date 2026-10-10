@@ -341,7 +341,9 @@ function renderActiveUserSlots(member) {
     }
     const label = String(user.label || user.hostname || '未知');
     const initial = Array.from(label.trim())[0] || '?';
-    return `<div class="user-slot" title="${escapeHtml(`${label} · ${user.hostname || ''}`)}">
+    const hostNote =
+      user.hostname && user.hostname !== label ? ` · ${user.hostname}` : '';
+    return `<div class="user-slot" title="${escapeHtml(`${label}${hostNote}`)}">
       <span class="user-avatar">${escapeHtml(initial.toUpperCase())}</span>
       <span class="user-slot-name">${escapeHtml(label)}</span>
     </div>`;
@@ -888,7 +890,8 @@ async function loadUsers() {
         const actions = u.pending
           ? `<button type="button" class="btn sm primary" data-user-action="approve">同意</button>
               <button type="button" class="btn sm danger" data-user-action="reject">拒绝</button>`
-          : `<button type="button" class="btn sm" data-user-action="reset">重置密码</button>
+          : `<button type="button" class="btn sm" data-user-action="alias">别名</button>
+              <button type="button" class="btn sm" data-user-action="reset">重置密码</button>
               ${
                 canDelete
                   ? `<button type="button" class="btn sm" data-user-action="toggle">${
@@ -900,6 +903,7 @@ async function loadUsers() {
         return `
           <tr data-username="${escapeHtml(u.username)}" class="${u.pending ? 'user-row-pending' : ''}">
             <td>${escapeHtml(u.username)}</td>
+            <td>${escapeHtml(u.alias || '—')}</td>
             <td>${escapeHtml(roleLabel)}</td>
             <td>${
               u.pending ? `<span class="badge warn">${escapeHtml(status)}</span>` : escapeHtml(status)
@@ -1339,6 +1343,26 @@ els.userTableBody?.addEventListener('click', async (event) => {
       });
       toast(`已拒绝 ${username}`);
       await loadUsers();
+    } catch (e) {
+      toast(e.message || String(e));
+      setBusy(btn, false);
+    }
+    return;
+  }
+
+  if (action === 'alias') {
+    const next = prompt(`为「${username}」设置别名。席位上会显示这个名字，留空则清除：`, user.alias || '');
+    if (next == null) return;
+    if (next.trim().length > 32) return toast('别名最多 32 个字');
+    setBusy(btn, true, '…');
+    try {
+      await api(`/api/users/${encodeURIComponent(username)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ alias: next.trim() }),
+      });
+      toast(next.trim() ? `已把 ${username} 的别名设为 ${next.trim()}` : `已清除 ${username} 的别名`);
+      await loadUsers();
+      await load();
     } catch (e) {
       toast(e.message || String(e));
       setBusy(btn, false);
