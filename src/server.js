@@ -37,10 +37,15 @@ import {
   initStore,
   listMembers,
   saveSyncResult,
+  setUsagePercentHistory,
   toPublicMember,
   updateMember,
   upsertMemberBySession,
 } from './store.js';
+import {
+  archiveYesterdayPercents,
+  msUntilNextLocalMidnight,
+} from './usage-percent-history.js';
 import {
   claimAccountSwitch,
   createAccountSwitch,
@@ -122,6 +127,10 @@ const PUBLIC_STATIC = new Set([
 let autoRefreshTimer = null;
 /** @type {ReturnType<typeof setInterval> | null} */
 let logPruneTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let usagePercentArchiveTimer = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let usagePercentArchiveInterval = null;
 /** 正在刷新的成员，避免上报与定时器重复拉同一账号。 */
 const refreshingIds = new Set();
 
@@ -426,6 +435,53 @@ function setupLogPruneSchedule() {
     },
     24 * 3600 * 1000,
   );
+}
+
+/**
+ * 用各账号最新快照把「昨天」的周期累计%盖进历史，供今日对比与日用量图。
+ */
+async function archiveAllYesterdayUsagePercents() {
+  const members = await getAllMembersInternal();
+  let n = 0;
+  for (const m of members) {
+    if (!m.lastSnapshot) continue;
+    const next = archiveYesterdayPercents(m.usagePercentHistory, m.lastSnapshot);
+    await setUsagePercentHistory(m.id, next);
+    n += 1;
+  }
+  if (n > 0) {
+    await writeAppLog('额度日归档', { 账号数: n });
+  }
+  return n;
+}
+
+/**
+ * 对齐本地零点执行额度%归档；之后每 24h 再跑。
+ */
+function setupUsagePercentArchiveSchedule() {
+  if (usagePercentArchiveTimer) {
+    clearTimeout(usagePercentArchiveTimer);
+    usagePercentArchiveTimer = null;
+  }
+  if (usagePercentArchiveInterval) {
+    clearInterval(usagePercentArchiveInterval);
+    usagePercentArchiveInterval = null;
+  }
+  const delay = msUntilNextLocalMidnight();
+  console.log(`额度日归档：${Math.round(delay / 60000)} 分钟后对齐本地零点`);
+  usagePercentArchiveTimer = setTimeout(() => {
+    archiveAllYesterdayUsagePercents().catch((e) =>
+      console.error('额度日归档失败:', e?.message || e),
+    );
+    usagePercentArchiveInterval = setInterval(
+      () => {
+        archiveAllYesterdayUsagePercents().catch((e) =>
+          console.error('额度日归档失败:', e?.message || e),
+        );
+      },
+      24 * 3600 * 1000,
+    );
+  }, delay);
 }
 
 /**
@@ -1209,6 +1265,7 @@ await initStore();
 await initUsers();
 setupServerAutoRefresh();
 setupLogPruneSchedule();
+setupUsagePercentArchiveSchedule();
 
 server.listen(PORT, HOST, async () => {
   console.log(`cursor-team-usage → http://${HOST}:${PORT}`);

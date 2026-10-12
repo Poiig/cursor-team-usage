@@ -13,6 +13,7 @@ import {
   pulledColumnsFromSnapshot,
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
+import { recordSyncPercents } from './usage-percent-history.js';
 
 const require = createRequire(import.meta.url);
 const sqlJsDir = path.dirname(require.resolve('sql.js'));
@@ -38,6 +39,7 @@ const sqlJsDir = path.dirname(require.resolve('sql.js'));
  *   lastSnapshot?: object | null,
  *   lastError?: string | null,
  *   lastSyncedAt?: string | null,
+ *   usagePercentHistory?: Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>,
  * }} Member
  */
 
@@ -89,7 +91,22 @@ function rowToMember(row) {
     lastSnapshot,
     lastError: row.last_error ?? null,
     lastSyncedAt: row.last_synced_at ?? null,
+    usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
   };
+}
+
+/**
+ * 解析按日额度% JSON；坏数据当空数组，避免拖垮列表渲染。
+ * @param {unknown} raw
+ */
+function parseUsagePercentHistory(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -116,6 +133,7 @@ export function toPublicMember(m) {
     lastSnapshot: m.lastSnapshot ?? null,
     lastError: m.lastError ?? null,
     lastSyncedAt: m.lastSyncedAt ?? null,
+    usagePercentHistory: m.usagePercentHistory ?? [],
   };
 }
 
@@ -185,6 +203,7 @@ function ensureMemberColumns() {
     ['spend_yesterday', 'REAL'],
     ['spend_last30', 'REAL'],
     ['hard_limit', 'REAL'],
+    ['usage_percent_history', 'TEXT'],
   ];
   for (const [name, type] of extras) {
     if (!cols.has(name)) run(`ALTER TABLE members ADD COLUMN ${name} ${type}`);
@@ -209,6 +228,7 @@ function ensureSchema() {
       spend_yesterday REAL,
       spend_last30 REAL,
       hard_limit REAL,
+      usage_percent_history TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_snapshot TEXT,
@@ -589,6 +609,8 @@ export async function saveSyncResult(id, result) {
   if (result.snapshot) {
     const syncedAt = result.snapshot.syncedAt || now;
     const pulled = pulledColumnsFromSnapshot(result.snapshot);
+    // 同步时覆写「今天」累计%，凌晨归档再盖写昨天收盘值。
+    const history = recordSyncPercents(member.usagePercentHistory, result.snapshot);
     run(
       `UPDATE members SET
         last_snapshot=?,
@@ -600,6 +622,7 @@ export async function saveSyncResult(id, result) {
         spend_yesterday=?,
         spend_last30=?,
         hard_limit=?,
+        usage_percent_history=?,
         token_expires_at=COALESCE(?, token_expires_at),
         last_error=NULL,
         last_synced_at=?,
@@ -615,6 +638,7 @@ export async function saveSyncResult(id, result) {
         pulled.spendYesterday,
         pulled.spendLast30,
         pulled.hardLimit,
+        JSON.stringify(history),
         tokenExpiresAtFromCookie(member.cookieValue),
         syncedAt,
         syncedAt,
@@ -635,6 +659,20 @@ export async function saveSyncResult(id, result) {
   await persist();
   const next = await getMemberInternal(id);
   return next ? toPublicMember(next) : undefined;
+}
+
+/**
+ * 写入按日额度%历史（凌晨归档用）。
+ * @param {string} id
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>} history
+ */
+export async function setUsagePercentHistory(id, history) {
+  const now = new Date().toISOString();
+  run(
+    `UPDATE members SET usage_percent_history=?, updated_at=? WHERE id=?`,
+    [JSON.stringify(history || []), now, id],
+  );
+  await persist();
 }
 
 /** @returns {Promise<ConsoleUserRow[]>} */

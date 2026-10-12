@@ -471,6 +471,33 @@ h3 {
   margin-top: 10px;
 }
 
+.spend-row--link {
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.15s ease, outline-color 0.15s ease;
+}
+
+.spend-row--link:hover {
+  background: color-mix(in srgb, var(--accent, #2dd4bf) 8%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent, #2dd4bf) 35%, var(--border));
+  outline-offset: 2px;
+}
+
+.pct-delta {
+  font-weight: 550;
+  font-size: 12px;
+  opacity: 0.85;
+  margin-left: 4px;
+}
+
+.pct-delta.up {
+  color: var(--amber, #f59e0b);
+}
+
+.pct-delta.down {
+  color: var(--green-strong, #34d399);
+}
+
 .spend-cell {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -648,7 +675,7 @@ h3 {
 
 .charts {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
   margin-top: 14px;
 }

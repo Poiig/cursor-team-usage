@@ -98,6 +98,78 @@ export function resolveSpendRow(snap, panelSpend) {
   return panelSpend || null;
 }
 
+/**
+ * 进度条标签 → 日历史字段（Total / Cursor Models / Other Models）。
+ * @param {string} label
+ * @returns {'total' | 'auto' | 'api' | null}
+ */
+export function fieldForProgressLabel(label) {
+  if (label === 'Total usage') return 'total';
+  if (label === 'Cursor Models') return 'auto';
+  if (label === 'Other Models') return 'api';
+  return null;
+}
+
+/**
+ * 本地日历「昨天」yyyy-MM-dd，与服务端归档日键一致。
+ * @param {number} [nowMs]
+ */
+export function yesterdayDayKey(nowMs = Date.now()) {
+  const start = new Date(nowMs);
+  start.setHours(0, 0, 0, 0);
+  const y = new Date(start.getTime() - 86400000);
+  const yy = y.getFullYear();
+  const mm = String(y.getMonth() + 1).padStart(2, '0');
+  const dd = String(y.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+/**
+ * 当前累计% 相对昨日收盘的差值（今日用量）。
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
+ * @param {'total' | 'auto' | 'api'} field
+ * @param {number | null | undefined} current
+ * @returns {number | null}
+ */
+export function deltaVsYesterday(history, field, current) {
+  if (current == null || !Number.isFinite(Number(current))) return null;
+  const y = (history || []).find((r) => r && r.date === yesterdayDayKey());
+  const prev = y?.[field];
+  if (prev == null || !Number.isFinite(Number(prev))) return null;
+  return Math.round((Number(current) - Number(prev)) * 10) / 10;
+}
+
+/**
+ * 额度旁「(+x%)」文案；无昨日快照时返回空。
+ * @param {number | null | undefined} delta
+ */
+export function formatDeltaVsYesterday(delta) {
+  if (delta == null || !Number.isFinite(delta)) return '';
+  const sign = delta > 0 ? '+' : '';
+  return `(${sign}${delta.toFixed(1)}%)`;
+}
+
+/**
+ * 相邻两日累计%之差 → 每日用量柱状图数据。
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
+ * @param {'total' | 'auto' | 'api'} [field]
+ * @returns {Array<{ label: string, value: number }>}
+ */
+export function dailyPercentDeltaPoints(history, field = 'total') {
+  const rows = [...(history || [])]
+    .filter((r) => r && r.date && r[field] != null && Number.isFinite(Number(r[field])))
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  /** @type {Array<{ label: string, value: number }>} */
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    out.push({
+      label: rows[i].date,
+      value: Math.round((Number(rows[i][field]) - Number(rows[i - 1][field])) * 10) / 10,
+    });
+  }
+  return out;
+}
+
 /** 官方用量页 Tokens 列：与 formatTokens 相同（万 / 亿）。 */
 export function formatTokensWan(n) {
   return formatTokens(n);

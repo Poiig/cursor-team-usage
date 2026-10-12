@@ -11,6 +11,7 @@ import {
   pulledColumnsFromSnapshot,
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
+import { recordSyncPercents } from './usage-percent-history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -38,6 +39,7 @@ const USERS_PATH = path.join(DATA_DIR, 'users.json');
  *   lastSnapshot?: object | null,
  *   lastError?: string | null,
  *   lastSyncedAt?: string | null,
+ *   usagePercentHistory?: Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>,
  * }} Member
  */
 
@@ -88,6 +90,7 @@ export function toPublicMember(m) {
     lastSnapshot: m.lastSnapshot ?? null,
     lastError: m.lastError ?? null,
     lastSyncedAt: m.lastSyncedAt ?? null,
+    usagePercentHistory: m.usagePercentHistory ?? [],
   };
 }
 
@@ -257,6 +260,11 @@ export async function saveSyncResult(id, result) {
     member.spendYesterday = pulled.spendYesterday;
     member.spendLast30 = pulled.spendLast30;
     member.hardLimit = pulled.hardLimit;
+    // 同步时覆写「今天」累计%，凌晨归档再盖写昨天收盘值。
+    member.usagePercentHistory = recordSyncPercents(
+      member.usagePercentHistory,
+      result.snapshot,
+    );
     member.tokenExpiresAt = tokenExpiresAtFromCookie(member.cookieValue);
     member.lastError = null;
     member.lastSyncedAt = result.snapshot.syncedAt || now;
@@ -269,6 +277,20 @@ export async function saveSyncResult(id, result) {
   store.members[idx] = member;
   await writeStore(store);
   return toPublicMember(member);
+}
+
+/**
+ * 写入按日额度%历史（凌晨归档用）。
+ * @param {string} id
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>} history
+ */
+export async function setUsagePercentHistory(id, history) {
+  const store = await readStore();
+  const idx = store.members.findIndex((m) => m.id === id);
+  if (idx < 0) return;
+  store.members[idx].usagePercentHistory = history || [];
+  store.members[idx].updatedAt = new Date().toISOString();
+  await writeStore(store);
 }
 
 /**

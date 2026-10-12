@@ -78,6 +78,14 @@ export async function saveSyncResult(id, result) {
   return api().saveSyncResult(id, result);
 }
 
+/**
+ * @param {string} id
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>} history
+ */
+export async function setUsagePercentHistory(id, history) {
+  return api().setUsagePercentHistory(id, history);
+}
+
 /** @returns {Promise<any>} */
 export async function getConsoleAdmin() {
   return api().getConsoleAdmin();

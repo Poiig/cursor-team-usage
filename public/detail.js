@@ -7,10 +7,14 @@ import {
   api,
   computeUsagePace,
   createToast,
+  dailyPercentDeltaPoints,
   daysUntil,
+  deltaVsYesterday,
   downloadText,
   escapeHtml,
+  fieldForProgressLabel,
   formatDateTimeDot,
+  formatDeltaVsYesterday,
   formatSpendPart,
   formatTokensWan,
   loadSettings,
@@ -31,6 +35,7 @@ const els = {
   pace: document.getElementById('detailPace'),
   chartSpend: document.getElementById('chartSpend'),
   chartTokens: document.getElementById('chartTokens'),
+  chartUsagePercent: document.getElementById('chartUsagePercent'),
   chartModels: document.getElementById('chartModels'),
   eventsDays: document.getElementById('eventsDays'),
   eventsHint: document.getElementById('eventsHint'),
@@ -56,13 +61,25 @@ function fillClass(pct) {
   return '';
 }
 
-function renderProgressLine(line) {
+/**
+ * @param {object} line
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
+ */
+function renderProgressLine(line, history) {
   const used = Number(line.used) || 0;
   const limit = Number(line.limit) || 100;
   const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
   let valueText;
-  if (line.format === 'percent') valueText = `${used.toFixed(1)}%`;
-  else if (line.format === 'dollars') valueText = `$${used.toFixed(2)} / $${limit.toFixed(2)}`;
+  if (line.format === 'percent') {
+    const field = fieldForProgressLabel(line.label);
+    const delta = field ? deltaVsYesterday(history, field, used) : null;
+    const deltaText = formatDeltaVsYesterday(delta);
+    const deltaCls =
+      delta == null ? '' : delta > 0 ? 'pct-delta up' : delta < 0 ? 'pct-delta down' : 'pct-delta';
+    valueText = deltaText
+      ? `${used.toFixed(1)}% <span class="${deltaCls}" title="较昨日累计">${escapeHtml(deltaText)}</span>`
+      : `${used.toFixed(1)}%`;
+  } else if (line.format === 'dollars') valueText = `$${used.toFixed(2)} / $${limit.toFixed(2)}`;
   else valueText = `${used}/${limit}${line.suffix ? ` ${line.suffix}` : ''}`;
   return `
     <div class="panel-line">
@@ -283,8 +300,10 @@ function renderMember() {
 
   const { progress, spend: panelSpend } = splitLines(snap?.panelLines);
   const spend = resolveSpendRow(snap, panelSpend);
+  const history = member.usagePercentHistory;
   els.meters.innerHTML =
-    progress.map(renderProgressLine).join('') + (spend ? renderSpendRow(spend) : '');
+    progress.map((line) => renderProgressLine(line, history)).join('') +
+    (spend ? renderSpendRow(spend) : '');
 
   const daily = snap?.spend?.daily || [];
   renderBarChart(
@@ -297,12 +316,18 @@ function renderMember() {
     daily.map((d) => ({ label: d.date, value: d.tokens || 0 })),
     '#4daafc',
   );
+  // 日用量% = 相邻两日周期累计%之差；需至少两天归档才有柱。
+  renderBarChart(els.chartUsagePercent, dailyPercentDeltaPoints(history, 'total'), '#f59e0b');
   const models = (snap?.usage?.topModels || []).slice(0, 8);
   renderHorizontalBars(
     els.chartModels,
     models.map((m) => ({ label: m.model, value: m.count })),
     '#a78bfa',
   );
+
+  if (location.hash === '#usage-percent') {
+    document.getElementById('usage-percent')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
 async function loadMember() {

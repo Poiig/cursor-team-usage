@@ -10,6 +10,7 @@ import {
   pulledColumnsFromSnapshot,
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
+import { recordSyncPercents } from './usage-percent-history.js';
 
 const { Pool } = pg;
 
@@ -37,8 +38,24 @@ let pool = null;
  *   lastSnapshot?: object | null,
  *   lastError?: string | null,
  *   lastSyncedAt?: string | null,
+ *   usagePercentHistory?: Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>,
  * }} Member
  */
+
+/**
+ * 解析按日额度% JSON；坏数据当空数组。
+ * @param {unknown} raw
+ */
+function parseUsagePercentHistory(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * @param {any} row
@@ -67,6 +84,7 @@ function rowToMember(row) {
     lastSnapshot: row.last_snapshot ?? null,
     lastError: row.last_error ?? null,
     lastSyncedAt: row.last_synced_at ? new Date(row.last_synced_at).toISOString() : null,
+    usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
   };
 }
 
@@ -94,6 +112,7 @@ export function toPublicMember(m) {
     lastSnapshot: m.lastSnapshot ?? null,
     lastError: m.lastError ?? null,
     lastSyncedAt: m.lastSyncedAt ?? null,
+    usagePercentHistory: m.usagePercentHistory ?? [],
   };
 }
 
@@ -123,6 +142,7 @@ export async function init() {
       spend_yesterday DOUBLE PRECISION,
       spend_last30 DOUBLE PRECISION,
       hard_limit DOUBLE PRECISION,
+      usage_percent_history JSONB,
       created_at TIMESTAMPTZ NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL,
       last_snapshot JSONB,
@@ -141,7 +161,8 @@ export async function init() {
       ADD COLUMN IF NOT EXISTS spend_today DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS spend_yesterday DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS spend_last30 DOUBLE PRECISION,
-      ADD COLUMN IF NOT EXISTS hard_limit DOUBLE PRECISION
+      ADD COLUMN IF NOT EXISTS hard_limit DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS usage_percent_history JSONB
   `);
   await db().query(`
     CREATE TABLE IF NOT EXISTS console_admin (
@@ -398,6 +419,8 @@ export async function saveSyncResult(id, result) {
   if (result.snapshot) {
     const syncedAt = result.snapshot.syncedAt || now;
     const pulled = pulledColumnsFromSnapshot(result.snapshot);
+    // 同步时覆写「今天」累计%，凌晨归档再盖写昨天收盘值。
+    const history = recordSyncPercents(member.usagePercentHistory, result.snapshot);
     await db().query(
       `UPDATE members SET
         last_snapshot=$1::jsonb,
@@ -409,11 +432,12 @@ export async function saveSyncResult(id, result) {
         spend_yesterday=$7,
         spend_last30=$8,
         hard_limit=$9,
-        token_expires_at=COALESCE($10::timestamptz, token_expires_at),
+        usage_percent_history=$10::jsonb,
+        token_expires_at=COALESCE($11::timestamptz, token_expires_at),
         last_error=NULL,
-        last_synced_at=$11,
-        updated_at=$11
-       WHERE id=$12`,
+        last_synced_at=$12,
+        updated_at=$12
+       WHERE id=$13`,
       [
         JSON.stringify(result.snapshot),
         pulled.email,
@@ -424,6 +448,7 @@ export async function saveSyncResult(id, result) {
         pulled.spendYesterday,
         pulled.spendLast30,
         pulled.hardLimit,
+        JSON.stringify(history),
         tokenExpiresAtFromCookie(member.cookieValue),
         syncedAt,
         id,
@@ -442,6 +467,19 @@ export async function saveSyncResult(id, result) {
   }
   const next = await getMemberInternal(id);
   return next ? toPublicMember(next) : undefined;
+}
+
+/**
+ * 写入按日额度%历史（凌晨归档用）。
+ * @param {string} id
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>} history
+ */
+export async function setUsagePercentHistory(id, history) {
+  const now = new Date().toISOString();
+  await db().query(
+    `UPDATE members SET usage_percent_history=$1::jsonb, updated_at=$2 WHERE id=$3`,
+    [JSON.stringify(history || []), now, id],
+  );
 }
 
 /**

@@ -26,6 +26,13 @@ import {
   eventTotalTokens,
   fetchMe,
 } from '../src/cursor-api.js';
+import {
+  archiveYesterdayPercents,
+  dailyPercentDeltas,
+  deltaVsYesterday,
+  recordSyncPercents,
+  yesterdayDayKey,
+} from '../src/usage-percent-history.js';
 
 test('normalizeManualToken 接受 cookie / name=value / 裸 JWT', () => {
   const jwt =
@@ -612,4 +619,37 @@ test('app-log 日期键、账号标签与过期清理', async () => {
   const left = await readdir(dir);
   assert.ok(left.includes(`${logDateKey(keepDay)}.log`));
   assert.ok(!left.includes(`${logDateKey(oldDay)}.log`));
+});
+
+test('额度日历史：同步写入今天、凌晨归档昨天、日差与对比', () => {
+  // 固定到 2026-10-12 12:00 本地，便于断言日键。
+  const now = new Date(2026, 9, 12, 12, 0, 0, 0).getTime();
+  const snap = {
+    meters: { totalPercentUsed: 29.9, autoPercentUsed: 31.4, apiPercentUsed: 0 },
+  };
+  const todayHist = recordSyncPercents([], snap, now);
+  assert.equal(todayHist.length, 1);
+  assert.equal(todayHist[0].date, '2026-10-12');
+  assert.equal(todayHist[0].total, 29.9);
+
+  const withYesterday = archiveYesterdayPercents(
+    [{ date: '2026-10-11', total: 24.9, auto: 26.1, api: 0 }],
+    snap,
+    now,
+  );
+  assert.equal(yesterdayDayKey(now), '2026-10-11');
+  assert.equal(
+    withYesterday.find((r) => r.date === '2026-10-11')?.total,
+    29.9,
+  );
+  assert.equal(deltaVsYesterday(withYesterday, 'total', 29.9, now), 0);
+
+  const hist = [
+    { date: '2026-10-10', total: 20, auto: 21, api: 0 },
+    { date: '2026-10-11', total: 24.9, auto: 26.1, api: 0 },
+  ];
+  assert.equal(deltaVsYesterday(hist, 'total', 29.9, now), 5);
+  assert.deepEqual(dailyPercentDeltas(hist, 'total'), [
+    { date: '2026-10-11', value: 4.9 },
+  ]);
 });

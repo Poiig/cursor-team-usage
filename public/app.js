@@ -8,9 +8,12 @@ import {
   computeUsagePace,
   createToast,
   daysUntil,
+  deltaVsYesterday,
   downloadText,
   escapeHtml,
+  fieldForProgressLabel,
   formatDateTimeDot,
+  formatDeltaVsYesterday,
   formatSpendPart,
   formatTokens,
   loadSettings,
@@ -357,13 +360,25 @@ function renderActiveUserSlots(member) {
   </div>`;
 }
 
-function renderProgressLine(line) {
+/**
+ * @param {object} line
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
+ */
+function renderProgressLine(line, history) {
   const used = Number(line.used) || 0;
   const limit = Number(line.limit) || 100;
   const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
   let valueText;
-  if (line.format === 'percent') valueText = `${used.toFixed(1)}%`;
-  else if (line.format === 'dollars') valueText = `$${used.toFixed(2)} / $${limit.toFixed(2)}`;
+  if (line.format === 'percent') {
+    const field = fieldForProgressLabel(line.label);
+    const delta = field ? deltaVsYesterday(history, field, used) : null;
+    const deltaText = formatDeltaVsYesterday(delta);
+    const deltaCls =
+      delta == null ? '' : delta > 0 ? 'pct-delta up' : delta < 0 ? 'pct-delta down' : 'pct-delta';
+    valueText = deltaText
+      ? `${used.toFixed(1)}% <span class="${deltaCls}" title="较昨日累计">${escapeHtml(deltaText)}</span>`
+      : `${used.toFixed(1)}%`;
+  } else if (line.format === 'dollars') valueText = `$${used.toFixed(2)} / $${limit.toFixed(2)}`;
   else valueText = `${used}/${limit}${line.suffix ? ` ${line.suffix}` : ''}`;
 
   return `
@@ -387,8 +402,9 @@ function renderSpendRow(line) {
     </div>
   `;
   };
+  // 账单行可点进详情日用量%图；阻止冒泡由列表委托处理。
   return `
-    <div class="spend-row">
+    <div class="spend-row spend-row--link" data-action="bill" title="查看每日用量百分比图表">
       ${cell('Today', line.today)}
       ${cell('Yesterday', line.yesterday)}
       ${cell('Last 30 Days', line.last30)}
@@ -424,9 +440,10 @@ function renderAccountRow(member) {
 
   const { progress, spend: panelSpend } = splitLines(snap?.panelLines, { includeGrok: false });
   const spend = resolveSpendRow(snap, panelSpend);
+  const history = member.usagePercentHistory;
   const meters =
     progress.length > 0
-      ? `<div class="panel-lines">${progress.map(renderProgressLine).join('')}</div>`
+      ? `<div class="panel-lines">${progress.map((line) => renderProgressLine(line, history)).join('')}</div>`
       : `<p class="muted" style="margin-top:10px">尚无面板数据</p>`;
   const spendHtml = spend ? renderSpendRow(spend) : '';
 
@@ -1564,9 +1581,17 @@ els.btnSwitchRecommended?.addEventListener('click', () => switchRecommendedMembe
 
 els.list.addEventListener('click', async (event) => {
   const btn = event.target.closest('button[data-action]');
+  const bill = event.target.closest('[data-action="bill"]');
   const card = event.target.closest('.account');
   const id = card?.dataset.id;
   if (!id) return;
+
+  // 点账单行进详情日用量%图，避免整卡跳转丢锚点。
+  if (bill) {
+    event.stopPropagation();
+    location.href = `/detail.html?id=${encodeURIComponent(id)}#usage-percent`;
+    return;
+  }
 
   if (btn) {
     event.stopPropagation();
