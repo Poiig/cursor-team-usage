@@ -15,7 +15,11 @@ import {
   loadAppConfig,
 } from './config.js';
 import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
-import { fetchMemberSnapshot, fetchMemberUsageEvents } from './cursor-api.js';
+import { fetchMemberSnapshot } from './cursor-api.js';
+import {
+  ensureMemberUsageEventsSynced,
+  persistSnapshotUsageEvents,
+} from './usage-events-sync.js';
 import { probeLocalCursorSession, resolveLocalCursorSession } from './local-session.js';
 import {
   initAppLog,
@@ -36,6 +40,7 @@ import {
   getMemberInternal,
   initStore,
   listMembers,
+  listUsageEvents,
   saveSyncResult,
   setUsagePercentHistory,
   toPublicMember,
@@ -274,6 +279,12 @@ async function refreshOne(id, ctx = {}) {
     const label = memberLogLabel(member);
     try {
       const snapshot = await fetchMemberSnapshot(member.cookieValue);
+      // 先落事件再存快照，避免 _usageEvents 进 last_snapshot。
+      try {
+        await persistSnapshotUsageEvents(id, snapshot);
+      } catch (eventsErr) {
+        console.warn('[usage-events] 刷新落库失败', id, eventsErr?.message || eventsErr);
+      }
       const result = await saveSyncResult(id, { snapshot });
       await writeAppLog('刷新', {
         账号: label,
@@ -1180,12 +1191,19 @@ const server = http.createServer(async (req, res) => {
         const days = Number(url.searchParams.get('days') || 7);
         const page = Number(url.searchParams.get('page') || 1);
         const pageSize = Number(url.searchParams.get('pageSize') || 50);
-        const data = await fetchMemberUsageEvents(member.cookieValue, {
-          days,
-          page,
-          pageSize,
-        });
-        return sendJson(res, 200, data);
+        const model = String(url.searchParams.get('model') || '').trim();
+        const forceSync =
+          url.searchParams.get('sync') === '1' || url.searchParams.get('sync') === 'true';
+        try {
+          await ensureMemberUsageEventsSynced(id, member.cookieValue, { force: forceSync });
+        } catch (syncErr) {
+          // 有本地缓存时仍可读库；完全无数据则把错误抛给前端。
+          console.warn('[usage-events] sync 失败', id, syncErr?.message || syncErr);
+          const listed = await listUsageEvents(id, { days, model, page, pageSize });
+          if (!listed.total && page === 1) throw syncErr;
+        }
+        const data = await listUsageEvents(id, { days, model, page, pageSize });
+        return sendJson(res, 200, { ...data, fromCache: true });
       }
 
       if (method === 'POST' && suffix === '/refresh') {

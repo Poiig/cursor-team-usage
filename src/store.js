@@ -142,3 +142,29 @@ export async function listSwitchLogs(opts) {
 export async function getSwitchLog(id) {
   return api().getSwitchLog(id);
 }
+
+/**
+ * @param {string} memberId
+ * @param {any[]} events
+ */
+export async function upsertUsageEvents(memberId, events) {
+  return api().upsertUsageEvents(memberId, events);
+}
+
+/** @param {string} memberId */
+export async function getUsageEventsWatermark(memberId) {
+  return api().getUsageEventsWatermark(memberId);
+}
+
+/** @param {string} memberId */
+export async function getUsageEventsMeta(memberId) {
+  return api().getUsageEventsMeta(memberId);
+}
+
+/**
+ * @param {string} memberId
+ * @param {{ days?: number, model?: string, page?: number, pageSize?: number, nowMs?: number }} [opts]
+ */
+export async function listUsageEvents(memberId, opts) {
+  return api().listUsageEvents(memberId, opts);
+}

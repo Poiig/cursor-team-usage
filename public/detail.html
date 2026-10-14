@@ -75,13 +75,16 @@
                 <option value="30">近 30 天</option>
                 <option value="90">近 90 天</option>
               </select>
-              <button type="button" class="btn" id="btnLoadEvents">刷新列表</button>
+              <select id="eventsModel" aria-label="按模型筛选">
+                <option value="">全部模型</option>
+              </select>
+              <button type="button" class="btn" id="btnLoadEvents">同步并刷新</button>
               <button type="button" class="btn" id="btnLoadMore" disabled>加载更多</button>
               <button type="button" class="btn" id="btnExportCsv">Export CSV</button>
             </div>
           </div>
-          <p id="eventsHint" class="muted usage-hint">与 cursor.com/dashboard/usage 同源接口；分页加载，避免一次卡死。</p>
-          <div class="usage-table-wrap">
+          <p id="eventsHint" class="muted usage-hint">本地缓存 · 增量同步；滚动到底自动加载。</p>
+          <div class="usage-table-wrap" id="usageTableWrap">
             <table class="usage-table" id="usageTable">
               <thead>
                 <tr>
@@ -98,6 +101,7 @@
                 </tr>
               </tbody>
             </table>
+            <div id="eventsScrollSentinel" class="events-scroll-sentinel" aria-hidden="true"></div>
           </div>
         </div>
       </section>

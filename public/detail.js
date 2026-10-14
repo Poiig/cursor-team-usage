@@ -43,8 +43,11 @@ const els = {
   chartTodayModels: document.getElementById('chartTodayModels'),
   chartModels: document.getElementById('chartModels'),
   eventsDays: document.getElementById('eventsDays'),
+  eventsModel: document.getElementById('eventsModel'),
   eventsHint: document.getElementById('eventsHint'),
   usageBody: document.getElementById('usageBody'),
+  usageTableWrap: document.getElementById('usageTableWrap'),
+  eventsScrollSentinel: document.getElementById('eventsScrollSentinel'),
   btnRefresh: document.getElementById('btnDetailRefresh'),
   btnLoadEvents: document.getElementById('btnLoadEvents'),
   btnLoadMore: document.getElementById('btnLoadMore'),
@@ -59,6 +62,10 @@ let eventsPage = 1;
 let eventsTotal = 0;
 let hasNextPage = false;
 let eventsLoading = false;
+/** @type {string | null} */
+let eventsSyncedAt = null;
+/** @type {IntersectionObserver | null} */
+let eventsScrollObserver = null;
 function fillClass(pct) {
   if (pct == null) return '';
   if (pct >= 95) return 'danger';
@@ -273,8 +280,45 @@ function renderEventsTable(events, { append = false } = {}) {
 
 function updateEventsMeta() {
   const days = Number(els.eventsDays.value || 7);
-  els.eventsHint.textContent = `近 ${days} 天 · 已显示 ${eventsCache.length} / ${eventsTotal} 条`;
+  const model = String(els.eventsModel?.value || '').trim();
+  const modelNote = model ? ` · ${model}` : '';
+  const syncNote = eventsSyncedAt
+    ? ` · 同步 ${formatDateTimeDot(eventsSyncedAt) || eventsSyncedAt}`
+    : '';
+  els.eventsHint.textContent = `本地缓存 · 近 ${days} 天${modelNote} · 已显示 ${eventsCache.length} / ${eventsTotal} 条${syncNote}`;
   if (els.btnLoadMore) els.btnLoadMore.disabled = !hasNextPage || eventsLoading;
+}
+
+/**
+ * 用接口返回的 models 填充下拉；保留当前选中项（若仍在列表中）。
+ * @param {string[]} models
+ */
+function fillEventsModelOptions(models) {
+  if (!els.eventsModel) return;
+  const prev = String(els.eventsModel.value || '');
+  const opts = ['<option value="">全部模型</option>'].concat(
+    (models || []).map(
+      (m) => `<option value="${escapeHtml(m)}"${m === prev ? ' selected' : ''}>${escapeHtml(m)}</option>`,
+    ),
+  );
+  els.eventsModel.innerHTML = opts.join('');
+  if (prev && !(models || []).includes(prev)) {
+    els.eventsModel.value = '';
+  }
+}
+
+/** 表格容器触底自动加载下一页。 */
+function setupEventsInfiniteScroll() {
+  if (!els.eventsScrollSentinel || !els.usageTableWrap || eventsScrollObserver) return;
+  eventsScrollObserver = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      if (!hasNextPage || eventsLoading) return;
+      loadEvents({ reset: false });
+    },
+    { root: els.usageTableWrap, rootMargin: '80px', threshold: 0 },
+  );
+  eventsScrollObserver.observe(els.eventsScrollSentinel);
 }
 
 function chipClassForDays(days) {
@@ -411,12 +455,13 @@ async function loadMember() {
 }
 
 /**
- * 分页拉用量事件；reset=true 从第 1 页重来。
- * @param {{ reset?: boolean }} [opts]
+ * 读本地缓存事件；reset 时可选 forceSync 打官方增量。
+ * @param {{ reset?: boolean, forceSync?: boolean }} [opts]
  */
-async function loadEvents({ reset = true } = {}) {
+async function loadEvents({ reset = true, forceSync = false } = {}) {
   if (eventsLoading) return;
   const days = Number(els.eventsDays.value || 7);
+  const model = String(els.eventsModel?.value || '').trim();
   if (reset) {
     eventsPage = 1;
     eventsCache = [];
@@ -425,18 +470,27 @@ async function loadEvents({ reset = true } = {}) {
     els.usageBody.innerHTML = `<tr><td colspan="5" class="muted">正在加载…</td></tr>`;
   }
   eventsLoading = true;
-  setBusy(els.btnLoadEvents, true, '加载中…');
+  setBusy(els.btnLoadEvents, true, forceSync ? '同步中…' : '加载中…');
   if (els.btnLoadMore) {
     setBusy(els.btnLoadMore, !reset, '加载中…');
     els.btnLoadMore.disabled = true;
   }
   try {
+    const qs = new URLSearchParams({
+      days: String(days),
+      page: String(eventsPage),
+      pageSize: '50',
+    });
+    if (model) qs.set('model', model);
+    if (forceSync) qs.set('sync', '1');
     const data = await api(
-      `/api/members/${encodeURIComponent(memberId)}/usage-events?days=${days}&page=${eventsPage}&pageSize=50`,
+      `/api/members/${encodeURIComponent(memberId)}/usage-events?${qs.toString()}`,
     );
     const batch = data.events || [];
     eventsTotal = Number(data.total) || eventsTotal;
     hasNextPage = Boolean(data.hasNext);
+    eventsSyncedAt = data.syncedAt || eventsSyncedAt;
+    if (reset) fillEventsModelOptions(data.models || []);
     if (reset) {
       eventsCache = batch;
       renderEventsTable(eventsCache, { append: false });
@@ -488,6 +542,7 @@ if (!memberId) {
   els.title.textContent = '缺少账号 id';
   els.sub.textContent = '请从列表页点击账号进入';
 } else {
+  setupEventsInfiniteScroll();
   loadMember()
     .then(() => loadEvents({ reset: true }))
     .catch((e) => toast(e.message || String(e)));
@@ -510,7 +565,8 @@ els.btnRefresh?.addEventListener('click', async () => {
   }
 });
 
-els.btnLoadEvents?.addEventListener('click', () => loadEvents({ reset: true }));
+els.btnLoadEvents?.addEventListener('click', () => loadEvents({ reset: true, forceSync: true }));
 els.btnLoadMore?.addEventListener('click', () => loadEvents({ reset: false }));
 els.eventsDays?.addEventListener('change', () => loadEvents({ reset: true }));
+els.eventsModel?.addEventListener('change', () => loadEvents({ reset: true }));
 els.btnExportCsv?.addEventListener('click', () => exportCsv());

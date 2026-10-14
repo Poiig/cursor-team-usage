@@ -34,6 +34,14 @@ import {
   recordSyncPercents,
   yesterdayDayKey,
 } from '../src/usage-percent-history.js';
+import {
+  USAGE_EVENTS_OVERLAP_MS,
+  USAGE_EVENTS_RETENTION_DAYS,
+  USAGE_EVENTS_STALE_MS,
+  computeUsageEventsSyncWindow,
+  normalizeUsageEventForStore,
+  usageEventsNeedSync,
+} from '../src/usage-events.js';
 
 test('normalizeManualToken 接受 cookie / name=value / 裸 JWT', () => {
   const jwt =
@@ -697,4 +705,143 @@ test('额度日历史：同步写入今天、凌晨归档昨天、日差与对�
   assert.deepEqual(dailyPercentDeltas(hist, 'total'), [
     { date: '2026-10-11', value: 4.9 },
   ]);
+});
+
+test('usage events 增量窗口与过期判断', () => {
+  const now = Date.parse('2026-10-14T12:00:00+08:00');
+  const empty = computeUsageEventsSyncWindow(null, now);
+  assert.equal(empty.endMs, now);
+  assert.equal(empty.startMs, now - USAGE_EVENTS_RETENTION_DAYS * 86400000);
+
+  const wm = now - 3 * 86400000;
+  const incr = computeUsageEventsSyncWindow(wm, now);
+  assert.equal(incr.startMs, wm - USAGE_EVENTS_OVERLAP_MS);
+
+  assert.equal(usageEventsNeedSync({ count: 0 }, now), true);
+  assert.equal(usageEventsNeedSync({ count: 10, syncedAt: null }, now), true);
+  assert.equal(
+    usageEventsNeedSync(
+      { count: 10, syncedAt: new Date(now - USAGE_EVENTS_STALE_MS - 1).toISOString() },
+      now,
+    ),
+    true,
+  );
+  assert.equal(
+    usageEventsNeedSync(
+      { count: 10, syncedAt: new Date(now - 60_000).toISOString() },
+      now,
+    ),
+    false,
+  );
+
+  const row = normalizeUsageEventForStore({
+    id: 'e1',
+    timestamp: Math.floor(now / 1000),
+    model: 'grok',
+    kind: 'USAGE_EVENT_KIND_INCLUDED',
+    kindLabel: 'Included',
+    isTokenBasedCall: true,
+    inputTokens: 10,
+    outputTokens: 2,
+    cacheReadTokens: 0,
+    totalTokens: 12,
+    costLabel: 'Included',
+  });
+  assert.equal(row.eventId, 'e1');
+  assert.equal(row.tsMs, now);
+  assert.equal(row.totalTokens, 12);
+});
+
+test('sqlite usage_events upsert 去重、model 筛选与分页', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-ev-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 't.sqlite');
+  try {
+    await loadAppConfig();
+    const store = await import('../src/store-sqlite.js');
+    await store.close().catch(() => {});
+    await store.init();
+
+    const now = Date.parse('2026-10-14T12:00:00+08:00');
+    const memberId = 'm-test';
+    const mk = (id, model, hoursAgo, tokens) => ({
+      id,
+      timestamp: now - hoursAgo * 3600000,
+      model,
+      kind: 'k',
+      kindLabel: 'Included',
+      isTokenBasedCall: true,
+      inputTokens: tokens,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: tokens,
+      costLabel: 'Included',
+    });
+
+    await store.upsertUsageEvents(memberId, [
+      mk('a', 'default', 1, 100),
+      mk('b', 'grok', 2, 200),
+      mk('a', 'default', 1, 150), // 同 id 覆盖
+      mk('c', 'grok', 3, 50),
+      mk('d', 'composer', 40 * 24, 999), // 超出 7 天窗口
+    ]);
+
+    const wm = await store.getUsageEventsWatermark(memberId);
+    assert.equal(wm, now - 3600000);
+
+    const page1 = await store.listUsageEvents(memberId, {
+      days: 7,
+      page: 1,
+      pageSize: 10,
+      nowMs: now,
+    });
+    assert.equal(page1.total, 3);
+    assert.equal(page1.events.length, 3);
+    assert.equal(page1.hasNext, false);
+    assert.equal(page1.events[0].id, 'a');
+    assert.equal(page1.events[0].totalTokens, 150);
+    assert.ok(page1.models.includes('default'));
+    assert.ok(page1.models.includes('grok'));
+
+    const grok = await store.listUsageEvents(memberId, {
+      days: 7,
+      model: 'grok',
+      page: 1,
+      pageSize: 50,
+      nowMs: now,
+    });
+    assert.equal(grok.total, 2);
+    assert.equal(grok.events.every((e) => e.model === 'grok'), true);
+
+    // 凑满超过一页，验证 hasNext。
+    const more = [];
+    for (let i = 0; i < 12; i++) {
+      more.push(mk(`x${i}`, 'default', 4, 1));
+    }
+    await store.upsertUsageEvents(memberId, more);
+    const paged = await store.listUsageEvents(memberId, {
+      days: 7,
+      model: 'default',
+      page: 1,
+      pageSize: 10,
+      nowMs: now,
+    });
+    assert.equal(paged.total, 13);
+    assert.equal(paged.events.length, 10);
+    assert.equal(paged.hasNext, true);
+
+    await store.close();
+  } finally {
+    if (prevDriver == null) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite == null) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 });

@@ -228,6 +228,41 @@ export async function deleteMember(id) {
   await writeStore(store);
 }
 
+/** file 驱动不持久化用量事件；接口保留以免门面报错。 */
+export async function upsertUsageEvents() {
+  return { upserted: 0 };
+}
+
+/** @returns {Promise<number | null>} */
+export async function getUsageEventsWatermark() {
+  return null;
+}
+
+/** @returns {Promise<{ count: number, syncedAt: string | null }>} */
+export async function getUsageEventsMeta() {
+  return { count: 0, syncedAt: null };
+}
+
+/**
+ * @param {string} _memberId
+ * @param {{ days?: number, page?: number, pageSize?: number }} [opts]
+ */
+export async function listUsageEvents(_memberId, opts = {}) {
+  const days = Math.min(90, Math.max(1, Number(opts.days) || 7));
+  const page = Math.max(1, Number(opts.page) || 1);
+  const pageSize = Math.min(100, Math.max(10, Number(opts.pageSize) || 50));
+  return {
+    days,
+    page,
+    pageSize,
+    total: 0,
+    hasNext: false,
+    events: [],
+    models: [],
+    syncedAt: null,
+  };
+}
+
 /** @param {string} id */
 export async function getMemberInternal(id) {
   const store = await readStore();

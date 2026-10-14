@@ -1127,5 +1127,7 @@ export async function fetchMemberSnapshot(cookieValue) {
       spendPercent,
     },
     syncedAt: new Date().toISOString(),
+    // 仅刷新路径落库用，勿写入 last_snapshot（体量大）。
+    _usageEvents: allEvents,
   };
 }

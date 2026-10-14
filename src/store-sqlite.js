@@ -14,6 +14,11 @@ import {
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
 import { recordSyncPercents } from './usage-percent-history.js';
+import {
+  USAGE_EVENTS_RETENTION_DAYS,
+  normalizeUsageEventForStore,
+  usageEventFromStoreRow,
+} from './usage-events.js';
 
 const require = createRequire(import.meta.url);
 const sqlJsDir = path.dirname(require.resolve('sql.js'));
@@ -39,6 +44,7 @@ const sqlJsDir = path.dirname(require.resolve('sql.js'));
  *   lastSnapshot?: object | null,
  *   lastError?: string | null,
  *   lastSyncedAt?: string | null,
+ *   eventsSyncedAt?: string | null,
  *   usagePercentHistory?: Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>,
  * }} Member
  */
@@ -91,6 +97,7 @@ function rowToMember(row) {
     lastSnapshot,
     lastError: row.last_error ?? null,
     lastSyncedAt: row.last_synced_at ?? null,
+    eventsSyncedAt: row.events_synced_at ?? null,
     usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
   };
 }
@@ -204,6 +211,7 @@ function ensureMemberColumns() {
     ['spend_last30', 'REAL'],
     ['hard_limit', 'REAL'],
     ['usage_percent_history', 'TEXT'],
+    ['events_synced_at', 'TEXT'],
   ];
   for (const [name, type] of extras) {
     if (!cols.has(name)) run(`ALTER TABLE members ADD COLUMN ${name} ${type}`);
@@ -279,7 +287,37 @@ function ensureSchema() {
     )
   `);
   ensureSwitchLogColumns();
+  ensureUsageEventsSchema();
   migrateConsoleAdminToUsers();
+}
+
+/** 用量事件本地缓存表：详情页读库分页 / model 筛选，不再每次打 Cursor。 */
+function ensureUsageEventsSchema() {
+  run(`
+    CREATE TABLE IF NOT EXISTS usage_events (
+      member_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      ts_ms INTEGER NOT NULL,
+      model TEXT,
+      kind TEXT,
+      kind_label TEXT,
+      is_token_based INTEGER NOT NULL DEFAULT 0,
+      charged_cents INTEGER,
+      token_cents INTEGER,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_label TEXT,
+      synced_at TEXT,
+      PRIMARY KEY (member_id, event_id)
+    )
+  `);
+  run(`CREATE INDEX IF NOT EXISTS idx_usage_events_member_ts ON usage_events (member_id, ts_ms DESC)`);
+  run(
+    `CREATE INDEX IF NOT EXISTS idx_usage_events_member_model_ts ON usage_events (member_id, model, ts_ms DESC)`,
+  );
 }
 
 /** 旧库补齐切换日志的 IP / Total usage 列。 */
@@ -584,8 +622,147 @@ export async function upsertMemberBySession(input) {
 export async function deleteMember(id) {
   const before = getOne('SELECT 1 AS x FROM members WHERE id = ?', [id]);
   if (!before) throw new Error('成员不存在');
+  run('DELETE FROM usage_events WHERE member_id = ?', [id]);
   run('DELETE FROM members WHERE id = ?', [id]);
   await persist();
+}
+
+/**
+ * 批量 upsert 用量事件，并刷新 members.events_synced_at；顺带裁掉 90 天以前。
+ * @param {string} memberId
+ * @param {any[]} events
+ * @returns {Promise<{ upserted: number }>}
+ */
+export async function upsertUsageEvents(memberId, events) {
+  if (!memberId) return { upserted: 0 };
+  const syncedAt = new Date().toISOString();
+  const list = Array.isArray(events) ? events : [];
+  let upserted = 0;
+  for (const raw of list) {
+    const e = normalizeUsageEventForStore(raw, syncedAt);
+    if (!e.eventId || !e.tsMs) continue;
+    run(
+      `INSERT INTO usage_events (
+        member_id, event_id, ts_ms, model, kind, kind_label, is_token_based,
+        charged_cents, token_cents, input_tokens, output_tokens,
+        cache_read_tokens, cache_write_tokens, total_tokens, cost_label, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(member_id, event_id) DO UPDATE SET
+        ts_ms=excluded.ts_ms,
+        model=excluded.model,
+        kind=excluded.kind,
+        kind_label=excluded.kind_label,
+        is_token_based=excluded.is_token_based,
+        charged_cents=excluded.charged_cents,
+        token_cents=excluded.token_cents,
+        input_tokens=excluded.input_tokens,
+        output_tokens=excluded.output_tokens,
+        cache_read_tokens=excluded.cache_read_tokens,
+        cache_write_tokens=excluded.cache_write_tokens,
+        total_tokens=excluded.total_tokens,
+        cost_label=excluded.cost_label,
+        synced_at=excluded.synced_at`,
+      [
+        memberId,
+        e.eventId,
+        e.tsMs,
+        e.model,
+        e.kind,
+        e.kindLabel,
+        e.isTokenBased ? 1 : 0,
+        e.chargedCents,
+        e.tokenCents,
+        e.inputTokens,
+        e.outputTokens,
+        e.cacheReadTokens,
+        e.cacheWriteTokens,
+        e.totalTokens,
+        e.costLabel,
+        e.syncedAt,
+      ],
+    );
+    upserted += 1;
+  }
+  const cutoff = Date.now() - USAGE_EVENTS_RETENTION_DAYS * 86400000;
+  run('DELETE FROM usage_events WHERE member_id = ? AND ts_ms < ?', [memberId, cutoff]);
+  run('UPDATE members SET events_synced_at=?, updated_at=? WHERE id=?', [
+    syncedAt,
+    syncedAt,
+    memberId,
+  ]);
+  await persist();
+  return { upserted };
+}
+
+/**
+ * @param {string} memberId
+ * @returns {Promise<number | null>}
+ */
+export async function getUsageEventsWatermark(memberId) {
+  const row = getOne('SELECT MAX(ts_ms) AS m FROM usage_events WHERE member_id = ?', [memberId]);
+  const m = row?.m;
+  return m != null && Number.isFinite(Number(m)) && Number(m) > 0 ? Number(m) : null;
+}
+
+/**
+ * @param {string} memberId
+ * @returns {Promise<{ count: number, syncedAt: string | null }>}
+ */
+export async function getUsageEventsMeta(memberId) {
+  const countRow = getOne('SELECT COUNT(*) AS c FROM usage_events WHERE member_id = ?', [
+    memberId,
+  ]);
+  const member = getOne('SELECT events_synced_at FROM members WHERE id = ?', [memberId]);
+  return {
+    count: Number(countRow?.c) || 0,
+    syncedAt: member?.events_synced_at ?? null,
+  };
+}
+
+/**
+ * 本地分页查询；models 为同时间窗内 distinct，供筛选下拉。
+ * @param {string} memberId
+ * @param {{ days?: number, model?: string, page?: number, pageSize?: number, nowMs?: number }} [opts]
+ */
+export async function listUsageEvents(memberId, opts = {}) {
+  const days = Math.min(90, Math.max(1, Number(opts.days) || 7));
+  const page = Math.max(1, Number(opts.page) || 1);
+  const pageSize = Math.min(100, Math.max(10, Number(opts.pageSize) || 50));
+  const nowMs = Number(opts.nowMs) || Date.now();
+  const since = nowMs - days * 86400000;
+  const model = String(opts.model || '').trim();
+
+  /** @type {unknown[]} */
+  const whereParams = [memberId, since];
+  let where = 'member_id = ? AND ts_ms >= ?';
+  if (model) {
+    where += ' AND model = ?';
+    whereParams.push(model);
+  }
+
+  const totalRow = getOne(`SELECT COUNT(*) AS c FROM usage_events WHERE ${where}`, whereParams);
+  const total = Number(totalRow?.c) || 0;
+  const offset = (page - 1) * pageSize;
+  // sql.js 对 LIMIT/OFFSET 占位符支持不稳，页码已钳制为整数可内联。
+  const rows = getAll(
+    `SELECT * FROM usage_events WHERE ${where} ORDER BY ts_ms DESC LIMIT ${pageSize} OFFSET ${offset}`,
+    whereParams,
+  );
+  const modelRows = getAll(
+    `SELECT DISTINCT model FROM usage_events WHERE member_id = ? AND ts_ms >= ? AND model IS NOT NULL AND model <> '' ORDER BY model ASC`,
+    [memberId, since],
+  );
+  const meta = await getUsageEventsMeta(memberId);
+  return {
+    days,
+    page,
+    pageSize,
+    total,
+    hasNext: offset + rows.length < total,
+    events: rows.map(usageEventFromStoreRow),
+    models: modelRows.map((r) => String(r.model)),
+    syncedAt: meta.syncedAt,
+  };
 }
 
 /** @param {string} id */
@@ -607,6 +784,8 @@ export async function saveSyncResult(id, result) {
   if (!member) return;
   const now = new Date().toISOString();
   if (result.snapshot) {
+    // 防御：临时挂载的事件列表不得写入 last_snapshot JSON。
+    if (result.snapshot._usageEvents) delete result.snapshot._usageEvents;
     const syncedAt = result.snapshot.syncedAt || now;
     const pulled = pulledColumnsFromSnapshot(result.snapshot);
     // 同步时覆写「今天」累计%，凌晨归档再盖写昨天收盘值。

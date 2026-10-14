@@ -11,6 +11,11 @@ import {
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
 import { recordSyncPercents } from './usage-percent-history.js';
+import {
+  USAGE_EVENTS_RETENTION_DAYS,
+  normalizeUsageEventForStore,
+  usageEventFromStoreRow,
+} from './usage-events.js';
 
 const { Pool } = pg;
 
@@ -38,6 +43,7 @@ let pool = null;
  *   lastSnapshot?: object | null,
  *   lastError?: string | null,
  *   lastSyncedAt?: string | null,
+ *   eventsSyncedAt?: string | null,
  *   usagePercentHistory?: Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }>,
  * }} Member
  */
@@ -84,6 +90,7 @@ function rowToMember(row) {
     lastSnapshot: row.last_snapshot ?? null,
     lastError: row.last_error ?? null,
     lastSyncedAt: row.last_synced_at ? new Date(row.last_synced_at).toISOString() : null,
+    eventsSyncedAt: row.events_synced_at ? new Date(row.events_synced_at).toISOString() : null,
     usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
   };
 }
@@ -162,8 +169,36 @@ export async function init() {
       ADD COLUMN IF NOT EXISTS spend_yesterday DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS spend_last30 DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS hard_limit DOUBLE PRECISION,
-      ADD COLUMN IF NOT EXISTS usage_percent_history JSONB
+      ADD COLUMN IF NOT EXISTS usage_percent_history JSONB,
+      ADD COLUMN IF NOT EXISTS events_synced_at TIMESTAMPTZ
   `);
+  await db().query(`
+    CREATE TABLE IF NOT EXISTS usage_events (
+      member_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      ts_ms BIGINT NOT NULL,
+      model TEXT,
+      kind TEXT,
+      kind_label TEXT,
+      is_token_based BOOLEAN NOT NULL DEFAULT FALSE,
+      charged_cents INTEGER,
+      token_cents INTEGER,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_label TEXT,
+      synced_at TIMESTAMPTZ,
+      PRIMARY KEY (member_id, event_id)
+    )
+  `);
+  await db().query(
+    `CREATE INDEX IF NOT EXISTS idx_usage_events_member_ts ON usage_events (member_id, ts_ms DESC)`,
+  );
+  await db().query(
+    `CREATE INDEX IF NOT EXISTS idx_usage_events_member_model_ts ON usage_events (member_id, model, ts_ms DESC)`,
+  );
   await db().query(`
     CREATE TABLE IF NOT EXISTS console_admin (
       username TEXT PRIMARY KEY,
@@ -393,8 +428,168 @@ export async function upsertMemberBySession(input) {
 
 /** @param {string} id */
 export async function deleteMember(id) {
+  await db().query('DELETE FROM usage_events WHERE member_id = $1', [id]);
   const res = await db().query('DELETE FROM members WHERE id = $1', [id]);
   if (!res.rowCount) throw new Error('成员不存在');
+}
+
+/**
+ * @param {string} memberId
+ * @param {any[]} events
+ * @returns {Promise<{ upserted: number }>}
+ */
+export async function upsertUsageEvents(memberId, events) {
+  if (!memberId) return { upserted: 0 };
+  const syncedAt = new Date().toISOString();
+  const list = Array.isArray(events) ? events : [];
+  let upserted = 0;
+  const client = await db().connect();
+  try {
+    await client.query('BEGIN');
+    for (const raw of list) {
+      const e = normalizeUsageEventForStore(raw, syncedAt);
+      if (!e.eventId || !e.tsMs) continue;
+      await client.query(
+        `INSERT INTO usage_events (
+          member_id, event_id, ts_ms, model, kind, kind_label, is_token_based,
+          charged_cents, token_cents, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, total_tokens, cost_label, synced_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        ON CONFLICT (member_id, event_id) DO UPDATE SET
+          ts_ms=EXCLUDED.ts_ms,
+          model=EXCLUDED.model,
+          kind=EXCLUDED.kind,
+          kind_label=EXCLUDED.kind_label,
+          is_token_based=EXCLUDED.is_token_based,
+          charged_cents=EXCLUDED.charged_cents,
+          token_cents=EXCLUDED.token_cents,
+          input_tokens=EXCLUDED.input_tokens,
+          output_tokens=EXCLUDED.output_tokens,
+          cache_read_tokens=EXCLUDED.cache_read_tokens,
+          cache_write_tokens=EXCLUDED.cache_write_tokens,
+          total_tokens=EXCLUDED.total_tokens,
+          cost_label=EXCLUDED.cost_label,
+          synced_at=EXCLUDED.synced_at`,
+        [
+          memberId,
+          e.eventId,
+          e.tsMs,
+          e.model,
+          e.kind,
+          e.kindLabel,
+          e.isTokenBased,
+          e.chargedCents,
+          e.tokenCents,
+          e.inputTokens,
+          e.outputTokens,
+          e.cacheReadTokens,
+          e.cacheWriteTokens,
+          e.totalTokens,
+          e.costLabel,
+          e.syncedAt,
+        ],
+      );
+      upserted += 1;
+    }
+    const cutoff = Date.now() - USAGE_EVENTS_RETENTION_DAYS * 86400000;
+    await client.query('DELETE FROM usage_events WHERE member_id = $1 AND ts_ms < $2', [
+      memberId,
+      cutoff,
+    ]);
+    await client.query(
+      'UPDATE members SET events_synced_at=$1, updated_at=$1 WHERE id=$2',
+      [syncedAt, memberId],
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return { upserted };
+}
+
+/**
+ * @param {string} memberId
+ * @returns {Promise<number | null>}
+ */
+export async function getUsageEventsWatermark(memberId) {
+  const { rows } = await db().query(
+    'SELECT MAX(ts_ms) AS m FROM usage_events WHERE member_id = $1',
+    [memberId],
+  );
+  const m = rows[0]?.m;
+  return m != null && Number.isFinite(Number(m)) && Number(m) > 0 ? Number(m) : null;
+}
+
+/**
+ * @param {string} memberId
+ * @returns {Promise<{ count: number, syncedAt: string | null }>}
+ */
+export async function getUsageEventsMeta(memberId) {
+  const { rows: countRows } = await db().query(
+    'SELECT COUNT(*)::int AS c FROM usage_events WHERE member_id = $1',
+    [memberId],
+  );
+  const { rows: memberRows } = await db().query(
+    'SELECT events_synced_at FROM members WHERE id = $1',
+    [memberId],
+  );
+  const synced = memberRows[0]?.events_synced_at;
+  return {
+    count: Number(countRows[0]?.c) || 0,
+    syncedAt: synced ? new Date(synced).toISOString() : null,
+  };
+}
+
+/**
+ * @param {string} memberId
+ * @param {{ days?: number, model?: string, page?: number, pageSize?: number, nowMs?: number }} [opts]
+ */
+export async function listUsageEvents(memberId, opts = {}) {
+  const days = Math.min(90, Math.max(1, Number(opts.days) || 7));
+  const page = Math.max(1, Number(opts.page) || 1);
+  const pageSize = Math.min(100, Math.max(10, Number(opts.pageSize) || 50));
+  const nowMs = Number(opts.nowMs) || Date.now();
+  const since = nowMs - days * 86400000;
+  const model = String(opts.model || '').trim();
+
+  /** @type {unknown[]} */
+  const whereParams = [memberId, since];
+  let where = 'member_id = $1 AND ts_ms >= $2';
+  if (model) {
+    whereParams.push(model);
+    where += ` AND model = $${whereParams.length}`;
+  }
+
+  const { rows: totalRows } = await db().query(
+    `SELECT COUNT(*)::int AS c FROM usage_events WHERE ${where}`,
+    whereParams,
+  );
+  const total = Number(totalRows[0]?.c) || 0;
+  const offset = (page - 1) * pageSize;
+  const { rows } = await db().query(
+    `SELECT * FROM usage_events WHERE ${where} ORDER BY ts_ms DESC LIMIT $${whereParams.length + 1} OFFSET $${whereParams.length + 2}`,
+    [...whereParams, pageSize, offset],
+  );
+  const { rows: modelRows } = await db().query(
+    `SELECT DISTINCT model FROM usage_events
+     WHERE member_id = $1 AND ts_ms >= $2 AND model IS NOT NULL AND model <> ''
+     ORDER BY model ASC`,
+    [memberId, since],
+  );
+  const meta = await getUsageEventsMeta(memberId);
+  return {
+    days,
+    page,
+    pageSize,
+    total,
+    hasNext: offset + rows.length < total,
+    events: rows.map(usageEventFromStoreRow),
+    models: modelRows.map((r) => String(r.model)),
+    syncedAt: meta.syncedAt,
+  };
 }
 
 /** @param {string} id */
@@ -417,6 +612,7 @@ export async function saveSyncResult(id, result) {
   if (!member) return;
   const now = new Date().toISOString();
   if (result.snapshot) {
+    if (result.snapshot._usageEvents) delete result.snapshot._usageEvents;
     const syncedAt = result.snapshot.syncedAt || now;
     const pulled = pulledColumnsFromSnapshot(result.snapshot);
     // 同步时覆写「今天」累计%，凌晨归档再盖写昨天收盘值。
