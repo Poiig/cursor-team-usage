@@ -757,6 +757,14 @@ test('usage events 增量窗口与过期判断', () => {
   assert.equal(row.tokenCents, 42);
 });
 
+test('usageEventsRangeStartMs 按本地自然日含今天', async () => {
+  const { usageEventsRangeStartMs, localDayStartMs } = await import('../src/usage-events.js');
+  const now = Date.parse('2026-10-14T12:12:00+08:00');
+  const todayStart = localDayStartMs(now);
+  assert.equal(usageEventsRangeStartMs(1, now), todayStart);
+  assert.equal(usageEventsRangeStartMs(7, now), todayStart - 6 * 86400000);
+});
+
 test('sqlite usage_events upsert 去重、model 筛选与分页', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
@@ -840,6 +848,19 @@ test('sqlite usage_events upsert 去重、model 筛选与分页', async () => {
     assert.equal(paged.total, 13);
     assert.equal(paged.events.length, 10);
     assert.equal(paged.hasNext, true);
+
+    // days=1：仅今天（本地 0 点起）；今日内事件计入，40 天前的 d 不计。
+    const { localDayStartMs } = await import('../src/usage-events.js');
+    const dayStart = localDayStartMs(now);
+    const todayOnly = await store.listUsageEvents(memberId, {
+      days: 1,
+      page: 1,
+      pageSize: 50,
+      nowMs: now,
+    });
+    assert.ok(todayOnly.total >= 1);
+    assert.ok(todayOnly.events.every((e) => e.timestamp >= dayStart));
+    assert.ok(!todayOnly.events.some((e) => e.id === 'd'));
 
     await store.close();
   } finally {

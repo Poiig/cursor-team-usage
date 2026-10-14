@@ -19,6 +19,28 @@ export function eventTsMs(timestamp) {
 }
 
 /**
+ * 本地日历日 0 点（毫秒）。
+ * @param {number} [nowMs]
+ */
+export function localDayStartMs(nowMs = Date.now()) {
+  const d = new Date(nowMs);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/**
+ * 列表筛选起点：按本地日历日，含今天。
+ * days=1 → 今天 0 点；days=7 → 含今天共 7 个自然日（从 6 天前 0 点起）。
+ * @param {number} days
+ * @param {number} [nowMs]
+ */
+export function usageEventsRangeStartMs(days, nowMs = Date.now()) {
+  const n = Math.min(90, Math.max(1, Number(days) || 7));
+  const todayStart = localDayStartMs(nowMs);
+  return todayStart - (n - 1) * 86400000;
+}
+
+/**
  * 增量拉取窗口：无库数据拉近 90 天；有则从 watermark 回拨 overlap。
  * @param {number | null | undefined} watermarkMs
  * @param {number} [nowMs]

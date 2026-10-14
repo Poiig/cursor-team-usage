@@ -285,7 +285,8 @@ function updateEventsMeta() {
   const syncNote = eventsSyncedAt
     ? ` · 同步 ${formatDateTimeDot(eventsSyncedAt) || eventsSyncedAt}`
     : '';
-  els.eventsHint.textContent = `本地缓存 · 近 ${days} 天${modelNote} · 已显示 ${eventsCache.length} / ${eventsTotal} 条${syncNote}`;
+  const rangeLabel = days === 1 ? '今天' : `近 ${days} 天`;
+  els.eventsHint.textContent = `本地缓存 · ${rangeLabel}${modelNote} · 已显示 ${eventsCache.length} / ${eventsTotal} 条${syncNote}`;
   if (els.btnLoadMore) els.btnLoadMore.disabled = !hasNextPage || eventsLoading;
 }
 

@@ -18,6 +18,7 @@ import {
   USAGE_EVENTS_RETENTION_DAYS,
   normalizeUsageEventForStore,
   usageEventFromStoreRow,
+  usageEventsRangeStartMs,
 } from './usage-events.js';
 
 const require = createRequire(import.meta.url);
@@ -729,7 +730,8 @@ export async function listUsageEvents(memberId, opts = {}) {
   const page = Math.max(1, Number(opts.page) || 1);
   const pageSize = Math.min(100, Math.max(10, Number(opts.pageSize) || 50));
   const nowMs = Number(opts.nowMs) || Date.now();
-  const since = nowMs - days * 86400000;
+  // 按本地自然日（含今天），避免「近 7 天」漏掉当日或与日历错位。
+  const since = usageEventsRangeStartMs(days, nowMs);
   const model = String(opts.model || '').trim();
 
   /** @type {unknown[]} */
