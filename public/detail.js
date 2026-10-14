@@ -16,8 +16,10 @@ import {
   formatDateTimeDot,
   formatDeltaVsYesterday,
   formatSpendPart,
+  formatTokens,
   formatTokensWan,
   loadSettings,
+  money,
   resolveSpendRow,
   setBusy,
 } from './shared.js';
@@ -36,6 +38,7 @@ const els = {
   chartSpend: document.getElementById('chartSpend'),
   chartTokens: document.getElementById('chartTokens'),
   chartUsagePercent: document.getElementById('chartUsagePercent'),
+  chartTodayModels: document.getElementById('chartTodayModels'),
   chartModels: document.getElementById('chartModels'),
   eventsDays: document.getElementById('eventsDays'),
   eventsHint: document.getElementById('eventsHint'),
@@ -121,7 +124,14 @@ function splitLines(lines) {
   return { progress, spend };
 }
 
-function renderBarChart(el, points, color) {
+/**
+ * 柱状图：Y 轴刻度 + 悬停 tooltip，否则只有相对柱高读不出具体数。
+ * @param {HTMLElement | null} el
+ * @param {Array<{ label: string, value: number }>} points
+ * @param {string} color
+ * @param {(v: number) => string} [formatValue]
+ */
+function renderBarChart(el, points, color, formatValue = (v) => String(v)) {
   if (!el) return;
   if (!points.length) {
     el.innerHTML = `<div class="chart-empty">No data</div>`;
@@ -129,29 +139,75 @@ function renderBarChart(el, points, color) {
   }
   const w = 640;
   const h = 180;
-  const pad = 28;
+  const padL = 52;
+  const padR = 16;
+  const padT = 16;
+  const padB = 28;
   const max = Math.max(...points.map((p) => p.value), 1);
-  const bw = (w - pad * 2) / points.length;
+  const plotH = h - padT - padB;
+  const plotW = w - padL - padR;
+  const bw = plotW / points.length;
+  const fmt = (v) => formatValue(Number(v) || 0);
+  const yTicks = [0, 0.5, 1].map((t) => {
+    const val = max * t;
+    const y = padT + plotH * (1 - t);
+    return `
+      <line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="currentColor" opacity="0.08" />
+      <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(fmt(val))}</text>
+    `;
+  }).join('');
   const bars = points
     .map((p, i) => {
-      const bh = Math.max(1, ((p.value || 0) / max) * (h - pad * 2));
-      const x = pad + i * bw + bw * 0.15;
-      const y = h - pad - bh;
-      return `<rect x="${x}" y="${y}" width="${bw * 0.7}" height="${bh}" fill="${color}" rx="2"></rect>`;
+      const value = Number(p.value) || 0;
+      const bh = Math.max(1, (value / max) * plotH);
+      const x = padL + i * bw + bw * 0.15;
+      const y = padT + plotH - bh;
+      const tip = `${p.label} · ${fmt(value)}`;
+      return `<rect class="chart-bar" x="${x}" y="${y}" width="${bw * 0.7}" height="${bh}" fill="${color}" rx="2" data-tip="${escapeHtml(tip)}"></rect>`;
     })
     .join('');
   const labels = points
     .map((p, i) => {
       if (points.length > 16 && i % 5 !== 0 && i !== points.length - 1) return '';
-      const x = pad + i * bw + bw / 2;
+      const x = padL + i * bw + bw / 2;
       const label = String(p.label || '').slice(5);
       return `<text x="${x}" y="${h - 8}" text-anchor="middle" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(label)}</text>`;
     })
     .join('');
-  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${bars}${labels}</svg>`;
+  el.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" role="img">${yTicks}${bars}${labels}</svg>
+    <div class="chart-tooltip" hidden></div>
+  `;
+  const tipEl = el.querySelector('.chart-tooltip');
+  /** 相对 chart-box 定位，避免 SVG rect 的 offset 坐标系不一致。 */
+  const placeTip = (ev) => {
+    if (!tipEl) return;
+    const box = el.getBoundingClientRect();
+    tipEl.style.left = `${ev.clientX - box.left + 12}px`;
+    tipEl.style.top = `${ev.clientY - box.top - 8}px`;
+  };
+  el.querySelectorAll('.chart-bar').forEach((bar) => {
+    bar.addEventListener('pointerenter', (ev) => {
+      if (!tipEl) return;
+      tipEl.hidden = false;
+      tipEl.textContent = bar.getAttribute('data-tip') || '';
+      placeTip(ev);
+    });
+    bar.addEventListener('pointermove', placeTip);
+    bar.addEventListener('pointerleave', () => {
+      if (tipEl) tipEl.hidden = true;
+    });
+  });
 }
 
-function renderHorizontalBars(el, items, color) {
+/**
+ * 横向条：右侧数值可格式化（当日模型用 tokens 万/亿，周期 Top 用次数）。
+ * @param {HTMLElement | null} el
+ * @param {Array<{ label: string, value: number }>} items
+ * @param {string} color
+ * @param {(v: number) => string} [formatValue]
+ */
+function renderHorizontalBars(el, items, color, formatValue = (v) => String(v)) {
   if (!el) return;
   if (!items.length) {
     el.innerHTML = `<div class="chart-empty">No data</div>`;
@@ -166,7 +222,7 @@ function renderHorizontalBars(el, items, color) {
         <div>
           <div class="panel-line-head">
             <span class="panel-line-label">${escapeHtml(item.label)}</span>
-            <span class="panel-line-value">${item.value}</span>
+            <span class="panel-line-value">${escapeHtml(formatValue(item.value))}</span>
           </div>
           <div class="panel-track"><div class="panel-fill" style="width:${(item.value / max) * 100}%;background:${color}"></div></div>
         </div>`,
@@ -310,14 +366,28 @@ function renderMember() {
     els.chartSpend,
     daily.map((d) => ({ label: d.date, value: d.dollars || 0 })),
     '#2dd4bf',
+    (v) => money(v),
   );
   renderBarChart(
     els.chartTokens,
     daily.map((d) => ({ label: d.date, value: d.tokens || 0 })),
     '#4daafc',
+    (v) => (v <= 0 ? '0' : formatTokens(v)),
   );
   // 日用量% = 相邻两日周期累计%之差；需至少两天归档才有柱。
-  renderBarChart(els.chartUsagePercent, dailyPercentDeltaPoints(history, 'total'), '#f59e0b');
+  renderBarChart(
+    els.chartUsagePercent,
+    dailyPercentDeltaPoints(history, 'total'),
+    '#f59e0b',
+    (v) => `${Number(v).toFixed(1)}%`,
+  );
+  const todayModels = (snap?.spend?.todayModels || []).slice(0, 8);
+  renderHorizontalBars(
+    els.chartTodayModels,
+    todayModels.map((m) => ({ label: m.model, value: m.tokens || 0 })),
+    '#2dd4bf',
+    (v) => (v <= 0 ? '0' : formatTokens(v)),
+  );
   const models = (snap?.usage?.topModels || []).slice(0, 8);
   renderHorizontalBars(
     els.chartModels,

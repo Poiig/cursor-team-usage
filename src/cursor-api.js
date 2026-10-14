@@ -612,9 +612,37 @@ function localDayBounds(nowMs = Date.now()) {
 }
 
 /**
+ * 指定本地日按模型汇总 tokens（与日花费同一口径，含 cache write）。
+ * @param {Array<{ timestamp?: unknown, model?: string, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
+ * @param {string} dayKey yyyy-MM-dd
+ * @param {number} [limit]
+ * @returns {Array<{ model: string, tokens: number }>}
+ */
+export function topModelsByTokens(events, dayKey, limit = 8) {
+  /** @type {Record<string, number>} */
+  const byModel = {};
+  for (const e of events) {
+    const ts = eventTimestampMs(e.timestamp);
+    if (!ts || localDayKey(ts) !== dayKey) continue;
+    const tokens =
+      (e.inputTokens || 0) +
+      (e.outputTokens || 0) +
+      (e.cacheReadTokens || 0) +
+      (e.cacheWriteTokens || 0);
+    if (tokens <= 0) continue;
+    const model = String(e.model || 'unknown');
+    byModel[model] = (byModel[model] || 0) + tokens;
+  }
+  return Object.entries(byModel)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([model, tokens]) => ({ model, tokens }));
+}
+
+/**
  * 按本地日汇总花费与 token，供 Today / Yesterday / Last 30 Days。
  * 有实际计费用 charged；Included/$0 时回退 token 估值，避免 Included 请求显示为 $0。
- * @param {Array<{ timestamp?: unknown, chargedCents: number | null, tokenCents: number | null, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
+ * @param {Array<{ timestamp?: unknown, model?: string, chargedCents: number | null, tokenCents: number | null, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
  * @param {number} [nowMs]
  */
 export function aggregateSpendPeriods(events, nowMs = Date.now()) {
@@ -689,6 +717,8 @@ export function aggregateSpendPeriods(events, nowMs = Date.now()) {
           }
         : null,
     daily,
+    // 当日按模型 tokens，详情页「当日模型统计」用。
+    todayModels: topModelsByTokens(events, todayKey),
   };
 }
 

@@ -21,6 +21,7 @@ import {
   mergePlanMeters,
   buildOpenUsagePanelLines,
   aggregateSpendPeriods,
+  topModelsByTokens,
   usageKindLabel,
   usageCostLabel,
   eventTotalTokens,
@@ -214,6 +215,50 @@ test('buildOpenUsagePanelLines 含百分比与花费块', () => {
   );
   assert.equal(spend.today?.dollars, 1.5);
   assert.equal(spend.daily?.length, 30);
+  assert.ok(Array.isArray(spend.todayModels));
+
+  const todayKey = '2026-09-15';
+  const byTokens = topModelsByTokens(
+    [
+      {
+        timestamp: now,
+        model: 'grok-bot-default',
+        inputTokens: 5000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+      {
+        timestamp: now,
+        model: 'default',
+        inputTokens: 1000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+      {
+        timestamp: now,
+        model: 'grok-bot-default',
+        inputTokens: 2000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+      {
+        timestamp: now - 86400000,
+        model: 'ignored-yesterday',
+        inputTokens: 99999,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    ],
+    todayKey,
+  );
+  assert.equal(byTokens[0].model, 'grok-bot-default');
+  assert.equal(byTokens[0].tokens, 7000);
+  assert.equal(byTokens[1].model, 'default');
+  assert.equal(byTokens[1].tokens, 1000);
 
   const lines = buildOpenUsagePanelLines({
     planMeters: {
