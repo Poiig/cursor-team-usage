@@ -746,10 +746,15 @@ test('usage events 增量窗口与过期判断', () => {
     cacheReadTokens: 0,
     totalTokens: 12,
     costLabel: 'Included',
+    // 官方偶发小数 cents，落库须取整以免 PG INTEGER 报错。
+    chargedCents: 209.52439880371094,
+    tokenCents: '41.77399826049805',
   });
   assert.equal(row.eventId, 'e1');
   assert.equal(row.tsMs, now);
   assert.equal(row.totalTokens, 12);
+  assert.equal(row.chargedCents, 210);
+  assert.equal(row.tokenCents, 42);
 });
 
 test('sqlite usage_events upsert 去重、model 筛选与分页', async () => {

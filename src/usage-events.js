@@ -50,6 +50,27 @@ export function usageEventsNeedSync(meta, nowMs = Date.now()) {
 }
 
 /**
+ * 官方偶发返回小数 cents（如 209.52），PG INTEGER 会拒收；落库前取整。
+ * @param {unknown} v
+ * @returns {number | null}
+ */
+function intOrNull(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n);
+}
+
+/**
+ * @param {unknown} v
+ * @returns {number}
+ */
+function intOrZero(v) {
+  const n = intOrNull(v);
+  return n == null ? 0 : Math.max(0, n);
+}
+
+/**
  * API/快照事件 → 落库行形状（字段齐全、便于 upsert）。
  * @param {any} e
  * @param {string} [syncedAt]
@@ -57,6 +78,8 @@ export function usageEventsNeedSync(meta, nowMs = Date.now()) {
 export function normalizeUsageEventForStore(e, syncedAt = new Date().toISOString()) {
   const ts = eventTsMs(e?.timestamp ?? e?.ts_ms ?? e?.tsMs);
   const id = String(e?.id ?? e?.event_id ?? e?.eventId ?? `${ts}-${e?.model ?? 'unknown'}`);
+  const chargedRaw = e?.chargedCents ?? e?.charged_cents;
+  const tokenRaw = e?.tokenCents ?? e?.token_cents;
   return {
     eventId: id,
     tsMs: ts,
@@ -64,13 +87,13 @@ export function normalizeUsageEventForStore(e, syncedAt = new Date().toISOString
     kind: String(e?.kind || ''),
     kindLabel: String(e?.kindLabel || e?.kind_label || ''),
     isTokenBased: Boolean(e?.isTokenBasedCall ?? e?.is_token_based),
-    chargedCents: e?.chargedCents != null ? Number(e.chargedCents) : e?.charged_cents != null ? Number(e.charged_cents) : null,
-    tokenCents: e?.tokenCents != null ? Number(e.tokenCents) : e?.token_cents != null ? Number(e.token_cents) : null,
-    inputTokens: Number(e?.inputTokens ?? e?.input_tokens) || 0,
-    outputTokens: Number(e?.outputTokens ?? e?.output_tokens) || 0,
-    cacheReadTokens: Number(e?.cacheReadTokens ?? e?.cache_read_tokens) || 0,
-    cacheWriteTokens: Number(e?.cacheWriteTokens ?? e?.cache_write_tokens) || 0,
-    totalTokens: Number(e?.totalTokens ?? e?.total_tokens) || 0,
+    chargedCents: intOrNull(chargedRaw),
+    tokenCents: intOrNull(tokenRaw),
+    inputTokens: intOrZero(e?.inputTokens ?? e?.input_tokens),
+    outputTokens: intOrZero(e?.outputTokens ?? e?.output_tokens),
+    cacheReadTokens: intOrZero(e?.cacheReadTokens ?? e?.cache_read_tokens),
+    cacheWriteTokens: intOrZero(e?.cacheWriteTokens ?? e?.cache_write_tokens),
+    totalTokens: intOrZero(e?.totalTokens ?? e?.total_tokens),
     costLabel: String(e?.costLabel ?? e?.cost_label ?? ''),
     syncedAt,
   };
