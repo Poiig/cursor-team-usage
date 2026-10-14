@@ -329,6 +329,49 @@ export function formatDateTimeDot(iso) {
   return `${y}-${m}-${day} ${hh}.${mm}`;
 }
 
+/**
+ * 套餐文案 → badge 修饰类，按档位配色一眼区分 free / pro / pro+。
+ * @param {string | null | undefined} plan
+ * @returns {'plan-free' | 'plan-pro' | 'plan-pro-plus' | 'plan-ultra' | 'plan-business' | 'plan-unknown'}
+ */
+export function planBadgeClass(plan) {
+  const s = String(plan || '')
+    .trim()
+    .toLowerCase();
+  if (!s || s === 'unknown') return 'plan-unknown';
+  if (s.includes('ultra')) return 'plan-ultra';
+  if (
+    s.includes('pro+') ||
+    s.includes('pro plus') ||
+    s.includes('pro_plus') ||
+    s.includes('proplus')
+  ) {
+    return 'plan-pro-plus';
+  }
+  if (s.includes('business') || s.includes('team') || s.includes('enterprise')) {
+    return 'plan-business';
+  }
+  if (s === 'pro' || /\bpro\b/.test(s)) return 'plan-pro';
+  if (s.includes('free') || s.includes('hobby')) return 'plan-free';
+  return 'plan-unknown';
+}
+
+/**
+ * 套餐展示名：把 API 里的 pro_plus 等归一成可读文案，已是 Pro+ 则原样保留。
+ * @param {string | null | undefined} plan
+ */
+export function formatPlanLabel(plan) {
+  const raw = String(plan || '').trim();
+  if (!raw || raw.toLowerCase() === 'unknown') return 'unknown';
+  const s = raw.toLowerCase();
+  if (s === 'pro_plus' || s === 'proplus' || s === 'pro plus') return 'Pro+';
+  if (s === 'pro') return 'Pro';
+  if (s === 'free' || s === 'hobby') return 'Free';
+  if (s === 'ultra') return 'Ultra';
+  if (s === 'business' || s === 'team') return raw.charAt(0).toUpperCase() + raw.slice(1);
+  return raw;
+}
+
 export function accountIdentity(member, privacyMode) {
   const emailRaw = member.email || '';
   const email = privacyMode && emailRaw ? maskEmail(emailRaw) : emailRaw;

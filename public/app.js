@@ -14,10 +14,12 @@ import {
   fieldForProgressLabel,
   formatDateTimeDot,
   formatDeltaVsYesterday,
+  formatPlanLabel,
   formatSpendPart,
   formatTokens,
   loadSettings,
   money,
+  planBadgeClass,
   resolveSpendRow,
   saveSettings,
   setBusy,
@@ -427,7 +429,9 @@ function splitLines(lines, { includeGrok = true } = {}) {
 
 function renderAccountRow(member) {
   const snap = member.lastSnapshot;
-  const plan = snap?.plan?.planName || snap?.plan?.membershipType || 'unknown';
+  const planRaw = snap?.plan?.planName || snap?.plan?.membershipType || 'unknown';
+  const plan = formatPlanLabel(planRaw);
+  const planClass = planBadgeClass(planRaw);
   const statusBadge = statusBadgeHtml(member);
 
   const idn = accountIdentity(member, settings.privacyMode);
@@ -461,7 +465,7 @@ function renderAccountRow(member) {
             ${idn.subtitle ? `<span class="account-sub">${escapeHtml(idn.subtitle)}</span>` : ''}
           </div>
           <div class="badges">
-            <span class="badge plan">${escapeHtml(plan)}</span>
+            <span class="badge plan ${planClass}">${escapeHtml(plan)}</span>
             ${isCurrent ? '<span class="badge ok">当前 Cursor</span>' : ''}
             ${isRecommended ? '<span class="badge warn">推荐</span>' : ''}
             ${statusBadge}

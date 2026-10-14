@@ -15,11 +15,13 @@ import {
   fieldForProgressLabel,
   formatDateTimeDot,
   formatDeltaVsYesterday,
+  formatPlanLabel,
   formatSpendPart,
   formatTokens,
   formatTokensWan,
   loadSettings,
   money,
+  planBadgeClass,
   resolveSpendRow,
   setBusy,
 } from './shared.js';
@@ -324,10 +326,12 @@ function renderMember() {
   const idn = accountIdentity(member, settings.privacyMode);
   const snap = member.lastSnapshot;
   els.title.textContent = idn.title;
-  els.sub.textContent = [snap?.plan?.planName || snap?.plan?.membershipType || '', idn.subtitle]
-    .filter(Boolean)
-    .join(' · ');
-  if (els.meta) els.meta.innerHTML = renderDetailMeta(member);
+  els.sub.textContent = idn.subtitle || '';
+  const planRaw = snap?.plan?.planName || snap?.plan?.membershipType || '';
+  const planBadge = planRaw
+    ? `<span class="badge plan ${planBadgeClass(planRaw)}">${escapeHtml(formatPlanLabel(planRaw))}</span>`
+    : '';
+  if (els.meta) els.meta.innerHTML = planBadge + renderDetailMeta(member);
 
   const pace = computeUsagePace(member);
   if (els.pace) {
