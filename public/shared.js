@@ -42,6 +42,17 @@ export async function api(path, options = {}) {
   return data;
 }
 
+/**
+ * 切换日志 / 报表：用户名后附别名，如 chenyao（陈瑶）。
+ * @param {unknown} username
+ * @param {unknown} alias
+ */
+export function formatOperatorLabel(username, alias) {
+  const name = String(username || '').trim() || '—';
+  const a = String(alias || '').trim();
+  return a ? `${name}（${a}）` : name;
+}
+
 export function escapeHtml(s) {
   return String(s)
     .replaceAll('&', '&amp;')

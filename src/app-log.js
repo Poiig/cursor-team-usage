@@ -1,11 +1,14 @@
 /**
- * 应用操作日志：落盘到 data/log，按日分文件，支持保留天数与过期清理。
+ * 应用操作日志：主存落库；本地按日 .log 仍追加一份便于人工 tail。
+ * 过期清理按保留天数删库行，并顺带删旧文件。
  */
 
 import { appendFile, mkdir, readdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLogRetentionDays } from './config.js';
+import { insertAppLog, pruneAppLogsBefore } from './store.js';
+import { buildAppLogRow } from './store-side-data.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.join(__dirname, '..');
@@ -87,7 +90,7 @@ async function appendLine(line) {
 }
 
 /**
- * 写一条结构化操作日志。
+ * 写一条结构化操作日志（库 + 本地文件）。
  * @param {string} action 如 启动 / 注册 / 刷新 / 自动刷新
  * @param {Record<string, unknown>} [fields]
  */
@@ -95,9 +98,14 @@ export async function writeAppLog(action, fields = {}) {
   if (process.env.npm_lifecycle_event === 'test') return;
   const line = `[${formatTimestamp()}] [${action}]${formatFields(fields)}`;
   try {
+    await insertAppLog(buildAppLogRow(action, fields, line));
+  } catch (e) {
+    console.error('写入应用日志(库)失败:', e?.message || e);
+  }
+  try {
     await appendLine(line);
   } catch (e) {
-    console.error('写入应用日志失败:', e?.message || e);
+    console.error('写入应用日志(文件)失败:', e?.message || e);
   }
 }
 
@@ -139,12 +147,30 @@ export async function pruneOldLogFiles(retentionDays, now = new Date(), logDir =
 }
 
 /**
- * 启动时创建 log 目录并清理过期文件。
+ * 按保留天数清理库内应用日志。
+ * @param {number} retentionDays
+ * @param {Date} [now]
+ */
+export async function pruneOldAppLogs(retentionDays, now = new Date()) {
+  if (retentionDays <= 0) return;
+  const cutoff = new Date(now);
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - retentionDays);
+  await pruneAppLogsBefore(cutoff.toISOString());
+}
+
+/**
+ * 启动时创建 log 目录并清理过期文件与库行。
  */
 export async function initAppLog() {
   if (process.env.npm_lifecycle_event === 'test') return;
   await mkdir(LOG_DIR, { recursive: true });
   const days = getLogRetentionDays();
+  try {
+    await pruneOldAppLogs(days);
+  } catch (e) {
+    console.error('清理应用日志(库)失败:', e?.message || e);
+  }
   const removed = await pruneOldLogFiles(days);
   if (removed > 0) {
     console.log(`应用日志：已清理 ${removed} 个过期文件（保留 ${days} 天）`);

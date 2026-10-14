@@ -1,36 +1,13 @@
-/** 注册申请回执。拒绝会删掉用户，所以状态单独落在 data/applications.json。 */
+/** 注册申请回执。拒绝会删掉用户，所以状态单独落存储驱动。 */
 
-import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import {
+  getApplicationByToken,
+  listStoredApplications,
+  pruneApplications,
+  upsertApplication,
+} from './store.js';
+import { APPLICATIONS_MAX, newApplicationToken } from './store-side-data.js';
 import { getPublicUser } from './users.js';
-
-const FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'applications.json');
-const MAX_ROWS = 500;
-
-/** @type {any[]|null} */
-let cache = null;
-let writeChain = Promise.resolve();
-
-async function load() {
-  if (cache) return cache;
-  try {
-    const parsed = JSON.parse(await readFile(FILE, 'utf8'));
-    cache = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    cache = [];
-  }
-  return cache;
-}
-
-async function persist() {
-  writeChain = writeChain.catch(() => {}).then(async () => {
-    await mkdir(path.dirname(FILE), { recursive: true });
-    await writeFile(FILE, JSON.stringify(cache || [], null, 2) + '\n', 'utf8');
-  });
-  return writeChain;
-}
 
 /**
  * 用当前用户纠正回执状态。用户被拒绝后已删除，只能靠回执本身。
@@ -59,18 +36,16 @@ export function applicationMessage(status, username) {
 
 /** @param {string} username */
 export async function createApplication(username) {
-  const rows = await load();
   const now = new Date().toISOString();
   const row = {
-    token: randomBytes(24).toString('base64url'),
+    token: newApplicationToken(),
     username,
     status: 'pending',
     createdAt: now,
     updatedAt: now,
   };
-  rows.unshift(row);
-  if (rows.length > MAX_ROWS) rows.length = MAX_ROWS;
-  await persist();
+  await upsertApplication(row);
+  await pruneApplications(APPLICATIONS_MAX);
   return { token: row.token, username, status: 'pending' };
 }
 
@@ -80,16 +55,15 @@ export async function createApplication(username) {
  * @param {'approved'|'rejected'|'removed'} status
  */
 export async function markApplication(username, status) {
-  const rows = await load();
+  const rows = await listStoredApplications();
   const now = new Date().toISOString();
   for (const row of rows) {
     if (row.username !== username) continue;
     if ((status === 'approved' || status === 'rejected') && row.status !== 'pending') continue;
     if (status === 'removed' && row.status !== 'approved' && row.status !== 'pending') continue;
-    row.status = status;
-    row.updatedAt = now;
-    await persist();
-    return row;
+    const next = { ...row, status, updatedAt: now };
+    await upsertApplication(next);
+    return next;
   }
   return null;
 }
@@ -98,15 +72,13 @@ export async function markApplication(username, status) {
 export async function lookupApplication(token) {
   const key = String(token || '').trim();
   if (!key) return null;
-  const rows = await load();
-  const row = rows.find((item) => item.token === key);
+  const row = await getApplicationByToken(key);
   if (!row) return null;
   const user = await getPublicUser(row.username);
   const status = reconcileStatus(row.status, user);
   if (status !== row.status) {
-    row.status = status;
-    row.updatedAt = new Date().toISOString();
-    await persist();
+    const next = { ...row, status, updatedAt: new Date().toISOString() };
+    await upsertApplication(next);
   }
   return {
     username: row.username,

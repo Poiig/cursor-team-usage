@@ -7,6 +7,10 @@ import pg from 'pg';
 import { maskToken, sessionFromCookie, tokenExpiresAtIso } from './auth.js';
 import { getDatabaseUrl } from './config.js';
 import {
+  isManualMemberSource,
+  MEMBER_SOURCE_MANUAL,
+  MEMBER_SOURCE_REPORT,
+  normalizeMemberSource,
   pulledColumnsFromSnapshot,
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
@@ -17,8 +21,12 @@ import {
   usageEventFromStoreRow,
   usageEventsRangeStartMs,
 } from './usage-events.js';
+import { createSideDataApi } from './store-side-data.js';
 
 const { Pool } = pg;
+
+/** @type {ReturnType<typeof createSideDataApi> | null} */
+let side = null;
 
 /** @type {import('pg').Pool | null} */
 let pool = null;
@@ -31,6 +39,7 @@ let pool = null;
  *   userId: string,
  *   email?: string,
  *   hostname?: string | null,
+ *   source?: 'manual' | 'report',
  *   tokenExpiresAt?: string | null,
  *   planName?: string | null,
  *   membershipType?: string | null,
@@ -76,6 +85,7 @@ function rowToMember(row) {
     userId: row.user_id,
     email: row.email ?? undefined,
     hostname: row.hostname ?? null,
+    source: normalizeMemberSource(row.source),
     tokenExpiresAt: row.token_expires_at
       ? new Date(row.token_expires_at).toISOString()
       : tokenExpiresAtIso(row.cookie_value),
@@ -106,6 +116,7 @@ export function toPublicMember(m) {
     userId: m.userId,
     email: m.email ?? m.lastSnapshot?.email,
     hostname: m.hostname ?? null,
+    source: normalizeMemberSource(m.source),
     tokenHint: maskToken(m.cookieValue),
     tokenExpiresAt: m.tokenExpiresAt ?? tokenExpiresAtIso(m.cookieValue),
     planName: m.planName ?? m.lastSnapshot?.plan?.planName ?? null,
@@ -171,7 +182,8 @@ export async function init() {
       ADD COLUMN IF NOT EXISTS spend_last30 DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS hard_limit DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS usage_percent_history JSONB,
-      ADD COLUMN IF NOT EXISTS events_synced_at TIMESTAMPTZ
+      ADD COLUMN IF NOT EXISTS events_synced_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'report'
   `);
   await db().query(`
     CREATE TABLE IF NOT EXISTS usage_events (
@@ -254,7 +266,163 @@ export async function init() {
       ADD COLUMN IF NOT EXISTS client_ip TEXT,
       ADD COLUMN IF NOT EXISTS usage_total_percent DOUBLE PRECISION
   `);
+  await db().query(`
+    CREATE TABLE IF NOT EXISTS account_presence (
+      hostname_key TEXT PRIMARY KEY,
+      hostname TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      member_display_name TEXT,
+      username TEXT,
+      label TEXT NOT NULL,
+      last_seen_at TIMESTAMPTZ NOT NULL
+    )
+  `);
   await migrateConsoleAdminToUsers();
+  side = createSideDataApi({
+    kind: 'pg',
+    query: (sql, params) => db().query(sql, params),
+  });
+  await side.initSide();
+}
+
+function sideApi() {
+  if (!side) throw new Error('侧数据未初始化');
+  return side;
+}
+
+export async function loadPluginClientsMap() {
+  return sideApi().loadPluginClientsMap();
+}
+/** @param {string} username @param {any} row */
+export async function savePluginClient(username, row) {
+  return sideApi().savePluginClient(username, row);
+}
+/** @param {string} username */
+export async function deletePluginClient(username) {
+  return sideApi().deletePluginClient(username);
+}
+/** @param {any} row */
+export async function insertLoginEvent(row) {
+  return sideApi().insertLoginEvent(row);
+}
+/** @param {number} limit */
+export async function listLoginEvents(limit) {
+  return sideApi().listLoginEvents(limit);
+}
+/** @param {any} row */
+export async function insertReportEvent(row) {
+  return sideApi().insertReportEvent(row);
+}
+/** @param {number} limit */
+export async function listReportEvents(limit) {
+  return sideApi().listReportEvents(limit);
+}
+export async function listApplications() {
+  return sideApi().listApplications();
+}
+/** @param {any} row */
+export async function upsertApplication(row) {
+  return sideApi().upsertApplication(row);
+}
+/** @param {string} token */
+export async function getApplicationByToken(token) {
+  return sideApi().getApplicationByToken(token);
+}
+/** @param {any} row */
+export async function insertAppLog(row) {
+  return sideApi().insertAppLog(row);
+}
+/** @param {string} sinceIso @param {number} [limit] */
+export async function listAppLogsForHydrate(sinceIso, limit) {
+  return sideApi().listAppLogsForHydrate(sinceIso, limit);
+}
+/** @param {number} [max] */
+export async function pruneLoginEvents(max) {
+  return sideApi().pruneLoginEvents(max);
+}
+/** @param {number} [max] */
+export async function pruneReportEvents(max) {
+  return sideApi().pruneReportEvents(max);
+}
+/** @param {number} [max] */
+export async function pruneApplications(max) {
+  return sideApi().pruneApplications(max);
+}
+/** @param {string} isoCutoff */
+export async function pruneAppLogsBefore(isoCutoff) {
+  return sideApi().pruneAppLogsBefore(isoCutoff);
+}
+/** @param {number} [max] */
+export async function pruneSwitchLogs(max) {
+  return sideApi().pruneSwitchLogs(max);
+}
+/** @param {string} isoCutoff */
+export async function prunePresenceBefore(isoCutoff) {
+  return sideApi().prunePresenceBefore(isoCutoff);
+}
+
+/**
+ * @returns {Promise<Record<string, {
+ *   memberId: string,
+ *   memberDisplayName?: string|null,
+ *   hostname: string,
+ *   username?: string|null,
+ *   label: string,
+ *   lastSeenAt: string,
+ * }>>}
+ */
+export async function loadAccountPresenceMap() {
+  const { rows } = await db().query('SELECT * FROM account_presence');
+  /** @type {Record<string, any>} */
+  const map = {};
+  for (const row of rows) {
+    const key = String(row.hostname_key || '').trim().toLowerCase();
+    if (!key) continue;
+    map[key] = {
+      memberId: String(row.member_id),
+      memberDisplayName: row.member_display_name ?? null,
+      hostname: String(row.hostname || key),
+      username: row.username ?? null,
+      label: String(row.label || row.hostname || key),
+      lastSeenAt: new Date(row.last_seen_at).toISOString(),
+    };
+  }
+  return map;
+}
+
+/**
+ * @param {Record<string, any>} map
+ */
+export async function saveAccountPresenceMap(map) {
+  const client = await db().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM account_presence');
+    for (const [key, row] of Object.entries(map || {})) {
+      const hostnameKey = String(key || '').trim().toLowerCase();
+      if (!hostnameKey || !row?.memberId) continue;
+      await client.query(
+        `INSERT INTO account_presence
+          (hostname_key, hostname, member_id, member_display_name, username, label, last_seen_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          hostnameKey,
+          String(row.hostname || hostnameKey),
+          String(row.memberId),
+          row.memberDisplayName != null ? String(row.memberDisplayName) : null,
+          row.username != null ? String(row.username) : null,
+          String(row.label || row.hostname || hostnameKey),
+          String(row.lastSeenAt || new Date().toISOString()),
+        ],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 /** 把遗留 console_admin 迁入 console_users。 */
@@ -308,15 +476,16 @@ export async function addMember(input) {
   const hostname = input.hostname ? String(input.hostname).trim() : null;
   await db().query(
     `INSERT INTO members
-      (id, display_name, cookie_value, user_id, hostname, token_expires_at,
+      (id, display_name, cookie_value, user_id, hostname, source, token_expires_at,
        created_at, updated_at, last_snapshot, last_error, last_synced_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$7,NULL,NULL,NULL)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,NULL,NULL,NULL)`,
     [
       id,
       displayName,
       session.cookieValue,
       session.userId,
       hostname,
+      MEMBER_SOURCE_MANUAL,
       tokenExpiresAtFromCookie(session.cookieValue),
       now,
     ],
@@ -360,10 +529,29 @@ export async function updateMember(id, patch) {
   }
 
   const now = new Date().toISOString();
-  await db().query(
-    `UPDATE members SET display_name=$1, cookie_value=$2, user_id=$3, hostname=$4, token_expires_at=$5, updated_at=$6 WHERE id=$7`,
-    [displayName, cookieValue, userId, hostname, tokenExpiresAt, now, id],
-  );
+  const promoteManual =
+    (patch.sessionToken != null && String(patch.sessionToken).trim()) ||
+    patch.displayName != null;
+  if (promoteManual) {
+    await db().query(
+      `UPDATE members SET display_name=$1, cookie_value=$2, user_id=$3, hostname=$4, token_expires_at=$5, source=$6, updated_at=$7 WHERE id=$8`,
+      [
+        displayName,
+        cookieValue,
+        userId,
+        hostname,
+        tokenExpiresAt,
+        MEMBER_SOURCE_MANUAL,
+        now,
+        id,
+      ],
+    );
+  } else {
+    await db().query(
+      `UPDATE members SET display_name=$1, cookie_value=$2, user_id=$3, hostname=$4, token_expires_at=$5, updated_at=$6 WHERE id=$7`,
+      [displayName, cookieValue, userId, hostname, tokenExpiresAt, now, id],
+    );
+  }
   const next = await getMemberInternal(id);
   return toPublicMember(/** @type {Member} */ (next));
 }
@@ -386,7 +574,8 @@ export async function upsertMemberBySession(input) {
 
   if (existing.rowCount) {
     const id = existing.rows[0].id;
-    // 上报只轮换 Token / 邮箱；已有显示名与主机名不覆盖，避免冲掉人工改名
+    const before = await getMemberInternal(id);
+    // 人工录入号也续 Token（用户侧 Cursor 会换新 JWT）；显示名/主机名/来源不改
     await db().query(
       `UPDATE members SET
         cookie_value=$1,
@@ -403,15 +592,20 @@ export async function upsertMemberBySession(input) {
       ],
     );
     const member = await getMemberInternal(id);
-    return { member: toPublicMember(/** @type {Member} */ (member)), created: false };
+    return {
+      member: toPublicMember(/** @type {Member} */ (member)),
+      created: false,
+      tokenUpdated: true,
+      manualProtected: isManualMemberSource(before?.source),
+    };
   }
 
   const id = randomUUID();
   await db().query(
     `INSERT INTO members
-      (id, display_name, cookie_value, user_id, email, hostname, token_expires_at,
+      (id, display_name, cookie_value, user_id, email, hostname, source, token_expires_at,
        created_at, updated_at, last_snapshot, last_error, last_synced_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,NULL,NULL,NULL)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,NULL,NULL,NULL)`,
     [
       id,
       fallbackName,
@@ -419,12 +613,18 @@ export async function upsertMemberBySession(input) {
       session.userId,
       input.email ? String(input.email).trim() : null,
       hostname,
+      MEMBER_SOURCE_REPORT,
       tokenExpiresAt,
       now,
     ],
   );
   const member = await getMemberInternal(id);
-  return { member: toPublicMember(/** @type {Member} */ (member)), created: true };
+  return {
+    member: toPublicMember(/** @type {Member} */ (member)),
+    created: true,
+    tokenUpdated: true,
+    manualProtected: false,
+  };
 }
 
 /** @param {string} id */

@@ -1,38 +1,71 @@
 /**
  * 账号当前使用人：Reporter 定时上报 hostname，按主机保留最近所在账号。
- * 90 分钟内有上报/切换记录视为活跃，数据落在 volume，重启不丢。
+ * 90 分钟内有上报/切换记录视为活跃；数据落存储驱动（sqlite/pg），多实例共享。
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAccountUserLimits } from './config.js';
+import {
+  listAppLogsForHydrate,
+  loadAccountPresenceMap,
+  prunePresenceBefore,
+  saveAccountPresenceMap,
+} from './store.js';
+import { PRESENCE_KEEP_MS } from './store-side-data.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FILE = path.join(ROOT, 'data', 'account-presence.json');
+/** 升级前本地 JSON；首次读库为空时导入一次后改名，避免反复覆盖库。 */
+const LEGACY_FILE = path.join(ROOT, 'data', 'account-presence.json');
 const LOG_DIR = path.join(ROOT, 'data', 'log');
 const ACTIVE_MS = 90 * 60 * 1000;
-const KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+const KEEP_MS = PRESENCE_KEEP_MS;
+/** 多实例共享库时短缓存，避免长期脏读。 */
+const CACHE_TTL_MS = 5000;
 
 /** @type {Record<string, { memberId: string, memberDisplayName?: string|null, hostname: string, username?: string|null, label: string, lastSeenAt: string }>|null} */
 let cache = null;
+let cacheAt = 0;
 let writeChain = Promise.resolve();
+let migratedLegacy = false;
 
 async function load() {
-  if (cache) return cache;
-  try {
-    const parsed = JSON.parse(await readFile(FILE, 'utf8'));
-    cache = parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    cache = {};
+  if (cache && Date.now() - cacheAt < CACHE_TTL_MS) return cache;
+  cache = await loadAccountPresenceMap();
+  cacheAt = Date.now();
+  if (!Object.keys(cache).length && !migratedLegacy) {
+    await importLegacyJsonOnce();
   }
   return cache;
 }
 
+/**
+ * 把旧版 data/account-presence.json 导入当前存储，成功后改名为 .migrated。
+ */
+async function importLegacyJsonOnce() {
+  migratedLegacy = true;
+  try {
+    const parsed = JSON.parse(await readFile(LEGACY_FILE, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || !Object.keys(parsed).length) return;
+    cache = parsed;
+    await saveAccountPresenceMap(cache);
+    try {
+      await rename(LEGACY_FILE, `${LEGACY_FILE}.migrated`);
+    } catch {
+      /* 改名失败不影响已导入数据 */
+    }
+  } catch (e) {
+    if (e && e.code !== 'ENOENT') {
+      console.warn('[presence] 导入旧 JSON 失败:', e?.message || e);
+    }
+  }
+}
+
 async function persist() {
   writeChain = writeChain.catch(() => {}).then(async () => {
-    await mkdir(path.dirname(FILE), { recursive: true });
-    await writeFile(FILE, JSON.stringify(cache || {}, null, 2) + '\n', 'utf8');
+    await saveAccountPresenceMap(cache || {});
+    cacheAt = Date.now();
   });
   return writeChain;
 }
@@ -183,17 +216,53 @@ export async function enrichMembersWithPresence(members) {
 }
 
 /**
- * 从最近应用日志回填升级前的上报记录，避免首次启用 presence 后列表暂时全空。
+ * 从应用日志（优先库内 app_logs，回退按日文本）回填升级前的上报记录。
+ * @param {number} [now]
  */
 export async function hydratePresenceFromAppLog(now = Date.now()) {
   const rows = await load();
+  let changed = false;
+
+  /** @param {string} line @param {number} seenMs */
+  function applyLine(line, seenMs) {
+    if (!line.includes('[上报]')) return;
+    if (!Number.isFinite(seenMs) || seenMs < now - ACTIVE_MS) return;
+    const memberId = line.match(/\bid=([^\s]+)/)?.[1] || '';
+    const hostname = line.match(/主机名=([^\s]+)/)?.[1] || '';
+    if (!memberId || !hostname) return;
+    const username = line.match(/使用人=([^\s]+)/)?.[1] || '';
+    const remark =
+      line.match(/显示名请求=(.*?)(?:\s插件版本=|\s插件构建=|$)/)?.[1]?.trim() || hostname;
+    const key = hostname.toLowerCase();
+    if (Date.parse(rows[key]?.lastSeenAt || '') >= seenMs) return;
+    const identity = resolvePresenceIdentity({ username, label: remark, hostname });
+    rows[key] = {
+      memberId,
+      memberDisplayName: line.match(/\[上报\]\s账号=(.*?)\sid=/)?.[1]?.trim() || null,
+      hostname,
+      username: identity.username,
+      label: identity.label || hostname,
+      lastSeenAt: new Date(seenMs).toISOString(),
+    };
+    changed = true;
+  }
+
+  try {
+    const sinceIso = new Date(now - ACTIVE_MS).toISOString();
+    const dbLogs = await listAppLogsForHydrate(sinceIso, 2000);
+    for (const entry of dbLogs) {
+      applyLine(entry.line, Date.parse(entry.createdAt));
+    }
+  } catch {
+    /* 库未就绪时回退文本 */
+  }
+
   const dates = [new Date(now), new Date(now - 86400000)].map((date) => {
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, '0');
     const d = String(date.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
   });
-  let changed = false;
   for (const date of dates) {
     let text = '';
     try {
@@ -202,32 +271,24 @@ export async function hydratePresenceFromAppLog(now = Date.now()) {
       continue;
     }
     for (const line of text.split(/\r?\n/)) {
-      if (!line.includes('[上报]')) continue;
       const time = line.match(/^\[([^\]]+)\]/)?.[1];
       const seenMs = time ? new Date(time.replace(' ', 'T')).getTime() : NaN;
-      if (!Number.isFinite(seenMs) || seenMs < now - ACTIVE_MS) continue;
-      const memberId = line.match(/\bid=([^\s]+)/)?.[1] || '';
-      const hostname = line.match(/主机名=([^\s]+)/)?.[1] || '';
-      if (!memberId || !hostname) continue;
-      const username = line.match(/使用人=([^\s]+)/)?.[1] || '';
-      const remark =
-        line.match(/显示名请求=(.*?)(?:\s插件版本=|\s插件构建=|$)/)?.[1]?.trim() || hostname;
-      const key = hostname.toLowerCase();
-      if (Date.parse(rows[key]?.lastSeenAt || '') >= seenMs) continue;
-      const identity = resolvePresenceIdentity({ username, label: remark, hostname });
-      rows[key] = {
-        memberId,
-        memberDisplayName:
-          line.match(/\[上报\]\s账号=(.*?)\sid=/)?.[1]?.trim() || null,
-        hostname,
-        username: identity.username,
-        label: identity.label || hostname,
-        lastSeenAt: new Date(seenMs).toISOString(),
-      };
-      changed = true;
+      applyLine(line, seenMs);
     }
   }
   if (changed) await persist();
+}
+
+/**
+ * 删除超过保留期的 presence 行，并清内存缓存。
+ * 上报/切换后调用，避免表无限膨胀。
+ * @param {number} [now]
+ */
+export async function pruneStalePresence(now = Date.now()) {
+  const cutoff = new Date(now - KEEP_MS).toISOString();
+  await prunePresenceBefore(cutoff);
+  cache = null;
+  cacheAt = 0;
 }
 
 /** 用户名 → 当前正在使用的账号，供用户管理列表展示。 */
@@ -251,4 +312,11 @@ export async function listPresenceByUsername(now = Date.now()) {
     });
   }
   return out;
+}
+
+/** 测试用：清内存缓存，下次从存储重读。 */
+export function resetPresenceCacheForTests() {
+  cache = null;
+  cacheAt = 0;
+  migratedLegacy = false;
 }

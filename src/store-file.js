@@ -8,15 +8,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { maskToken, sessionFromCookie, tokenExpiresAtIso } from './auth.js';
 import {
+  isManualMemberSource,
+  MEMBER_SOURCE_MANUAL,
+  MEMBER_SOURCE_REPORT,
+  normalizeMemberSource,
   pulledColumnsFromSnapshot,
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
 import { recordSyncPercents } from './usage-percent-history.js';
+import { createSideDataApi } from './store-side-data.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const STORE_PATH = path.join(DATA_DIR, 'members.json');
 const USERS_PATH = path.join(DATA_DIR, 'users.json');
+
+/** @type {ReturnType<typeof createSideDataApi> | null} */
+let side = null;
 
 /**
  * @typedef {{
@@ -26,6 +34,7 @@ const USERS_PATH = path.join(DATA_DIR, 'users.json');
  *   userId: string,
  *   email?: string,
  *   hostname?: string | null,
+ *   source?: 'manual' | 'report',
  *   tokenExpiresAt?: string | null,
  *   planName?: string | null,
  *   membershipType?: string | null,
@@ -43,8 +52,87 @@ const USERS_PATH = path.join(DATA_DIR, 'users.json');
  * }} Member
  */
 
-/** 文件存储无需额外初始化。 */
-export async function init() {}
+/** 文件存储：侧数据仍走 JSON，API 与 sqlite/pg 对齐。 */
+export async function init() {
+  side = createSideDataApi({ kind: 'file', dataDir: DATA_DIR });
+  await side.initSide();
+}
+
+function sideApi() {
+  if (!side) throw new Error('侧数据未初始化');
+  return side;
+}
+
+export async function loadPluginClientsMap() {
+  return sideApi().loadPluginClientsMap();
+}
+/** @param {string} username @param {any} row */
+export async function savePluginClient(username, row) {
+  return sideApi().savePluginClient(username, row);
+}
+/** @param {string} username */
+export async function deletePluginClient(username) {
+  return sideApi().deletePluginClient(username);
+}
+/** @param {any} row */
+export async function insertLoginEvent(row) {
+  return sideApi().insertLoginEvent(row);
+}
+/** @param {number} limit */
+export async function listLoginEvents(limit) {
+  return sideApi().listLoginEvents(limit);
+}
+/** @param {any} row */
+export async function insertReportEvent(row) {
+  return sideApi().insertReportEvent(row);
+}
+/** @param {number} limit */
+export async function listReportEvents(limit) {
+  return sideApi().listReportEvents(limit);
+}
+export async function listApplications() {
+  return sideApi().listApplications();
+}
+/** @param {any} row */
+export async function upsertApplication(row) {
+  return sideApi().upsertApplication(row);
+}
+/** @param {string} token */
+export async function getApplicationByToken(token) {
+  return sideApi().getApplicationByToken(token);
+}
+/** @param {any} row */
+export async function insertAppLog(row) {
+  return sideApi().insertAppLog(row);
+}
+/** @param {string} sinceIso @param {number} [limit] */
+export async function listAppLogsForHydrate(sinceIso, limit) {
+  return sideApi().listAppLogsForHydrate(sinceIso, limit);
+}
+/** @param {number} [max] */
+export async function pruneLoginEvents(max) {
+  return sideApi().pruneLoginEvents(max);
+}
+/** @param {number} [max] */
+export async function pruneReportEvents(max) {
+  return sideApi().pruneReportEvents(max);
+}
+/** @param {number} [max] */
+export async function pruneApplications(max) {
+  return sideApi().pruneApplications(max);
+}
+/** @param {string} isoCutoff */
+export async function pruneAppLogsBefore(isoCutoff) {
+  return sideApi().pruneAppLogsBefore(isoCutoff);
+}
+/** @param {number} [max] */
+export async function pruneSwitchLogs(max) {
+  return sideApi().pruneSwitchLogs(max);
+}
+/** @param {string} isoCutoff */
+export async function prunePresenceBefore(isoCutoff) {
+  return sideApi().prunePresenceBefore(isoCutoff);
+}
 
 /** @returns {Promise<{ members: Member[] }>} */
 async function readStore() {
@@ -76,6 +164,7 @@ export function toPublicMember(m) {
     userId: m.userId,
     email: m.email ?? m.lastSnapshot?.email,
     hostname: m.hostname ?? null,
+    source: normalizeMemberSource(m.source),
     tokenHint: maskToken(m.cookieValue),
     tokenExpiresAt: m.tokenExpiresAt ?? tokenExpiresAtIso(m.cookieValue),
     planName: m.planName ?? m.lastSnapshot?.plan?.planName ?? null,
@@ -122,6 +211,7 @@ export async function addMember(input) {
     cookieValue: session.cookieValue,
     userId: session.userId,
     hostname: input.hostname ? String(input.hostname).trim() : null,
+    source: MEMBER_SOURCE_MANUAL,
     tokenExpiresAt: tokenExpiresAtFromCookie(session.cookieValue),
     createdAt: now,
     updatedAt: now,
@@ -162,6 +252,12 @@ export async function updateMember(id, patch) {
   if (patch.hostname != null) {
     member.hostname = String(patch.hostname).trim() || null;
   }
+  if (
+    (patch.sessionToken != null && String(patch.sessionToken).trim()) ||
+    patch.displayName != null
+  ) {
+    member.source = MEMBER_SOURCE_MANUAL;
+  }
   member.updatedAt = new Date().toISOString();
   store.members[idx] = member;
   await writeStore(store);
@@ -188,15 +284,21 @@ export async function upsertMemberBySession(input) {
 
   if (idx >= 0) {
     const member = store.members[idx];
+    const manualProtected = isManualMemberSource(member.source);
     member.cookieValue = session.cookieValue;
     member.userId = session.userId;
     member.tokenExpiresAt = tokenExpiresAt;
-    // 上报不覆盖已有显示名 / 主机名，避免冲掉人工改名
+    // 上报不覆盖已有显示名 / 主机名 / source
     if (input.email) member.email = String(input.email).trim();
     member.updatedAt = now;
     store.members[idx] = member;
     await writeStore(store);
-    return { member: toPublicMember(member), created: false };
+    return {
+      member: toPublicMember(member),
+      created: false,
+      tokenUpdated: true,
+      manualProtected,
+    };
   }
 
   /** @type {Member} */
@@ -207,6 +309,7 @@ export async function upsertMemberBySession(input) {
     userId: session.userId,
     email: input.email ? String(input.email).trim() : undefined,
     hostname,
+    source: MEMBER_SOURCE_REPORT,
     tokenExpiresAt,
     createdAt: now,
     updatedAt: now,
@@ -216,7 +319,12 @@ export async function upsertMemberBySession(input) {
   };
   store.members.push(member);
   await writeStore(store);
-  return { member: toPublicMember(member), created: true };
+  return {
+    member: toPublicMember(member),
+    created: true,
+    tokenUpdated: true,
+    manualProtected: false,
+  };
 }
 
 /** @param {string} id */
@@ -575,4 +683,23 @@ export async function saveConsoleAdmin(admin) {
     disabled: false,
     pending: false,
   });
+}
+
+const PRESENCE_PATH = path.join(DATA_DIR, 'account-presence.json');
+
+/** 遗留 file 驱动仍用 JSON，与 sqlite/pg 的表形态对齐。 */
+export async function loadAccountPresenceMap() {
+  try {
+    const parsed = JSON.parse(await readFile(PRESENCE_PATH, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return {};
+    throw e;
+  }
+}
+
+/** @param {Record<string, any>} map */
+export async function saveAccountPresenceMap(map) {
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(PRESENCE_PATH, JSON.stringify(map || {}, null, 2) + '\n', 'utf8');
 }

@@ -1,33 +1,10 @@
-/** 每个看板用户最近一次安装 / 上报的插件版本。落在 data/plugin-clients.json。 */
+/** 每个看板用户最近一次安装 / 上报的插件版本。落存储驱动。 */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'plugin-clients.json');
-
-/** @type {Record<string, any>|null} */
-let cache = null;
-let writeChain = Promise.resolve();
-
-async function load() {
-  if (cache) return cache;
-  try {
-    const parsed = JSON.parse(await readFile(FILE, 'utf8'));
-    cache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    cache = {};
-  }
-  return cache;
-}
-
-async function persist() {
-  writeChain = writeChain.catch(() => {}).then(async () => {
-    await mkdir(path.dirname(FILE), { recursive: true });
-    await writeFile(FILE, JSON.stringify(cache || {}, null, 2) + '\n', 'utf8');
-  });
-  return writeChain;
-}
+import {
+  deletePluginClient,
+  loadPluginClientsMap,
+  savePluginClient,
+} from './store.js';
 
 /** @param {unknown} value @param {number} max */
 function cleanToken(value, max) {
@@ -66,16 +43,16 @@ export async function recordPluginInstall(username, info) {
   const name = String(username || '').trim();
   const version = cleanToken(info?.version, 40);
   if (!name || !version) return null;
-  const rows = await load();
+  const rows = await loadPluginClientsMap();
   const prev = rows[name] || {};
-  rows[name] = {
+  const next = {
     ...prev,
     version,
     build: cleanToken(info?.build, 64) || null,
     installedAt: new Date().toISOString(),
   };
-  await persist();
-  return pluginClientView(rows[name]);
+  await savePluginClient(name, next);
+  return pluginClientView(next);
 }
 
 /**
@@ -86,7 +63,7 @@ export async function recordPluginInstall(username, info) {
 export async function recordPluginReport(username, info) {
   const name = String(username || '').trim();
   if (!name) return null;
-  const rows = await load();
+  const rows = await loadPluginClientsMap();
   const prev = rows[name] || {};
   const version = cleanToken(info?.version, 40) || prev.reportVersion || prev.version || '';
   if (!version) return null;
@@ -94,19 +71,19 @@ export async function recordPluginReport(username, info) {
     .replace(/[\r\n]/g, '')
     .trim()
     .slice(0, 80);
-  rows[name] = {
+  const next = {
     ...prev,
     reportVersion: version,
     reportBuild: cleanToken(info?.build, 64) || prev.reportBuild || null,
     reportedAt: new Date().toISOString(),
     hostname: hostname || prev.hostname || null,
   };
-  await persist();
-  return pluginClientView(rows[name]);
+  await savePluginClient(name, next);
+  return pluginClientView(next);
 }
 
 export async function listPluginClientViews() {
-  const rows = await load();
+  const rows = await loadPluginClientsMap();
   /** @type {Record<string, ReturnType<typeof pluginClientView>>} */
   const out = {};
   for (const [name, row] of Object.entries(rows)) {
@@ -120,8 +97,5 @@ export async function listPluginClientViews() {
 export async function forgetPluginClient(username) {
   const name = String(username || '').trim();
   if (!name) return;
-  const rows = await load();
-  if (!rows[name]) return;
-  delete rows[name];
-  await persist();
+  await deletePluginClient(name);
 }

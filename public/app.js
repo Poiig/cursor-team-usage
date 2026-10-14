@@ -19,6 +19,7 @@ import {
   formatTokens,
   loadSettings,
   money,
+  formatOperatorLabel,
   planBadgeClass,
   resolveSpendRow,
   saveSettings,
@@ -33,6 +34,13 @@ const els = {
   forcePasswordDialog: document.getElementById('forcePasswordDialog'),
   displayName: document.getElementById('fieldDisplayName'),
   sessionToken: document.getElementById('fieldSessionToken'),
+  memberMethodTabs: document.getElementById('memberMethodTabs'),
+  memberMethodToken: document.getElementById('memberMethodToken'),
+  memberMethodEmail: document.getElementById('memberMethodEmail'),
+  memberEmail: document.getElementById('fieldMemberEmail'),
+  memberEmailCode: document.getElementById('fieldMemberEmailCode'),
+  memberEmailHint: document.getElementById('memberEmailHint'),
+  btnSendMemberEmailCode: document.getElementById('btnSendMemberEmailCode'),
   dialogTitle: document.getElementById('dialogTitle'),
   toast: document.getElementById('toast'),
   searchInput: document.getElementById('searchInput'),
@@ -112,7 +120,7 @@ let extensionInstallMode = 'install';
 let accountStatusFilter = 'all';
 
 /** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」。 */
-const EXPIRING_WITHIN_DAYS = 7;
+const EXPIRING_WITHIN_DAYS = 10;
 
 function isAdmin() {
   return currentUser?.role === 'admin';
@@ -124,7 +132,7 @@ function isAbnormalMember(member) {
 }
 
 /**
- * 非异常且额度周期在一周内重置（含已到期）→ 临期。
+ * 非异常且额度周期在十天内重置（含已到期）→ 临期。
  * 异常优先归异常，不重复计入临期。
  */
 function isExpiringMember(member) {
@@ -328,11 +336,15 @@ function metaChips(member) {
     tokenExpText == null
       ? ''
       : `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`;
+  const sourceChip =
+    member.source === 'manual'
+      ? '<span class="chip neutral" title="网页添加 / 粘贴 / 邮箱 / 本机导入；上报可续 Token，不改显示名">人工</span>'
+      : '';
   const syncedChip =
     syncedText == null
       ? '<span class="chip neutral">额度尚未更新</span>'
       : `<span class="chip neutral" title="自动调用 API 获取额度的时间">额度更新 ${escapeHtml(syncedText)}</span>`;
-  return `${remainChip}${resetChip}${tokenChip}${syncedChip}`;
+  return `${remainChip}${resetChip}${tokenChip}${sourceChip}${syncedChip}`;
 }
 
 function renderActiveUserSlots(member) {
@@ -516,7 +528,7 @@ function renderSummary(summary) {
       <p class="value">${membersCache.filter(isOkMember).length}</p>
       <p class="note">点击筛选</p>
     </button>
-    <button type="button" class="stat stat-click" id="btnFilterExpiring" title="只看一周内额度周期重置的账号">
+    <button type="button" class="stat stat-click" id="btnFilterExpiring" title="只看十天内额度周期重置的账号">
       <p class="label">临期</p>
       <p class="value ${membersCache.some(isExpiringMember) ? 'warn' : ''}">${membersCache.filter(isExpiringMember).length}</p>
       <p class="note">额度重置 ≤${EXPIRING_WITHIN_DAYS} 天 · 点击筛选</p>
@@ -768,7 +780,10 @@ async function loadSwitchLogs() {
         return `
           <tr>
             <td>${escapeHtml(when)}</td>
-            <td>${escapeHtml(log.operatorUsername || '—')}</td>
+            <td>${escapeHtml(
+              log.operatorLabel ||
+                formatOperatorLabel(log.operatorUsername, log.operatorAlias),
+            )}</td>
             <td>
               <span class="rank-name">${escapeHtml(account)}</span>
               ${
@@ -808,7 +823,9 @@ async function loadReports() {
           .map(
             (row) => `
           <tr>
-            <td>${escapeHtml(row.username || '—')}</td>
+            <td>${escapeHtml(
+              row.operatorLabel || formatOperatorLabel(row.username, row.alias),
+            )}</td>
             <td class="rank-metric">${row.switchCount ?? 0}</td>
             <td class="rank-metric">${row.successCount ?? 0}</td>
             <td class="rank-metric">${row.memberCount ?? 0}</td>
@@ -829,7 +846,10 @@ async function loadReports() {
               return `
               <tr>
                 <td>${escapeHtml(when)}</td>
-                <td>${escapeHtml(log.operatorUsername || '—')}</td>
+                <td>${escapeHtml(
+                  log.operatorLabel ||
+                    formatOperatorLabel(log.operatorUsername, log.operatorAlias),
+                )}</td>
                 <td>${escapeHtml(account)}</td>
                 <td class="rank-metric">${escapeHtml(formatUsageTotal(log.usageTotalPercent))}</td>
                 <td>${escapeHtml(log.hostname || '—')}</td>
@@ -1261,16 +1281,50 @@ async function switchRecommendedMember() {
   await switchMember(member.id, els.btnSwitchRecommended);
 }
 
+/** 添加账号对话框：token | email */
+let memberMethod = 'token';
+/** @type {{ loginId: string, email: string, expiresAt: string } | null} */
+let emailLoginPending = null;
+
 function closeMemberDialog() {
   if (els.dialog.open) els.dialog.close();
+  emailLoginPending = null;
+}
+
+/**
+ * 切换「粘贴 Token / 邮箱验证码」录入方式。
+ * @param {'token' | 'email'} method
+ */
+function setMemberMethod(method) {
+  memberMethod = method === 'email' ? 'email' : 'token';
+  els.memberMethodTabs?.querySelectorAll('.filter-tab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.method === memberMethod);
+  });
+  els.memberMethodToken?.classList.toggle('hidden', memberMethod !== 'token');
+  els.memberMethodEmail?.classList.toggle('hidden', memberMethod !== 'email');
+  els.btnImportInDialog?.classList.toggle(
+    'hidden',
+    memberMethod !== 'token' || Boolean(editing?.id),
+  );
+  if (els.btnSaveMember) {
+    els.btnSaveMember.textContent =
+      memberMethod === 'email' ? '登录并入池' : editing?.id ? '保存并同步' : '保存并同步';
+  }
 }
 
 function openMemberDialog(member = null) {
   editing = member;
+  emailLoginPending = null;
   els.dialogTitle.textContent = member ? '更新账号' : '添加账号';
   els.displayName.value = member?.displayName || '';
   els.sessionToken.value = '';
-  els.btnImportInDialog.classList.toggle('hidden', Boolean(member?.id));
+  if (els.memberEmail) els.memberEmail.value = member?.email || '';
+  if (els.memberEmailCode) els.memberEmailCode.value = '';
+  if (els.memberEmailHint) {
+    els.memberEmailHint.textContent =
+      '向该邮箱发送 Cursor 登录验证码，填入后即可入池；用户无需本机登录再上报。若服务端被 Cloudflare 拦截，请改用粘贴 Token。';
+  }
+  setMemberMethod('token');
   els.dialog.showModal();
   els.displayName.focus();
 }
@@ -1548,7 +1602,74 @@ els.btnImportInDialog.addEventListener('click', async () => {
   }
 });
 
+els.memberMethodTabs?.addEventListener('click', (event) => {
+  const btn = event.target.closest('.filter-tab');
+  if (!btn?.dataset.method) return;
+  setMemberMethod(btn.dataset.method);
+});
+
+els.btnSendMemberEmailCode?.addEventListener('click', async () => {
+  const email = els.memberEmail?.value.trim() || '';
+  if (!email) return toast('请填写 Cursor 邮箱');
+  setBusy(els.btnSendMemberEmailCode, true, '发送中…');
+  try {
+    const data = await api('/api/members/email-login/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        email,
+        displayName: els.displayName.value.trim() || undefined,
+      }),
+    });
+    emailLoginPending = {
+      loginId: data.loginId,
+      email: data.email,
+      expiresAt: data.expiresAt,
+    };
+    if (els.memberEmailHint) {
+      els.memberEmailHint.textContent = `验证码已发送至 ${data.email}，请查收邮件后填入（约 10 分钟内有效）。`;
+    }
+    toast('验证码已发送，请查收邮箱');
+    els.memberEmailCode?.focus();
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(els.btnSendMemberEmailCode, false);
+  }
+});
+
 els.btnSaveMember.addEventListener('click', async () => {
+  if (memberMethod === 'email') {
+    const email = els.memberEmail?.value.trim() || '';
+    const code = els.memberEmailCode?.value.trim() || '';
+    if (!email) return toast('请填写 Cursor 邮箱');
+    if (!emailLoginPending?.loginId) return toast('请先发送验证码');
+    if (emailLoginPending.email && emailLoginPending.email !== email.toLowerCase()) {
+      return toast('邮箱已变更，请重新发送验证码');
+    }
+    if (!/^\d{6}$/.test(code)) return toast('请填写 6 位验证码');
+    setBusy(els.btnSaveMember, true, '登录中…');
+    try {
+      const body = {
+        loginId: emailLoginPending.loginId,
+        code,
+        displayName: els.displayName.value.trim() || undefined,
+      };
+      if (editing?.id) body.memberId = editing.id;
+      await api('/api/members/email-login/verify', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      toast(editing?.id ? '已用验证码更新并同步' : '已登录并入池');
+      closeMemberDialog();
+      await load();
+    } catch (e) {
+      toast(e.message || String(e));
+    } finally {
+      setBusy(els.btnSaveMember, false);
+    }
+    return;
+  }
+
   const displayName = els.displayName.value.trim();
   const sessionToken = els.sessionToken.value.trim();
   if (!displayName) return toast('请填写显示名');

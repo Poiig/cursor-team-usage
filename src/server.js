@@ -24,6 +24,7 @@ import { probeLocalCursorSession, resolveLocalCursorSession } from './local-sess
 import {
   initAppLog,
   memberLogLabel,
+  pruneOldAppLogs,
   pruneOldLogFiles,
   writeAppLog,
 } from './app-log.js';
@@ -41,6 +42,7 @@ import {
   initStore,
   listMembers,
   listUsageEvents,
+  pruneOperationalData,
   saveSyncResult,
   setUsagePercentHistory,
   toPublicMember,
@@ -64,6 +66,7 @@ import {
   enrichMembersWithPresence,
   hydratePresenceFromAppLog,
   listPresenceByUsername,
+  pruneStalePresence,
   recordAccountPresence,
 } from './account-presence.js';
 import { listLoginEvents, recordLoginEvent } from './login-log.js';
@@ -101,6 +104,7 @@ import {
   issueInstallToken,
   renderInstallPs1,
 } from './extension-asset.js';
+import { startEmailLogin, verifyEmailLogin } from './cursor-email-login.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -436,8 +440,8 @@ function setupLogPruneSchedule() {
   if (days <= 0) return;
   logPruneTimer = setInterval(
     () => {
-      pruneOldLogFiles(days)
-        .then((n) => {
+      Promise.all([pruneOldAppLogs(days), pruneOldLogFiles(days)])
+        .then(([, n]) => {
           if (n > 0) {
             writeAppLog('日志清理', { 删除文件数: n, 保留天数: days }).catch(() => {});
           }
@@ -565,6 +569,7 @@ function requiresConsoleAuth(pathname, method) {
  */
 function requiresAdmin(pathname, method) {
   if (pathname === '/api/members' && method === 'POST') return true;
+  if (pathname.startsWith('/api/members/email-login')) return true;
   if (pathname === '/api/export/accounts') return true;
   if (pathname.startsWith('/api/users')) return true;
   if (pathname.startsWith('/api/reports')) return true;
@@ -957,14 +962,56 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname === '/api/switch-logs') {
       const limit = Number(url.searchParams.get('limit') || 100);
       const logs = await listAccountSwitchLogs({ limit });
-      return sendJson(res, 200, { logs });
+      const aliasByUser = new Map(
+        (await listPublicUsers()).map((u) => [
+          String(u.username || '').toLowerCase(),
+          String(u.alias || '').trim(),
+        ]),
+      );
+      return sendJson(res, 200, {
+        logs: logs.map((log) => {
+          const username = String(log.operatorUsername || '').trim();
+          const alias = aliasByUser.get(username.toLowerCase()) || '';
+          return {
+            ...log,
+            operatorAlias: alias || null,
+            operatorLabel: alias ? `${username}（${alias}）` : username || '—',
+          };
+        }),
+      });
     }
 
     if (method === 'GET' && pathname === '/api/reports/switches') {
       await assertAdmin(req);
       const limit = Number(url.searchParams.get('limit') || 500);
       const report = await getSwitchReport({ limit });
-      return sendJson(res, 200, report);
+      const aliasByUser = new Map(
+        (await listPublicUsers()).map((u) => [
+          String(u.username || '').toLowerCase(),
+          String(u.alias || '').trim(),
+        ]),
+      );
+      const withAlias = (username) => {
+        const name = String(username || '').trim() || '—';
+        const alias = aliasByUser.get(name.toLowerCase()) || '';
+        return alias ? `${name}（${alias}）` : name;
+      };
+      return sendJson(res, 200, {
+        ...report,
+        operators: (report.operators || []).map((row) => ({
+          ...row,
+          operatorLabel: withAlias(row.username),
+        })),
+        recent: (report.recent || []).map((log) => {
+          const username = String(log.operatorUsername || '').trim();
+          const alias = aliasByUser.get(username.toLowerCase()) || '';
+          return {
+            ...log,
+            operatorAlias: alias || null,
+            operatorLabel: alias ? `${username}（${alias}）` : username || '—',
+          };
+        }),
+      });
     }
 
     if (method === 'POST' && pathname === '/api/agent/report') {
@@ -973,8 +1020,8 @@ const server = http.createServer(async (req, res) => {
       const sessionToken = String(body?.sessionToken || '').trim();
       if (!sessionToken) throw new Error('缺少 sessionToken');
       const operatorUsername = await trustedOperatorName(body?.operatorUsername, body?.operatorProof);
-      // upsert：新建写入显示名/主机名；已有账号只轮换 Token，不覆盖人工改名
-      const { member, created } = await upsertMemberBySession({
+      // upsert：新建=上报来源；已有账号续 Token，不覆盖人工显示名/主机名
+      const { member, created, manualProtected } = await upsertMemberBySession({
         sessionToken,
         displayName: body?.displayName,
         email: body?.email,
@@ -996,7 +1043,8 @@ const server = http.createServer(async (req, res) => {
       }
       await writeAppLog(created ? '注册' : '上报', {
         账号: memberLogLabel(member),
-        操作: created ? '新建账号' : '更新Token',
+        操作: created ? '新建账号' : manualProtected ? '续期Token(人工号)' : '更新Token',
+        来源: member.source || undefined,
         使用人: operatorUsername || undefined,
         使用人校验: body?.operatorUsername && !operatorUsername ? '失败' : undefined,
         主机名: body?.hostname || member?.hostname || undefined,
@@ -1025,6 +1073,9 @@ const server = http.createServer(async (req, res) => {
         ok: !refreshed?.lastError,
         error: refreshed?.lastError || null,
       });
+      // 上报路径顺带清过期席位与超额审计，控制表体积
+      await pruneStalePresence().catch(() => {});
+      await pruneOperationalData({ appLogRetentionDays: getLogRetentionDays() }).catch(() => {});
       return sendJson(res, created ? 201 : 200, {
         ok: true,
         created,
@@ -1092,6 +1143,8 @@ const server = http.createServer(async (req, res) => {
         结果: log.status,
         错误: log.error || undefined,
       });
+      await pruneStalePresence().catch(() => {});
+      await pruneOperationalData({ appLogRetentionDays: getLogRetentionDays() }).catch(() => {});
       return sendJson(res, 200, { ok: true, log });
     }
 
@@ -1115,6 +1168,66 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'GET' && pathname === '/api/local-session') {
       return sendJson(res, 200, await probeLocalCursorSession());
+    }
+
+    if (method === 'POST' && pathname === '/api/members/email-login/start') {
+      if (!allowAttempt(`email-login:${peerIp(req)}`, 8, 10 * 60 * 1000)) {
+        return sendJson(res, 429, { error: '发送验证码过于频繁，请稍后再试' });
+      }
+      const body = await readBody(req);
+      const email = String(body?.email || '').trim().toLowerCase();
+      if (email && !allowAttempt(`email-login-mail:${email}`, 4, 10 * 60 * 1000)) {
+        return sendJson(res, 429, { error: '该邮箱发送过于频繁，请稍后再试' });
+      }
+      const started = await startEmailLogin({
+        email,
+        displayName: body?.displayName,
+      });
+      await writeAppLog('邮箱验证码', {
+        步骤: '发送',
+        邮箱: started.email,
+        // 不记录 loginId / 验证码，避免审计日志泄露登录过程凭证
+      });
+      return sendJson(res, 200, started);
+    }
+
+    if (method === 'POST' && pathname === '/api/members/email-login/verify') {
+      if (!allowAttempt(`email-login-verify:${peerIp(req)}`, 20, 10 * 60 * 1000)) {
+        return sendJson(res, 429, { error: '验证过于频繁，请稍后再试' });
+      }
+      const body = await readBody(req);
+      const verified = await verifyEmailLogin({
+        loginId: body?.loginId,
+        code: body?.code,
+      });
+      const displayName =
+        String(body?.displayName || '').trim() || verified.displayName || verified.email;
+      const memberId = String(body?.memberId || '').trim();
+      let member;
+      let source;
+      if (memberId) {
+        member = await updateMember(memberId, {
+          displayName,
+          sessionToken: verified.cookieValue,
+        });
+        source = '邮箱验证码更新';
+      } else {
+        member = await addMember({
+          displayName,
+          sessionToken: verified.cookieValue,
+        });
+        source = '邮箱验证码';
+      }
+      await writeAppLog('添加账号', {
+        账号: memberLogLabel(member),
+        来源: source,
+        邮箱: verified.email,
+      });
+      const refreshed = await refreshOne(member.id, {
+        source: '添加账号',
+        trigger: source,
+      });
+      return sendJson(res, memberId ? 200 : 201, { member: refreshed });
     }
 
     if (method === 'POST' && pathname === '/api/members') {
@@ -1276,11 +1389,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 await loadAppConfig();
-await initAppLog();
-await hydratePresenceFromAppLog();
-// 控制台账号落在存储驱动内，须先开库再建默认 admin。
+// 控制台账号、席位与审计侧表同库，须先开库再写应用日志。
 await initStore();
+await initAppLog();
 await initUsers();
+await hydratePresenceFromAppLog();
 setupServerAutoRefresh();
 setupLogPruneSchedule();
 setupUsagePercentArchiveSchedule();

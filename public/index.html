@@ -240,7 +240,7 @@
             <code>.env.example</code>），改完重启；无网页设置页。
           </li>
           <li>
-            <strong>录入账号</strong>：本机导入 / 粘贴 Token；多机用 Reporter 扩展定时上报（显示名默认机器名）。
+            <strong>录入账号</strong>：本机导入 / 粘贴 Token / 邮箱验证码入池；多机用 Reporter 扩展定时上报（显示名默认机器名）。
           </li>
           <li>
             <strong>插件安装</strong>：登录后在账号页点「安装插件」。安装包绑定当前用户并写入签名；用户页能看到版本。地址只认 <code>PUBLIC_BASE_URL</code>。优先本机桥 <code>:3781</code>，否则复制 PowerShell 一行命令。扩展启动会检查更新。
@@ -321,23 +321,51 @@
           <h3 id="dialogTitle">添加账号</h3>
           <button type="button" class="icon-close" id="btnDialogClose" aria-label="关闭">×</button>
         </header>
+        <div class="filter-tabs member-method-tabs" id="memberMethodTabs" role="tablist">
+          <button type="button" class="filter-tab active" data-method="token">粘贴 Token</button>
+          <button type="button" class="filter-tab" data-method="email">邮箱验证码</button>
+        </div>
         <label>
           显示名
-          <input id="fieldDisplayName" maxlength="64" placeholder="例如：小王" autocomplete="off" />
+          <input id="fieldDisplayName" maxlength="64" placeholder="例如：小王（邮箱入池可留空）" autocomplete="off" />
         </label>
-        <label>
-          会话 Token
-          <textarea
-            id="fieldSessionToken"
-            rows="5"
-            placeholder="粘贴 WorkosCursorSessionToken 的完整值&#10;&#10;获取步骤：&#10;1. 浏览器打开 https://cursor.com/dashboard 并登录目标账号&#10;2. F12 → Application（应用）→ Cookies → https://cursor.com&#10;3. 找到 WorkosCursorSessionToken，复制 Value&#10;4. 整段粘贴到这里（可含 user_xxx%3A%3AeyJ… 或 name=value）"
-            autocomplete="off"
-            spellcheck="false"
-          ></textarea>
-        </label>
-        <p class="hint">
-          Token 等同登录态，保存在服务端名册（默认 <code>data/members.json</code>）。本机已登录 Cursor 时可直接点「从本机 Cursor 导入」，无需粘贴。
-        </p>
+        <div id="memberMethodToken">
+          <label>
+            会话 Token
+            <textarea
+              id="fieldSessionToken"
+              rows="5"
+              placeholder="粘贴 WorkosCursorSessionToken 的完整值&#10;&#10;获取步骤：&#10;1. 浏览器打开 https://cursor.com/dashboard 并登录目标账号&#10;2. F12 → Application（应用）→ Cookies → https://cursor.com&#10;3. 找到 WorkosCursorSessionToken，复制 Value&#10;4. 整段粘贴到这里（可含 user_xxx%3A%3AeyJ… 或 name=value）"
+              autocomplete="off"
+              spellcheck="false"
+            ></textarea>
+          </label>
+          <p class="hint">
+            Token 等同登录态，保存在服务端名册。本机已登录 Cursor 时可直接点「从本机 Cursor 导入」，无需粘贴。
+          </p>
+        </div>
+        <div id="memberMethodEmail" class="hidden">
+          <label>
+            Cursor 邮箱
+            <input id="fieldMemberEmail" type="email" maxlength="120" placeholder="账号邮箱" autocomplete="off" />
+          </label>
+          <div class="email-code-row">
+            <label class="email-code-field">
+              验证码
+              <input
+                id="fieldMemberEmailCode"
+                maxlength="6"
+                inputmode="numeric"
+                placeholder="6 位数字"
+                autocomplete="one-time-code"
+              />
+            </label>
+            <button type="button" class="btn" id="btnSendMemberEmailCode">发送验证码</button>
+          </div>
+          <p class="hint" id="memberEmailHint">
+            向该邮箱发送 Cursor 登录验证码，填入后即可入池；用户无需本机登录再上报。若服务端被 Cloudflare 拦截，请改回粘贴 Token。
+          </p>
+        </div>
         <footer class="sheet-footer">
           <button type="button" class="btn" id="btnImportInDialog">从本机 Cursor 导入</button>
           <div class="sheet-footer-right">

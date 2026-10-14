@@ -168,3 +168,128 @@ export async function getUsageEventsMeta(memberId) {
 export async function listUsageEvents(memberId, opts) {
   return api().listUsageEvents(memberId, opts);
 }
+
+/** 账号使用人席位（按主机）。 */
+export async function loadAccountPresenceMap() {
+  return api().loadAccountPresenceMap();
+}
+
+/** @param {Record<string, any>} map */
+export async function saveAccountPresenceMap(map) {
+  return api().saveAccountPresenceMap(map);
+}
+
+export async function loadPluginClientsMap() {
+  return api().loadPluginClientsMap();
+}
+
+/** @param {string} username @param {any} row */
+export async function savePluginClient(username, row) {
+  return api().savePluginClient(username, row);
+}
+
+/** @param {string} username */
+export async function deletePluginClient(username) {
+  return api().deletePluginClient(username);
+}
+
+/** @param {any} row */
+export async function insertLoginEvent(row) {
+  return api().insertLoginEvent(row);
+}
+
+/** @param {number} limit */
+export async function listStoredLoginEvents(limit) {
+  return api().listLoginEvents(limit);
+}
+
+/** @param {any} row */
+export async function insertReportEvent(row) {
+  return api().insertReportEvent(row);
+}
+
+/** @param {number} limit */
+export async function listStoredReportEvents(limit) {
+  return api().listReportEvents(limit);
+}
+
+export async function listStoredApplications() {
+  return api().listApplications();
+}
+
+/** @param {any} row */
+export async function upsertApplication(row) {
+  return api().upsertApplication(row);
+}
+
+/** @param {string} token */
+export async function getApplicationByToken(token) {
+  return api().getApplicationByToken(token);
+}
+
+/** @param {any} row */
+export async function insertAppLog(row) {
+  return api().insertAppLog(row);
+}
+
+/** @param {string} sinceIso @param {number} [limit] */
+export async function listAppLogsForHydrate(sinceIso, limit) {
+  return api().listAppLogsForHydrate(sinceIso, limit);
+}
+
+/** @param {number} [max] */
+export async function pruneLoginEvents(max) {
+  return api().pruneLoginEvents(max);
+}
+
+/** @param {number} [max] */
+export async function pruneReportEvents(max) {
+  return api().pruneReportEvents(max);
+}
+
+/** @param {number} [max] */
+export async function pruneApplications(max) {
+  return api().pruneApplications(max);
+}
+
+/** @param {string} isoCutoff */
+export async function pruneAppLogsBefore(isoCutoff) {
+  return api().pruneAppLogsBefore(isoCutoff);
+}
+
+/** @param {number} [max] */
+export async function pruneSwitchLogs(max) {
+  return api().pruneSwitchLogs(max);
+}
+
+/** @param {string} isoCutoff */
+export async function prunePresenceBefore(isoCutoff) {
+  return api().prunePresenceBefore(isoCutoff);
+}
+
+/**
+ * 上报/切换后清理过期 presence 与超额审计行，控制表体积。
+ * @param {{ appLogRetentionDays?: number }} [opts]
+ */
+export async function pruneOperationalData(opts = {}) {
+  const {
+    LOGIN_EVENTS_MAX,
+    REPORT_EVENTS_MAX,
+    APPLICATIONS_MAX,
+    SWITCH_LOGS_MAX,
+    PRESENCE_KEEP_MS,
+  } = await import('./store-side-data.js');
+  const cutoff = new Date(Date.now() - PRESENCE_KEEP_MS).toISOString();
+  await prunePresenceBefore(cutoff);
+  await pruneLoginEvents(LOGIN_EVENTS_MAX);
+  await pruneReportEvents(REPORT_EVENTS_MAX);
+  await pruneApplications(APPLICATIONS_MAX);
+  await pruneSwitchLogs(SWITCH_LOGS_MAX);
+  const days = Number(opts.appLogRetentionDays);
+  if (Number.isFinite(days) && days > 0) {
+    const logCutoff = new Date();
+    logCutoff.setHours(0, 0, 0, 0);
+    logCutoff.setDate(logCutoff.getDate() - days);
+    await pruneAppLogsBefore(logCutoff.toISOString());
+  }
+}

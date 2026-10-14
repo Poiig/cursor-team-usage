@@ -584,6 +584,8 @@ test('插件使用人签名与版本展示', async () => {
   assert.equal(verifyOperatorUsername('李四', proof), false);
   assert.equal(verifyOperatorUsername('张三', `${proof}x`), false);
 
+  const { initStore } = await import('../src/store.js');
+  await initStore();
   const {
     pluginClientView,
     recordPluginInstall,
@@ -870,4 +872,74 @@ test('sqlite usage_events upsert 去重、model 筛选与分页', async () => {
     else process.env.SQLITE_PATH = prevSqlite;
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
+});
+
+test('成员来源归一化与操作者别名展示', async () => {
+  const {
+    normalizeMemberSource,
+    isManualMemberSource,
+    MEMBER_SOURCE_MANUAL,
+  } = await import('../src/store-member-fields.js');
+  assert.equal(normalizeMemberSource('manual'), 'manual');
+  assert.equal(normalizeMemberSource(null), 'report');
+  assert.equal(isManualMemberSource(MEMBER_SOURCE_MANUAL), true);
+  assert.equal(isManualMemberSource('report'), false);
+
+  const { formatOperatorLabel } = await import('../public/shared.js');
+  assert.equal(formatOperatorLabel('chenyao', '陈瑶'), 'chenyao（陈瑶）');
+  assert.equal(formatOperatorLabel('chenyao', ''), 'chenyao');
+});
+
+test('邮箱登录：解析 AuthKit 页、auth code 与会话 Cookie', async () => {
+  const {
+    parseAuthKitPage,
+    extractAuthCode,
+    extractSessionTokenFromSetCookie,
+    isCloudflareChallenge,
+    buildMultipartBody,
+    buildAuthKitState,
+  } = await import('../src/cursor-email-login.js');
+
+  const actionId = '409dfdd69397fa9f326db3612977e0aa51bada7cdb';
+  const html = [
+    '<input type="hidden" name="authorization_session_id" value="01SESSION"/>',
+    '<input type="hidden" name="redirect_uri" value="https://cursor.com/api/auth/callback"/>',
+    '<input type="hidden" name="state" value="%7B%22nonce%22%3A%22x%22%7D"/>',
+    `20:{"id":"${actionId}","bound":null}`,
+    'signInAction\\":\\"$h20\\"',
+    '"magic_codes":true',
+    'name="password"',
+  ].join('\n');
+
+  const parsed = parseAuthKitPage(html);
+  assert.equal(parsed.authorizationSessionId, '01SESSION');
+  assert.equal(parsed.redirectUri, 'https://cursor.com/api/auth/callback');
+  assert.equal(parsed.state, '%7B%22nonce%22%3A%22x%22%7D');
+  assert.equal(parsed.signInActionId, actionId);
+  assert.equal(parsed.hasMagicCodes, true);
+  assert.equal(parsed.isPasswordStep, true);
+
+  assert.equal(
+    extractAuthCode('https://cursor.com/api/auth/callback?code=abc_DEF-12&state=x'),
+    'abc_DEF-12',
+  );
+  assert.equal(extractAuthCode('no code here'), null);
+
+  const rawCookie =
+    'WorkosCursorSessionToken=user_01%3A%3AeyJhbGciOiJIUzI1NiJ9.e30.x; Path=/; HttpOnly';
+  const token = extractSessionTokenFromSetCookie([rawCookie]);
+  assert.ok(token);
+  assert.equal(normalizeManualToken(token), 'user_01%3A%3AeyJhbGciOiJIUzI1NiJ9.e30.x');
+
+  assert.equal(isCloudflareChallenge('<title>Just a moment...</title>'), true);
+  assert.equal(isCloudflareChallenge('<html>Sign in</html>'), false);
+
+  const body = buildMultipartBody({ email: 'a@b.com', code: '123456' }, '----BOUND');
+  assert.match(body, /name="email"\r\n\r\na@b.com\r\n/);
+  assert.match(body, /name="code"\r\n\r\n123456\r\n/);
+  assert.match(body, /----BOUND--/);
+
+  const state = buildAuthKitState('nonce-test');
+  assert.match(state, /returnTo/);
+  assert.match(decodeURIComponent(decodeURIComponent(state)), /nonce-test/);
 });
