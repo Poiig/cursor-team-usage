@@ -79,6 +79,7 @@ import {
   recordPluginReport,
 } from './plugin-clients.js';
 import { listReportEvents, recordReportEvent } from './report-log.js';
+import { runExpiringNotify, setupExpiringNotifySchedule } from './notify.js';
 import {
   approveUser,
   authenticateUser,
@@ -893,6 +894,18 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { logs: await listReportEvents(limit) });
     }
 
+    // 管理员手动测企微推送（无候选也会发一条说明）
+    if (method === 'POST' && pathname === '/api/notify/test') {
+      await assertAdmin(req);
+      const result = await runExpiringNotify({ force: true });
+      await writeAppLog('企微推送测试', {
+        操作者: req.consoleUser,
+        账号数: result.count,
+        跳过: result.skipped || undefined,
+      });
+      return sendJson(res, 200, result);
+    }
+
     if (method === 'POST' && pathname === '/api/users') {
       await assertAdmin(req);
       const body = await readBody(req);
@@ -1397,6 +1410,7 @@ await hydratePresenceFromAppLog();
 setupServerAutoRefresh();
 setupLogPruneSchedule();
 setupUsagePercentArchiveSchedule();
+setupExpiringNotifySchedule();
 
 server.listen(PORT, HOST, async () => {
   console.log(`cursor-team-usage → http://${HOST}:${PORT}`);

@@ -770,6 +770,11 @@ export async function listUsageEvents(memberId, opts = {}) {
     whereParams,
   );
   const total = Number(totalRows[0]?.c) || 0;
+  const { rows: sumRows } = await db().query(
+    `SELECT COALESCE(SUM(total_tokens), 0)::bigint AS s FROM usage_events WHERE ${where}`,
+    whereParams,
+  );
+  const totalTokens = Number(sumRows[0]?.s) || 0;
   const offset = (page - 1) * pageSize;
   const { rows } = await db().query(
     `SELECT * FROM usage_events WHERE ${where} ORDER BY ts_ms DESC LIMIT $${whereParams.length + 1} OFFSET $${whereParams.length + 2}`,
@@ -787,6 +792,7 @@ export async function listUsageEvents(memberId, opts = {}) {
     page,
     pageSize,
     total,
+    totalTokens,
     hasNext: offset + rows.length < total,
     events: rows.map(usageEventFromStoreRow),
     models: modelRows.map((r) => String(r.model)),

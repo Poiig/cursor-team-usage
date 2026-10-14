@@ -364,6 +364,7 @@ export async function listUsageEvents(_memberId, opts = {}) {
     page,
     pageSize,
     total: 0,
+    totalTokens: 0,
     hasNext: false,
     events: [],
     models: [],

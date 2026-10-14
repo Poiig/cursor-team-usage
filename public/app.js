@@ -62,6 +62,7 @@ const els = {
   btnRestoreLocal: document.getElementById('btnRestoreLocal'),
   btnSwitchRecommended: document.getElementById('btnSwitchRecommended'),
   btnExport: document.getElementById('btnExport'),
+  btnNotifyTest: document.getElementById('btnNotifyTest'),
   btnForceChangePassword: document.getElementById('btnForceChangePassword'),
   btnLogout: document.getElementById('btnLogout'),
   btnHelp: document.getElementById('btnHelp'),
@@ -178,7 +179,22 @@ function applyRoleUi() {
     const name = currentUser?.username || '—';
     els.currentUsername.textContent = admin ? `${name} · 管理员` : name;
   }
+  syncNotifyFab();
   void loadExtensionInstallState();
+}
+
+/**
+ * 企微测推送只在账号页 + 临期筛选时以右侧悬浮出现。
+ * @param {string} [view]
+ */
+function syncNotifyFab(view) {
+  if (!els.btnNotifyTest) return;
+  const onAccounts =
+    view == null
+      ? !els.tabAccounts?.classList.contains('hidden')
+      : view === 'accounts';
+  const show = isAdmin() && onAccounts && accountStatusFilter === 'expiring';
+  els.btnNotifyTest.classList.toggle('hidden', !show);
 }
 
 function switchStatusLabel(status) {
@@ -637,6 +653,7 @@ function syncStatusFilterUi() {
 function setAccountStatusFilter(next) {
   accountStatusFilter = next;
   renderList();
+  syncNotifyFab();
 }
 
 function renderList() {
@@ -702,6 +719,7 @@ function showView(view) {
   document.querySelectorAll('.nav-item').forEach((b) => {
     b.classList.toggle('active', b.dataset.tab === next);
   });
+  syncNotifyFab(next);
   if (next === 'switches') void loadSwitchLogs();
   if (next === 'reports' && isAdmin()) void loadReports();
   if (next === 'users' && isAdmin()) void loadUsers();
@@ -1587,6 +1605,23 @@ els.btnExport?.addEventListener('click', async () => {
     toast(e.message || String(e));
   } finally {
     setBusy(els.btnExport, false);
+  }
+});
+
+els.btnNotifyTest?.addEventListener('click', async () => {
+  if (!isAdmin()) return;
+  setBusy(els.btnNotifyTest, true, '推送中…');
+  try {
+    const data = await api('/api/notify/test', { method: 'POST', body: '{}' });
+    toast(
+      data.skipped
+        ? '已推送（当前无临期可切换账号）'
+        : `已推送企微：${data.count || 0} 个可切换账号`,
+    );
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(els.btnNotifyTest, false);
   }
 });
 

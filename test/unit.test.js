@@ -943,3 +943,65 @@ test('邮箱登录：解析 AuthKit 页、auth code 与会话 Cookie', async () 
   assert.match(state, /returnTo/);
   assert.match(decodeURIComponent(decodeURIComponent(state)), /nonce-test/);
 });
+
+test('wecom expiring notify: filter and body', async () => {
+  const {
+    buildExpiringNotifyText,
+    daysUntilReset,
+    isExpiringSwitchableMember,
+    msUntilNextLocalTime,
+    resolveWecomWebhookUrl,
+  } = await import('../src/notify.js');
+
+  assert.equal(
+    resolveWecomWebhookUrl('5b0e5d10-f9c3-47bd-ac21-f41c8c002aea'),
+    'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=5b0e5d10-f9c3-47bd-ac21-f41c8c002aea',
+  );
+  assert.equal(
+    resolveWecomWebhookUrl('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc'),
+    'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc',
+  );
+
+  const now = Date.parse('2026-10-14T08:00:00+08:00');
+  const resetSoon = new Date(now + 3 * 86400000).toISOString();
+  const ok = {
+    id: '1',
+    displayName: 'expiring-ok',
+    totalPercentUsed: 40,
+    lastSnapshot: { window: { resetIso: resetSoon }, meters: { totalPercentUsed: 40 } },
+  };
+  const full = {
+    id: '2',
+    displayName: 'used-up',
+    totalPercentUsed: 100,
+    lastSnapshot: { window: { resetIso: resetSoon }, meters: { totalPercentUsed: 100 } },
+  };
+  const far = {
+    id: '3',
+    displayName: 'far-reset',
+    totalPercentUsed: 20,
+    lastSnapshot: {
+      window: { resetIso: new Date(now + 30 * 86400000).toISOString() },
+      meters: { totalPercentUsed: 20 },
+    },
+  };
+  assert.equal(daysUntilReset(resetSoon, now), 3);
+  assert.equal(isExpiringSwitchableMember(ok, now), true);
+  assert.equal(isExpiringSwitchableMember(full, now), false);
+  assert.equal(isExpiringSwitchableMember(far, now), false);
+
+  const built = buildExpiringNotifyText({
+    members: [ok, full, far],
+    panelUrl: 'http://192.168.1.1:3780/',
+    nowMs: now,
+  });
+  assert.equal(built.count, 1);
+  assert.doesNotMatch(built.text, /expiring-ok/);
+  assert.match(built.text, /剩余 60%/);
+  assert.match(built.text, /http:\/\/192\.168\.1\.1:3780/);
+  assert.match(built.text, /Cursor Team Usage/);
+
+  const delay = msUntilNextLocalTime(9, 30, Date.parse('2026-10-14T08:00:00'));
+  assert.ok(delay > 0 && delay < 2 * 3600 * 1000);
+});
+

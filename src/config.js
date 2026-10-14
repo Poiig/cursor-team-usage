@@ -32,6 +32,10 @@ export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
  *   logRetentionDays: number,
  *   proMaxUsers: number,
  *   proPlusMaxUsers: number,
+ *   notifyChannel: string,
+ *   notifyBotId: string,
+ *   notifyHour: number,
+ *   notifyMinute: number,
  * }} AppConfig
  */
 
@@ -46,6 +50,10 @@ let runtime = {
   logRetentionDays: 30,
   proMaxUsers: 3,
   proPlusMaxUsers: 5,
+  notifyChannel: '',
+  notifyBotId: '',
+  notifyHour: 9,
+  notifyMinute: 30,
 };
 
 /**
@@ -101,6 +109,10 @@ function defaults() {
     logRetentionDays: 30, // data/log 下日志保留天数，0=不自动删除
     proMaxUsers: 3,
     proPlusMaxUsers: 5,
+    notifyChannel: '',
+    notifyBotId: '',
+    notifyHour: 9,
+    notifyMinute: 30,
   };
 }
 
@@ -163,6 +175,20 @@ function configFromProcessEnv() {
   if (process.env.PRO_PLUS_MAX_USERS != null && process.env.PRO_PLUS_MAX_USERS !== '') {
     const n = Number(process.env.PRO_PLUS_MAX_USERS);
     if (Number.isFinite(n) && n > 0) next.proPlusMaxUsers = Math.floor(n);
+  }
+  if (process.env.NOTIFY_CHANNEL != null) {
+    next.notifyChannel = String(process.env.NOTIFY_CHANNEL).trim().toLowerCase();
+  }
+  if (process.env.NOTIFY_BOT_ID != null) {
+    next.notifyBotId = String(process.env.NOTIFY_BOT_ID).trim();
+  }
+  if (process.env.NOTIFY_HOUR != null && process.env.NOTIFY_HOUR !== '') {
+    const n = Number(process.env.NOTIFY_HOUR);
+    if (Number.isFinite(n) && n >= 0 && n <= 23) next.notifyHour = Math.floor(n);
+  }
+  if (process.env.NOTIFY_MINUTE != null && process.env.NOTIFY_MINUTE !== '') {
+    const n = Number(process.env.NOTIFY_MINUTE);
+    if (Number.isFinite(n) && n >= 0 && n <= 59) next.notifyMinute = Math.floor(n);
   }
   return next;
 }
@@ -287,6 +313,27 @@ export function getAccountUserLimits() {
   return {
     pro: config.proMaxUsers,
     proPlus: config.proPlusMaxUsers,
+  };
+}
+
+/**
+ * 通知通道配置。channel+botId 都有才算启用；目前仅 wecom。
+ * @returns {{ enabled: boolean, channel: string, botId: string, hour: number, minute: number }}
+ */
+export function getNotifyConfig() {
+  const config = getAppConfig();
+  const channel = String(config.notifyChannel || '')
+    .trim()
+    .toLowerCase();
+  const botId = String(config.notifyBotId || '').trim();
+  const hour = Number.isFinite(config.notifyHour) ? config.notifyHour : 9;
+  const minute = Number.isFinite(config.notifyMinute) ? config.notifyMinute : 30;
+  return {
+    enabled: Boolean(channel && botId),
+    channel,
+    botId,
+    hour,
+    minute,
   };
 }
 

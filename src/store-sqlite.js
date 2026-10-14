@@ -940,6 +940,12 @@ export async function listUsageEvents(memberId, opts = {}) {
 
   const totalRow = getOne(`SELECT COUNT(*) AS c FROM usage_events WHERE ${where}`, whereParams);
   const total = Number(totalRow?.c) || 0;
+  // 当前筛选条件下的 tokens 合计（与分页无关）
+  const sumRow = getOne(
+    `SELECT COALESCE(SUM(total_tokens), 0) AS s FROM usage_events WHERE ${where}`,
+    whereParams,
+  );
+  const totalTokens = Number(sumRow?.s) || 0;
   const offset = (page - 1) * pageSize;
   // sql.js 对 LIMIT/OFFSET 占位符支持不稳，页码已钳制为整数可内联。
   const rows = getAll(
@@ -956,6 +962,7 @@ export async function listUsageEvents(memberId, opts = {}) {
     page,
     pageSize,
     total,
+    totalTokens,
     hasNext: offset + rows.length < total,
     events: rows.map(usageEventFromStoreRow),
     models: modelRows.map((r) => String(r.model)),

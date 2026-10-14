@@ -50,7 +50,6 @@ const els = {
   eventsScrollSentinel: document.getElementById('eventsScrollSentinel'),
   btnRefresh: document.getElementById('btnDetailRefresh'),
   btnLoadEvents: document.getElementById('btnLoadEvents'),
-  btnLoadMore: document.getElementById('btnLoadMore'),
   btnExportCsv: document.getElementById('btnExportCsv'),
 };
 
@@ -60,6 +59,7 @@ let member = null;
 let eventsCache = [];
 let eventsPage = 1;
 let eventsTotal = 0;
+let eventsTotalTokens = 0;
 let hasNextPage = false;
 let eventsLoading = false;
 /** @type {string | null} */
@@ -279,15 +279,15 @@ function renderEventsTable(events, { append = false } = {}) {
 }
 
 function updateEventsMeta() {
-  const days = Number(els.eventsDays.value || 7);
+  const days = Number(els.eventsDays.value || 1);
   const model = String(els.eventsModel?.value || '').trim();
   const modelNote = model ? ` · ${model}` : '';
   const syncNote = eventsSyncedAt
     ? ` · 同步 ${formatDateTimeDot(eventsSyncedAt) || eventsSyncedAt}`
     : '';
   const rangeLabel = days === 1 ? '今天' : `近 ${days} 天`;
-  els.eventsHint.textContent = `本地缓存 · ${rangeLabel}${modelNote} · 已显示 ${eventsCache.length} / ${eventsTotal} 条${syncNote}`;
-  if (els.btnLoadMore) els.btnLoadMore.disabled = !hasNextPage || eventsLoading;
+  const tokensNote = ` · 总 ${formatTokens(eventsTotalTokens)} tokens`;
+  els.eventsHint.textContent = `${rangeLabel}${modelNote} · 已显示 ${eventsCache.length} / ${eventsTotal} 条${tokensNote}${syncNote}`;
 }
 
 /**
@@ -461,21 +461,18 @@ async function loadMember() {
  */
 async function loadEvents({ reset = true, forceSync = false } = {}) {
   if (eventsLoading) return;
-  const days = Number(els.eventsDays.value || 7);
+  const days = Number(els.eventsDays.value || 1);
   const model = String(els.eventsModel?.value || '').trim();
   if (reset) {
     eventsPage = 1;
     eventsCache = [];
     hasNextPage = false;
     eventsTotal = 0;
+    eventsTotalTokens = 0;
     els.usageBody.innerHTML = `<tr><td colspan="5" class="muted">正在加载…</td></tr>`;
   }
   eventsLoading = true;
   setBusy(els.btnLoadEvents, true, forceSync ? '同步中…' : '加载中…');
-  if (els.btnLoadMore) {
-    setBusy(els.btnLoadMore, !reset, '加载中…');
-    els.btnLoadMore.disabled = true;
-  }
   try {
     const qs = new URLSearchParams({
       days: String(days),
@@ -489,6 +486,7 @@ async function loadEvents({ reset = true, forceSync = false } = {}) {
     );
     const batch = data.events || [];
     eventsTotal = Number(data.total) || eventsTotal;
+    eventsTotalTokens = Number(data.totalTokens) || eventsTotalTokens;
     hasNextPage = Boolean(data.hasNext);
     eventsSyncedAt = data.syncedAt || eventsSyncedAt;
     if (reset) fillEventsModelOptions(data.models || []);
@@ -509,7 +507,6 @@ async function loadEvents({ reset = true, forceSync = false } = {}) {
   } finally {
     eventsLoading = false;
     setBusy(els.btnLoadEvents, false);
-    if (els.btnLoadMore) setBusy(els.btnLoadMore, false);
     updateEventsMeta();
   }
 }
@@ -567,7 +564,6 @@ els.btnRefresh?.addEventListener('click', async () => {
 });
 
 els.btnLoadEvents?.addEventListener('click', () => loadEvents({ reset: true, forceSync: true }));
-els.btnLoadMore?.addEventListener('click', () => loadEvents({ reset: false }));
 els.eventsDays?.addEventListener('change', () => loadEvents({ reset: true }));
 els.eventsModel?.addEventListener('change', () => loadEvents({ reset: true }));
 els.btnExportCsv?.addEventListener('click', () => exportCsv());
