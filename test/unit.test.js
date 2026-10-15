@@ -47,6 +47,7 @@ import {
   consumeInstallToken,
   getInstallToken,
   issueInstallToken,
+  renderInstallSh,
 } from '../src/extension-asset.js';
 
 test('normalizeManualToken 接受 cookie / name=value / 裸 JWT', () => {
@@ -82,6 +83,15 @@ test('安装令牌仅允许下载 VSIX 一次', () => {
   assert.equal(getInstallToken(token)?.operatorUsername, 'alice');
   assert.equal(consumeInstallToken(token)?.apiBaseUrl, 'https://usage.example.com');
   assert.equal(consumeInstallToken(token), null);
+});
+
+test('macOS 安装命令下载 VSIX 后用 Cursor CLI 安装并启动', () => {
+  const command = renderInstallSh({
+    downloadUrl: 'https://usage.example.com/api/extension/reporter.vsix?token=abc',
+  });
+  assert.match(command, /curl -fL 'https:\/\/usage\.example\.com\/api\/extension\/reporter\.vsix\?token=abc'/);
+  assert.match(command, /cursor --install-extension/);
+  assert.match(command, /open -a Cursor$/);
 });
 
 test('未配置数据库时默认 sqlite 存储', async () => {

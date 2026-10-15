@@ -268,7 +268,7 @@
             <strong>录入账号</strong>：本机导入 / 粘贴 Token / 邮箱验证码入池；多机用 Reporter 扩展定时上报（显示名默认机器名）。
           </li>
           <li>
-            <strong>插件安装</strong>：登录后在账号页点「安装插件」。安装包绑定当前用户并写入签名；用户页能看到版本。地址只认 <code>PUBLIC_BASE_URL</code>。优先本机桥 <code>:3781</code>，否则复制 PowerShell 一行命令。扩展启动会检查更新。
+            <strong>插件安装</strong>：登录后在账号页点「安装插件」。安装包绑定当前用户并写入签名；用户页能看到版本。地址只认 <code>PUBLIC_BASE_URL</code>。优先本机桥 <code>:3781</code>，否则按系统复制 PowerShell 或 macOS 终端命令。扩展启动会检查更新。
           </li>
           <li>
             <strong>刷新</strong>：服务端按每个账号的上次更新时间错开刷新（间隔见 <code>AUTO_REFRESH_SEC</code>，默认 900 秒）；上报后会立刻拉一次用量。列表「刷新用量」会从最久未更新的账号开始逐个刷新。

@@ -257,6 +257,15 @@ Write-Host 'Done. Developer: Reload Window if Cursor was already open.'
 }
 
 /**
+ * 生成 macOS 终端安装命令；保持安装令牌 URL 的单次下载语义。
+ * @param {{ downloadUrl: string }} opts
+ */
+export function renderInstallSh(opts) {
+  const url = opts.downloadUrl.replace(/'/g, "'\\''");
+  return `curl -fL '${url}' -o "\${TMPDIR:-/tmp}/cursor-team-usage-reporter.vsix" && cursor --install-extension "\${TMPDIR:-/tmp}/cursor-team-usage-reporter.vsix" --force && open -a Cursor`;
+}
+
+/**
  * 插件 apiBaseUrl 只认 PUBLIC_BASE_URL，不用请求 Host（反代 / 本机打开时 Host 不是局域网地址）。
  * @returns {string}
  */

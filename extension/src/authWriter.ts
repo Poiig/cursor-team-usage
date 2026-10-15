@@ -56,12 +56,17 @@ export async function writeLocalCursorAuth(
   return { dbPath, written };
 }
 
-/** Windows 上 cursor 命令多是 cursor.cmd，Start-Process 会留下乱码 cmd 窗口。 */
+/** Windows 上 cursor 命令多是 cursor.cmd，直接找可执行文件才能在退出 IDE 后可靠重启。 */
 function cursorExePath(): string | null {
   const local = process.env.LOCALAPPDATA || '';
+  const programFiles = [process.env.ProgramW6432, process.env.ProgramFiles].filter(Boolean) as string[];
   const candidates = [
     path.join(local, 'Programs', 'cursor', 'Cursor.exe'),
     path.join(local, 'Programs', 'Cursor', 'Cursor.exe'),
+    ...programFiles.flatMap((base) => [
+      path.join(base, 'cursor', 'Cursor.exe'),
+      path.join(base, 'Cursor', 'Cursor.exe'),
+    ]),
   ];
   return candidates.find((p) => existsSync(p)) || null;
 }

@@ -112,6 +112,7 @@ import {
   getConfiguredPublicBaseUrl,
   getInstallToken,
   issueInstallToken,
+  renderInstallSh,
   renderInstallPs1,
 } from './extension-asset.js';
 import { startEmailLogin, verifyEmailLogin } from './cursor-email-login.js';
@@ -755,8 +756,8 @@ const server = http.createServer(async (req, res) => {
         token,
         vsixUrl: `${apiBaseUrl}${vsixPath}`,
         installPs1Url: `${apiBaseUrl}${ps1Path}`,
-        // Windows 一行安装（下载脚本并执行）
-        oneLiner: `irm '${apiBaseUrl}${ps1Path}' | iex`,
+        windowsOneLiner: `irm '${apiBaseUrl}${ps1Path}' | iex`,
+        macOneLiner: renderInstallSh({ downloadUrl: `${apiBaseUrl}${vsixPath}` }),
       });
     }
 

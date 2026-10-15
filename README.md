@@ -116,7 +116,7 @@ cd D:\AppData\wslc\cursor-team-usage
 | 本机导入 | 看板跑在装了 Cursor 的同一台机器 | 网页点「本机导入」（读 `state.vscdb`，需本机 Python 3） |
 | 粘贴 Token | 任意机器临时加号 | Cookie 里复制 `WorkosCursorSessionToken` |
 | **邮箱验证码** | 管理员代登入池，用户无需本机登录再上报 | 「添加账号」→「邮箱验证码」→ 填邮箱收码 → 登录并入池 |
-| **Reporter 扩展（多机推荐）** | 各开发机自动续报 | `install-reporter.ps1` 下载成品安装，配置看板地址与 `accessKey` |
+| **Reporter 扩展（多机推荐）** | 各开发机自动续报 | Windows 用 `install-reporter.ps1`，macOS 用 `install-reporter.sh` 下载成品安装；看板一键安装会自动配置地址与 `accessKey` |
 
 邮箱验证码走 `authenticator.cursor.sh` 的 magic-code 流程，入池后仍只存会话 Token（不存 Cursor 密码）。若服务端 IP 被 Cloudflare / 人机验证拦截，接口会报错，请改回粘贴 Token 或本机导入。仅用于自有 / 已授权账号。
 
@@ -136,7 +136,7 @@ cd D:\AppData\wslc\cursor-team-usage
 1. 服务端 `.env` 设好 `ACCESS_KEY`；局域网访问时建议设 `PUBLIC_BASE_URL`（如 `http://192.168.1.10:3780`）。
 2. **管理员**登录看板 →「用户」→「一键安装插件」：
    - 若本机 Cursor 已开且桥 `:3781` 可用：直接下载并安装，提示重载窗口；
-   - 否则复制 PowerShell 一行命令（`irm …/install.ps1?token=… | iex`），会下载 VSIX、`cursor --install-extension` 并启动 Cursor。
+   - 否则按系统复制 PowerShell 或 macOS 终端命令，下载 VSIX、`cursor --install-extension` 并启动 Cursor。
 3. 已安装扩展会在启动时对照 `/api/extension/meta` 的构建号提示更新；也可命令面板「从看板安装/更新插件」。
 
 | 键 | 说明 |

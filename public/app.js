@@ -1536,6 +1536,8 @@ async function oneClickInstallExtension() {
       method: 'POST',
       body: JSON.stringify({}),
     });
+    const isMac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
+    const terminal = isMac ? '终端' : 'PowerShell';
     const port = await findLocalBridgePort();
     if (port != null) {
       const res = await fetch(`http://127.0.0.1:${port}/install-extension`, {
@@ -1551,16 +1553,17 @@ async function oneClickInstallExtension() {
       }
       toast(body.error || `${action}失败，已复制备用命令`);
     } else {
-      toast(`未检测到本机桥，已复制 PowerShell ${action}命令`);
+      toast(`未检测到本机桥，已复制${terminal} ${action}命令`);
     }
+    const command = isMac ? link.macOneLiner : link.windowsOneLiner;
     try {
-      await navigator.clipboard.writeText(link.oneLiner);
+      await navigator.clipboard.writeText(command);
     } catch {
       /* 剪贴板失败时仍弹出 */
     }
     window.prompt(
-      `在本机 PowerShell 执行${action}（已尝试复制）：`,
-      link.oneLiner,
+      `在本机${terminal}执行${action}（已尝试复制）：`,
+      command,
     );
   } catch (e) {
     toast(e.message || String(e));
