@@ -420,6 +420,17 @@ export function accountIdentity(member, privacyMode) {
   return { title: member.userId || member.id || '账号', subtitle: '' };
 }
 
+/** sessionStorage 键：账号列表最近一次的 hash（页签、排序、搜索）。 */
+export const ACCOUNTS_HASH_KEY = 'accountsListHash';
+
+// 「← 返回账号列表」：直达列表并恢复上次筛选，不受当前页内历史条数影响
+globalThis.document?.addEventListener('click', (event) => {
+  const a = event.target instanceof Element ? event.target.closest('a[data-back-list]') : null;
+  if (!a) return;
+  event.preventDefault();
+  location.href = `/${sessionStorage.getItem(ACCOUNTS_HASH_KEY) || ''}`;
+});
+
 // 「← 返回」：从本站页面进来时走浏览器后退，回到上一页原来的筛选与页签
 globalThis.document?.addEventListener('click', (event) => {
   const a = event.target instanceof Element ? event.target.closest('a[data-back]') : null;

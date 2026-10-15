@@ -28,6 +28,7 @@ import {
   resolveSpendRow,
   saveSettings,
   setBusy,
+  ACCOUNTS_HASH_KEY,
 } from './shared.js';
 
 const els = {
@@ -802,7 +803,11 @@ function applyRoute() {
   else if (view === 'logs' && sub !== activeLogKind) {
     history.replaceState(null, '', routeHash('logs', activeLogKind));
   }
-  if (shown === 'accounts') renderList();
+  if (shown === 'accounts') {
+    // 详情页「返回账号列表」据此直达，不靠 history.back（详情内切页签会叠加多条历史）
+    sessionStorage.setItem(ACCOUNTS_HASH_KEY, location.hash);
+    renderList();
+  }
 }
 
 window.addEventListener('hashchange', applyRoute);
