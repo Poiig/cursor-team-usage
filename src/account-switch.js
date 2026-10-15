@@ -17,6 +17,10 @@ import {
 
 /** 票据有效期：2 分钟，够打开 Cursor 并领取。 */
 const TICKET_TTL_MS = 2 * 60 * 1000;
+/** 领取后插件确认框最多等 2 分钟，再留余量；超过仍无回报多半是 Cursor 卡住或被关掉。 */
+export const CLAIMED_STALE_MS = 5 * 60 * 1000;
+/** 票据只在内存，服务重启后未领取的日志会永远停在 pending。 */
+export const PENDING_STALE_MS = 10 * 60 * 1000;
 
 /**
  * @typedef {{
@@ -36,13 +40,35 @@ const TICKET_TTL_MS = 2 * 60 * 1000;
 /** @type {Map<string, SwitchTicket>} */
 const tickets = new Map();
 
-/** 清掉过期未领票据，并把对应日志标为 expired。 */
+/**
+ * 判断一条切换日志是否已卡住太久，返回要写入的失效原因；仍在正常窗口内返回 null。
+ * 标 expired 而非 failed：插件若之后补报结果，finishAccountSwitch 仍可覆盖。
+ * @param {{ status?: string, createdAt?: string, claimedAt?: string | null }} log
+ * @param {number} [nowMs]
+ */
+export function staleSwitchReason(log, nowMs = Date.now()) {
+  if (log?.status === 'claimed') {
+    const at = Date.parse(log.claimedAt || log.createdAt || '');
+    if (Number.isFinite(at) && nowMs - at > CLAIMED_STALE_MS) {
+      return '本机已领取但 5 分钟内未回报结果（疑似 Cursor 卡住或被关闭）';
+    }
+  }
+  if (log?.status === 'pending') {
+    const at = Date.parse(log.createdAt || '');
+    if (Number.isFinite(at) && nowMs - at > PENDING_STALE_MS) {
+      return '切换票据已失效（未领取，或服务重启后票据丢失）';
+    }
+  }
+  return null;
+}
+
+/** 清掉过期票据，并把卡在 pending / claimed 的日志收尾为 expired。 */
 async function sweepExpiredTickets() {
   const now = Date.now();
   for (const [id, t] of tickets) {
-    if (t.claimed) continue;
     if (t.expiresAt > now) continue;
     tickets.delete(id);
+    if (t.claimed) continue;
     try {
       const log = await getSwitchLog(t.logId);
       if (log && log.status === 'pending') {
@@ -55,6 +81,19 @@ async function sweepExpiredTickets() {
     } catch {
       /* 忽略过期清理失败 */
     }
+  }
+  try {
+    for (const log of await listSwitchLogs({ limit: 200 })) {
+      const reason = staleSwitchReason(log, now);
+      if (!reason) continue;
+      await updateSwitchLog(log.id, {
+        status: 'expired',
+        error: reason,
+        finishedAt: new Date().toISOString(),
+      });
+    }
+  } catch {
+    /* 忽略收尾失败，不影响发起 / 领取 */
   }
 }
 

@@ -391,6 +391,56 @@ test('fetchUserRules 用 Bearer JWT 调 KnowledgeBaseList 并映射字段', asyn
   }
 });
 
+test('切换日志：领取后久无回报、未领取票据丢失时判定为卡住', async () => {
+  const { staleSwitchReason, CLAIMED_STALE_MS, PENDING_STALE_MS } = await import(
+    '../src/account-switch.js'
+  );
+  const now = Date.parse('2026-10-15T06:30:00Z');
+  const ago = (ms) => new Date(now - ms).toISOString();
+
+  assert.match(
+    staleSwitchReason({ status: 'claimed', claimedAt: ago(CLAIMED_STALE_MS + 1000) }, now),
+    /未回报/,
+  );
+  assert.equal(staleSwitchReason({ status: 'claimed', claimedAt: ago(60_000) }, now), null);
+  assert.match(
+    staleSwitchReason({ status: 'pending', createdAt: ago(PENDING_STALE_MS + 1000) }, now),
+    /失效/,
+  );
+  assert.equal(staleSwitchReason({ status: 'pending', createdAt: ago(60_000) }, now), null);
+  assert.equal(
+    staleSwitchReason({ status: 'success', claimedAt: ago(CLAIMED_STALE_MS * 10) }, now),
+    null,
+  );
+});
+
+test('renderMarkdown 渲染规则常见块且转义原始 HTML', async () => {
+  const { renderMarkdown } = await import('../public/shared.js');
+  const html = renderMarkdown(
+    [
+      '## 标题',
+      '- **纯 HTML**：用 `<p>`',
+      '- 第二项 [文档](https://example.com)',
+      '',
+      '| type | 用途 |',
+      '|---|---|',
+      '| `fix` | 修复 |',
+      '',
+      '<p><b>根因</b></p>',
+      '```',
+      'a < b',
+      '```',
+    ].join('\n'),
+  );
+  assert.match(html, /<h2>标题<\/h2>/);
+  assert.match(html, /<li><strong>纯 HTML<\/strong>：用 <code>&lt;p&gt;<\/code><\/li>/);
+  assert.match(html, /<a href="https:\/\/example.com" target="_blank" rel="noreferrer">文档<\/a>/);
+  assert.match(html, /<th>type<\/th><th>用途<\/th>/);
+  assert.match(html, /<td><code>fix<\/code><\/td>/);
+  assert.match(html, /<p>&lt;p&gt;&lt;b&gt;根因&lt;\/b&gt;&lt;\/p&gt;<\/p>/);
+  assert.match(html, /<pre><code>a &lt; b<\/code><\/pre>/);
+});
+
 test('countWorkingDaysInclusive / computeUsagePace 按工作日节奏预警', async () => {
   const { countWorkingDaysInclusive, computeUsagePace } = await import('../public/shared.js');
   // 用本地正午构造日期，避免 CI（UTC）与 +08 偏移把边界日算错
@@ -1250,5 +1300,72 @@ test('上个账单周期：窗口、收尾使用率留存与按模型汇总', as
   assert.equal(s.groups.cursor.requests, 1);
   assert.equal(s.groups.other.tokenShare, 90);
   assert.equal(s.daily.length, 1);
+});
+
+test('上个账单周期：拉全后落库，同周期再进不请求 Cursor；刚结束不落库', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-prev-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 't.sqlite');
+  const realFetch = globalThis.fetch;
+  try {
+    await loadAppConfig();
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    const store = await import('../src/store.js');
+    await store.initStore();
+    const { loadPreviousCycle } = await import('../src/usage-events-sync.js');
+
+    const added = await store.addMember({
+      displayName: '甲',
+      sessionToken: buildCookieValue('user_prev', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3ByZXYifQ.s'),
+    });
+    const lastSnapshot = { window: { startIso: '2026-10-18T08:43:00.000Z' } };
+    const cycleEnd = Date.parse(lastSnapshot.window.startIso);
+    const load = async (nowMs) =>
+      loadPreviousCycle({ ...(await store.getMemberInternal(added.id)), lastSnapshot }, { nowMs });
+
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response(
+        JSON.stringify({
+          usageEventsDisplay: [{ id: 'e1', timestamp: cycleEnd - 86400000, model: 'auto', tokenUsage: { inputTokens: 10 } }],
+          totalUsageEventsCount: 1,
+        }),
+      );
+    };
+
+    const fresh = await load(cycleEnd + 10 * 60 * 1000);
+    assert.equal(fresh.source, 'cursor');
+    assert.equal((await store.getMemberInternal(added.id)).prevCycleSummary, null);
+
+    const first = await load(cycleEnd + 2 * 3600 * 1000);
+    assert.equal(first.source, 'cursor');
+    assert.equal(first.totals.requests, 1);
+    const callsAfterStore = calls;
+
+    globalThis.fetch = async () => {
+      throw new Error('不应再请求 Cursor');
+    };
+    const second = await load(cycleEnd + 3 * 3600 * 1000);
+    assert.equal(calls, callsAfterStore);
+    assert.equal(second.source, 'stored');
+    assert.equal(second.totals.requests, 1);
+    assert.ok(second.storedAt);
+  } finally {
+    globalThis.fetch = realFetch;
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    if (prevDriver === undefined) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite === undefined) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 });
 

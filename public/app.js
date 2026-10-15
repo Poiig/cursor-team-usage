@@ -29,6 +29,10 @@ import {
   saveSettings,
   setBusy,
   ACCOUNTS_HASH_KEY,
+  downloadUserRules,
+  fetchUserRules,
+  renderMarkdown,
+  userRulesMarkdown,
 } from './shared.js';
 
 const els = {
@@ -78,6 +82,12 @@ const els = {
   todayRankBody: document.getElementById('todayRankBody'),
   btnTodayRankClose: document.getElementById('btnTodayRankClose'),
   btnTodayRankCancel: document.getElementById('btnTodayRankCancel'),
+  rulesDialog: document.getElementById('rulesDialog'),
+  rulesTitle: document.getElementById('rulesTitle'),
+  rulesBody: document.getElementById('rulesBody'),
+  btnRulesDownload: document.getElementById('btnRulesDownload'),
+  btnRulesClose: document.getElementById('btnRulesClose'),
+  btnRulesCancel: document.getElementById('btnRulesCancel'),
   switchLogBody: document.getElementById('switchLogBody'),
   reportLogBody: document.getElementById('reportLogBody'),
   loginLogBody: document.getElementById('loginLogBody'),
@@ -563,6 +573,7 @@ function renderAccountRow(member) {
               ? `<button type="button" class="btn sm" disabled title="${escapeHtml(blocked)}">${escapeHtml(blocked)}</button>`
               : `<button type="button" class="btn sm primary" data-action="switch" title="切换本机 Cursor 到此账号">${isRecommended ? '推荐切换' : '切换'}</button>`
           }
+          <button type="button" class="btn icon" data-action="rules" title="查看用户规则" aria-label="查看用户规则"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
           <button type="button" class="btn icon" data-action="refresh" title="刷新">↻</button>
           ${
             isAdmin()
@@ -1914,6 +1925,42 @@ els.userTableBody?.addEventListener('click', async (event) => {
 });
 els.btnDialogClose.addEventListener('click', closeMemberDialog);
 els.btnDialogCancel.addEventListener('click', closeMemberDialog);
+/** 弹窗当前展示的规则；下载直接用它，不再二次请求 Cursor。 */
+let rulesDialogState = { rules: [], account: '', memberId: '' };
+
+/**
+ * 打开用户规则弹窗：先弹出再实时拉取，慢请求期间用户能看到加载态。
+ * 连点不同账号时只渲染最后一次打开的结果，避免旧响应覆盖新弹窗。
+ * @param {any} member
+ */
+async function openRulesDialog(member) {
+  const account = accountIdentity(member, settings.privacyMode).title;
+  rulesDialogState = { rules: [], account, memberId: member.id };
+  els.rulesTitle.textContent = `用户规则 · ${account}`;
+  els.rulesBody.innerHTML = '<p class="muted">正在从 Cursor 拉取规则…</p>';
+  els.btnRulesDownload.disabled = true;
+  els.rulesDialog.showModal();
+  try {
+    const rules = await fetchUserRules(member.id);
+    if (rulesDialogState.memberId !== member.id) return;
+    rulesDialogState.rules = rules;
+    els.rulesBody.innerHTML = rules.length
+      ? renderMarkdown(userRulesMarkdown(rules, account))
+      : '<p class="muted">该账号没有配置用户规则。</p>';
+    els.btnRulesDownload.disabled = !rules.length;
+  } catch (e) {
+    if (rulesDialogState.memberId !== member.id) return;
+    els.rulesBody.innerHTML = `<p class="error">${escapeHtml(e.message || String(e))}</p>`;
+  }
+}
+
+els.btnRulesDownload?.addEventListener('click', () => {
+  const { rules, account } = rulesDialogState;
+  if (rules.length) downloadUserRules(rules, account);
+});
+els.btnRulesClose?.addEventListener('click', () => els.rulesDialog?.close());
+els.btnRulesCancel?.addEventListener('click', () => els.rulesDialog?.close());
+
 els.btnTodayRankClose?.addEventListener('click', () => els.todayRankDialog?.close());
 els.btnTodayRankCancel?.addEventListener('click', () => els.todayRankDialog?.close());
 els.todayRankBody?.addEventListener('click', (e) => {
@@ -2195,6 +2242,11 @@ els.list.addEventListener('click', async (event) => {
         btn.disabled = false;
         btn.textContent = '↻';
       }
+      return;
+    }
+
+    if (action === 'rules') {
+      await openRulesDialog(member || { id });
       return;
     }
 

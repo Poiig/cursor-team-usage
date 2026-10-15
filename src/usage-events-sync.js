@@ -8,6 +8,7 @@ import {
   getUsageEventsMeta,
   getUsageEventsWatermark,
   listUsageEventsInRange,
+  setPrevCycleSummary,
   upsertUsageEvents,
 } from './store.js';
 import {
@@ -57,17 +58,32 @@ export async function ensureMemberUsageEventsSynced(memberId, cookieValue, opts 
   return { skipped: false, meta, ...sync };
 }
 
+/** 周期刚结束时 Cursor 可能还在补写最后几笔事件，过了这段时间才把汇总当终值落库。 */
+const PREV_CYCLE_SETTLE_MS = 60 * 60 * 1000;
+
 /**
- * 上个账单周期统计：优先向 Cursor 拉该时间窗全部事件（顺带落库），失败则读本地库。
- * @param {any} member 内部成员（含 cookieValue / lastSnapshot）
+ * 上个账单周期统计：已落库且周期一致直接读库；否则向 Cursor 拉该时间窗全部事件，
+ * 成功则把汇总写回名册，失败则用本地 usage_events 兜底（不落汇总，下次再试）。
+ * @param {any} member 内部成员（含 cookieValue / lastSnapshot / prevCycleSummary）
+ * @param {{ nowMs?: number }} [opts]
  */
-export async function loadPreviousCycle(member) {
+export async function loadPreviousCycle(member, opts = {}) {
   const window = previousCycleWindow(member?.lastSnapshot);
   if (!window) {
     const err = new Error('尚无当前账单周期信息，请先刷新一次用量');
     err.status = 409;
     throw err;
   }
+  const startIso = new Date(window.startMs).toISOString();
+  const endIso = new Date(window.endMs).toISOString();
+  // 收尾使用率可能在换周期后才补进 cycleHistory，每次现算，不进缓存
+  const finalPercents = previousCycleFinalPercents(member, window);
+
+  const stored = member?.prevCycleSummary;
+  if (stored?.startIso === startIso && stored?.endIso === endIso) {
+    return { ...stored, source: 'stored', fetchError: null, finalPercents };
+  }
+
   let events;
   let source = 'cursor';
   let fetchError = null;
@@ -81,14 +97,12 @@ export async function loadPreviousCycle(member) {
     fetchError = e instanceof Error ? e.message : String(e);
     events = await listUsageEventsInRange(member.id, window.startMs, window.endMs);
   }
-  return {
-    startIso: new Date(window.startMs).toISOString(),
-    endIso: new Date(window.endMs).toISOString(),
-    source,
-    fetchError,
-    finalPercents: previousCycleFinalPercents(member, window),
-    ...summarizeCycleEvents(events),
-  };
+  const summary = { startIso, endIso, ...summarizeCycleEvents(events) };
+  const nowMs = opts.nowMs ?? Date.now();
+  if (source === 'cursor' && nowMs - window.endMs >= PREV_CYCLE_SETTLE_MS) {
+    await setPrevCycleSummary(member.id, { ...summary, storedAt: new Date(nowMs).toISOString() });
+  }
+  return { ...summary, source, fetchError, finalPercents };
 }
 
 /**

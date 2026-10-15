@@ -443,6 +443,20 @@ export async function setUsagePercentHistory(id, history) {
 }
 
 /**
+ * 写入上个账单周期汇总；周期已结束数据不再变，存一次后详情页直接读库。
+ * 不推进 updatedAt：这是缓存，不算账号资料变更。
+ * @param {string} id
+ * @param {object} summary
+ */
+export async function setPrevCycleSummary(id, summary) {
+  const store = await readStore();
+  const member = store.members.find((m) => m.id === id);
+  if (!member) return;
+  member.prevCycleSummary = summary;
+  await writeStore(store);
+}
+
+/**
  * @typedef {{
  *   username: string,
  *   passwordHash: string,

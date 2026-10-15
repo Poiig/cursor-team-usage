@@ -69,9 +69,11 @@ function cursorExePath(): string | null {
 /**
  * 后台拉起重启后退出当前 Cursor。
  * Windows 用 wscript 隐藏启动，避免 cmd/cursor.cmd 占住终端且中文乱码。
+ * 必须等旧进程全部退出再启动：旧实例还在时新 Cursor 会把自己交给它然后退出，表现为重启后没打开。
  */
 export async function scheduleCursorRestart(): Promise<void> {
   const delaySec = 2;
+  const waitExitSec = 15;
   if (process.platform === 'win32') {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'ctu-restart-'));
     const ps1 = path.join(dir, 'restart.ps1');
@@ -81,7 +83,9 @@ export async function scheduleCursorRestart(): Promise<void> {
       '$ErrorActionPreference = "SilentlyContinue"',
       `Start-Sleep -Seconds ${delaySec}`,
       'Get-Process -Name Cursor -ErrorAction SilentlyContinue | Stop-Process -Force',
-      'Start-Sleep -Seconds 1',
+      `$deadline = (Get-Date).AddSeconds(${waitExitSec})`,
+      'while ((Get-Process -Name Cursor -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }',
+      'Start-Sleep -Milliseconds 500',
       exe
         ? `Start-Process -FilePath '${exe}'`
         : "Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'Programs\\cursor\\Cursor.exe')",
@@ -100,10 +104,12 @@ export async function scheduleCursorRestart(): Promise<void> {
       if (/cmd\.exe/i.test(term.name)) term.dispose();
     }
   } else if (process.platform === 'darwin') {
-    const bash = `sleep ${delaySec}; osascript -e 'quit app "Cursor"' >/dev/null 2>&1; sleep 1; open -a Cursor`;
+    const waitExit = `for i in $(seq ${waitExitSec * 2}); do pgrep -x Cursor >/dev/null || break; sleep 0.5; done`;
+    const bash = `sleep ${delaySec}; osascript -e 'quit app "Cursor"' >/dev/null 2>&1; ${waitExit}; open -a Cursor`;
     spawn('/bin/bash', ['-lc', bash], { detached: true, stdio: 'ignore' }).unref();
   } else {
-    const bash = `sleep ${delaySec}; pkill -x cursor || pkill -x Cursor || true; sleep 1; (command -v cursor >/dev/null && cursor) || true`;
+    const waitExit = `for i in $(seq ${waitExitSec * 2}); do pgrep -x cursor >/dev/null || pgrep -x Cursor >/dev/null || break; sleep 0.5; done`;
+    const bash = `sleep ${delaySec}; pkill -x cursor || pkill -x Cursor || true; ${waitExit}; (command -v cursor >/dev/null && cursor) || true`;
     spawn('/bin/bash', ['-lc', bash], { detached: true, stdio: 'ignore' }).unref();
   }
 

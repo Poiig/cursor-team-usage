@@ -487,6 +487,141 @@ export function downloadText(filename, content, mime = 'application/json') {
 }
 
 /**
+ * 实时拉账号在 Cursor 云端的 User Rules（不落库，规则随时可能在 Cursor 里被改）。
+ * @param {string} memberId
+ * @returns {Promise<Array<{ id: string, title: string, content: string, createdAt: string | null }>>}
+ */
+export async function fetchUserRules(memberId) {
+  const { rules } = await api(`/api/members/${encodeURIComponent(memberId)}/user-rules`);
+  return rules || [];
+}
+
+/**
+ * 规则正文本身就是 Markdown，按「标题 + 创建时间 + 原文」拼成一份文档，弹窗展示与下载共用。
+ * @param {Array<{ title: string, content: string, createdAt: string | null }>} rules
+ * @param {string} account
+ */
+export function userRulesMarkdown(rules, account) {
+  const parts = [`# ${account} 的 Cursor 用户规则`, '', `导出时间：${formatDateTime(new Date())}`];
+  for (const r of rules) {
+    parts.push('', '---', '', `## ${r.title || '未命名规则'}`, '');
+    if (r.createdAt) parts.push(`> 创建时间：${formatDateTime(r.createdAt)}`, '');
+    parts.push(r.content);
+  }
+  return `${parts.join('\n')}\n`;
+}
+
+/**
+ * @param {Array<{ title: string, content: string, createdAt: string | null }>} rules
+ * @param {string} account
+ */
+export function downloadUserRules(rules, account) {
+  const stamp = new Date().toISOString().slice(0, 10);
+  downloadText(
+    `user-rules-${account}-${stamp}.md`,
+    userRulesMarkdown(rules, account),
+    'text/markdown;charset=utf-8',
+  );
+}
+
+/**
+ * 行内 Markdown：代码、加粗、链接。先整体转义再替换，规则里的原始 HTML 只会按文本显示。
+ * @param {string} text
+ */
+function renderInlineMarkdown(text) {
+  const codes = [];
+  let s = escapeHtml(text).replace(/`([^`]+)`/g, (_, c) => {
+    codes.push(c);
+    return `\u0000${codes.length - 1}\u0000`;
+  });
+  s = s
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+    );
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[Number(i)]}</code>`);
+}
+
+/**
+ * 轻量 Markdown 渲染，只覆盖用户规则里常见的块：标题、分隔线、引用、列表、代码块、表格、段落。
+ * 不引第三方库：看板前端无构建，规则文本也不需要完整 CommonMark。
+ * @param {string} md
+ */
+export function renderMarkdown(md) {
+  const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  const isTableSep = (l) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l || '');
+  const cells = (l) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+  for (let i = 0; i < lines.length; ) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      const body = [];
+      for (i++; i < lines.length && !/^\s*```/.test(lines[i]); i++) body.push(lines[i]);
+      i++;
+      out.push(`<pre><code>${escapeHtml(body.join('\n'))}</code></pre>`);
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      out.push(`<h${h[1].length}>${renderInlineMarkdown(h[2])}</h${h[1].length}>`);
+      i++;
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
+      out.push('<hr />');
+      i++;
+      continue;
+    }
+    if (line.includes('|') && isTableSep(lines[i + 1])) {
+      const head = cells(line);
+      const rows = [];
+      for (i += 2; i < lines.length && lines[i].includes('|') && lines[i].trim(); i++) {
+        rows.push(cells(lines[i]));
+      }
+      out.push(
+        `<table><thead><tr>${head.map((c) => `<th>${renderInlineMarkdown(c)}</th>`).join('')}</tr></thead><tbody>${rows
+          .map((r) => `<tr>${r.map((c) => `<td>${renderInlineMarkdown(c)}</td>`).join('')}</tr>`)
+          .join('')}</tbody></table>`,
+      );
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      const body = [];
+      for (; i < lines.length && /^\s*>/.test(lines[i]); i++) body.push(lines[i].replace(/^\s*>\s?/, ''));
+      out.push(`<blockquote>${renderInlineMarkdown(body.join(' '))}</blockquote>`);
+      continue;
+    }
+    const listRe = /^\s*([-*]|\d+\.)\s+(.*)$/;
+    if (listRe.test(line)) {
+      const ordered = /^\s*\d+\./.test(line);
+      const items = [];
+      for (; i < lines.length && listRe.test(lines[i]); i++) items.push(lines[i].match(listRe)[2]);
+      const tag = ordered ? 'ol' : 'ul';
+      out.push(`<${tag}>${items.map((it) => `<li>${renderInlineMarkdown(it)}</li>`).join('')}</${tag}>`);
+      continue;
+    }
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    const para = [];
+    for (
+      ;
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^(#{1,6}\s|\s*```|\s*>|\s*([-*]|\d+\.)\s)/.test(lines[i]) &&
+      !(lines[i].includes('|') && isTableSep(lines[i + 1]));
+      i++
+    ) {
+      para.push(renderInlineMarkdown(lines[i]));
+    }
+    out.push(`<p>${para.join('<br />')}</p>`);
+  }
+  return out.join('\n');
+}
+
+/**
  * 简易柱状图（报表用）。
  * @param {HTMLElement | null} el
  * @param {Array<{ label: string, value: number }>} points

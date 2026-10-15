@@ -86,6 +86,14 @@ export async function setUsagePercentHistory(id, history) {
   return api().setUsagePercentHistory(id, history);
 }
 
+/**
+ * @param {string} id
+ * @param {object} summary
+ */
+export async function setPrevCycleSummary(id, summary) {
+  return api().setPrevCycleSummary(id, summary);
+}
+
 /** @returns {Promise<any>} */
 export async function getConsoleAdmin() {
   return api().getConsoleAdmin();

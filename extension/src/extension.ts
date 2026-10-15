@@ -39,6 +39,30 @@ let lastMessage = '尚未上报';
 let operatorWarned = false;
 /** 避免同一 URI / 票据被并发处理两次。 */
 let switching = false;
+/** 切换 / 恢复确认最多等 2 分钟，避免没人点时 switching 一直占着、后续切换全被拒。 */
+const CONFIRM_TIMEOUT_MS = 2 * 60_000;
+/** 成功回报最多等这么久就重启，看板慢不能拖住切换。 */
+const REPORT_BEFORE_RESTART_MS = 3_000;
+
+/**
+ * 用右下角非模态通知确认，不用 modal：Cursor 默认原生对话框，从浏览器触发时常被压在后面，
+ * 原生模态又会锁住主窗口，用户看到的就是 Cursor 卡死。超时视为取消。
+ * @returns 用户点的按钮；超时为 'timeout'
+ */
+async function confirmNonModal(message: string, action: string): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), CONFIRM_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([
+      vscode.window.showInformationMessage(message, action, '取消'),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function storageRoot(context: vscode.ExtensionContext): string {
   return context.globalStorageUri.fsPath;
@@ -106,18 +130,19 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     const claimed = await claimSwitchTicket(config, ticketId);
     logId = claimed.logId;
     const label = claimed.displayName || claimed.auth.cachedEmail || claimed.memberId;
-    const confirm = await vscode.window.showInformationMessage(
-      `即将切换到「${label}」并重启 Cursor。\n切换前会备份当前本机登录态，之后可用「恢复上次账号」还原。\n未保存的编辑请先保存。`,
-      { modal: true },
+    updateStatus(`等待确认切换到 ${label}…`);
+    const confirm = await confirmNonModal(
+      `Cursor Team Usage：即将切换到「${label}」并重启 Cursor。切换前会备份当前登录态，可用「恢复上次账号」还原；未保存的编辑请先保存。`,
       '继续切换',
     );
     if (confirm !== '继续切换') {
+      const timedOut = confirm === 'timeout';
       await reportSwitchResult(config, {
         logId,
         ok: false,
-        error: '用户在本机取消了切换',
+        error: timedOut ? '本机 2 分钟内未确认，已自动取消' : '用户在本机取消了切换',
       });
-      updateStatus('已取消切换');
+      updateStatus(timedOut ? '切换确认超时，已取消' : '已取消切换');
       return;
     }
 
@@ -131,7 +156,11 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     }
 
     await writeLocalCursorAuth(claimed.auth);
-    await reportSwitchResult(config, { logId, ok: true });
+    // 本机已写入即算成功；回报失败只影响看板日志，不能因此不重启
+    await Promise.race([
+      reportSwitchResult(config, { logId, ok: true }).catch(() => {}),
+      new Promise((r) => setTimeout(r, REPORT_BEFORE_RESTART_MS)),
+    ]);
     updateStatus(`已写入 ${label}，正在重启 Cursor…`);
     void vscode.window.showInformationMessage(
       `Cursor Team Usage：已切换到 ${label}${backup ? '（当前账号已备份）' : ''}，即将重启 Cursor`,
@@ -175,13 +204,12 @@ async function handleRestoreLastAccount(context: vscode.ExtensionContext) {
     const when = last.savedAt
       ? new Date(last.savedAt).toLocaleString('zh-CN')
       : '未知时间';
-    const confirm = await vscode.window.showInformationMessage(
-      `即将从备份区恢复「${label}」（备份于 ${when}）并重启 Cursor。\n恢复前会先备份当前本机登录态。`,
-      { modal: true },
+    const confirm = await confirmNonModal(
+      `Cursor Team Usage：即将从备份区恢复「${label}」（备份于 ${when}）并重启 Cursor。恢复前会先备份当前本机登录态。`,
       '恢复上次账号',
     );
     if (confirm !== '恢复上次账号') {
-      updateStatus('已取消恢复');
+      updateStatus(confirm === 'timeout' ? '恢复确认超时，已取消' : '已取消恢复');
       return;
     }
 

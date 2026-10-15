@@ -11,7 +11,9 @@ import {
   daysUntil,
   deltaVsYesterday,
   downloadText,
+  downloadUserRules,
   escapeHtml,
+  fetchUserRules,
   fieldForProgressLabel,
   formatDateTime,
   formatDeltaVsYesterday,
@@ -622,9 +624,11 @@ function renderPrevCycle(d) {
     )
     .join('');
   const sourceBadge =
-    d.source === 'cursor'
-      ? '<span class="badge ok">Cursor 实时</span>'
-      : `<span class="badge warn" title="${escapeHtml(d.fetchError || '')}">本地缓存（可能不全）</span>`;
+    d.source === 'stored'
+      ? `<span class="badge ok">已落库 · ${escapeHtml(formatDateTime(d.storedAt) || '')}</span>`
+      : d.source === 'cursor'
+        ? '<span class="badge ok">Cursor 实时</span>'
+        : `<span class="badge warn" title="${escapeHtml(d.fetchError || '')}">本地缓存（可能不全）</span>`;
 
   els.prevCycle.innerHTML = `
     <div class="prev-cycle-head">
@@ -733,30 +737,16 @@ els.eventsDays?.addEventListener('change', () => loadEvents({ reset: true }));
 els.eventsModel?.addEventListener('change', () => loadEvents({ reset: true }));
 els.btnExportCsv?.addEventListener('click', () => exportCsv());
 
-/** 实时从 Cursor 拉该账号的 User Rules 并导出成 Markdown，规则原文本身就是 Markdown，直接拼接即可阅读。 */
-async function downloadUserRules() {
+els.btnUserRules?.addEventListener('click', async () => {
   setBusy(els.btnUserRules, true, '拉取中…');
   try {
-    const { rules } = await api(`/api/members/${encodeURIComponent(memberId)}/user-rules`);
-    if (!rules.length) {
-      toast('该账号没有配置用户规则');
-      return;
-    }
-    const account = member?.email || member?.displayName || memberId;
-    const parts = [`# ${account} 的 Cursor 用户规则`, '', `导出时间：${formatDateTime(new Date())}`];
-    for (const r of rules) {
-      parts.push('', '---', '', `## ${r.title || '未命名规则'}`, '');
-      if (r.createdAt) parts.push(`> 创建时间：${formatDateTime(r.createdAt)}`, '');
-      parts.push(r.content);
-    }
-    const stamp = new Date().toISOString().slice(0, 10);
-    downloadText(`user-rules-${account}-${stamp}.md`, `${parts.join('\n')}\n`, 'text/markdown;charset=utf-8');
+    const rules = await fetchUserRules(memberId);
+    if (!rules.length) return toast('该账号没有配置用户规则');
+    downloadUserRules(rules, member?.email || member?.displayName || memberId);
     toast(`已导出 ${rules.length} 条用户规则`);
   } catch (e) {
     toast(e.message || String(e));
   } finally {
     setBusy(els.btnUserRules, false);
   }
-}
-
-els.btnUserRules?.addEventListener('click', () => void downloadUserRules());
+});

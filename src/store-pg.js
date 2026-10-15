@@ -104,6 +104,7 @@ function rowToMember(row) {
     lastSyncedAt: row.last_synced_at ? new Date(row.last_synced_at).toISOString() : null,
     eventsSyncedAt: row.events_synced_at ? new Date(row.events_synced_at).toISOString() : null,
     usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
+    prevCycleSummary: row.prev_cycle_summary ?? null,
   };
 }
 
@@ -184,6 +185,7 @@ export async function init() {
       ADD COLUMN IF NOT EXISTS hard_limit DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS usage_percent_history JSONB,
       ADD COLUMN IF NOT EXISTS events_synced_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS prev_cycle_summary JSONB,
       ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'report'
   `);
   await db().query(`
@@ -899,6 +901,19 @@ export async function setUsagePercentHistory(id, history) {
     `UPDATE members SET usage_percent_history=$1::jsonb, updated_at=$2 WHERE id=$3`,
     [JSON.stringify(history || []), now, id],
   );
+}
+
+/**
+ * 写入上个账单周期汇总；周期已结束数据不再变，存一次后详情页直接读库。
+ * 不推进 updated_at：这是缓存，不算账号资料变更。
+ * @param {string} id
+ * @param {object} summary
+ */
+export async function setPrevCycleSummary(id, summary) {
+  await db().query(`UPDATE members SET prev_cycle_summary=$1::jsonb WHERE id=$2`, [
+    JSON.stringify(summary),
+    id,
+  ]);
 }
 
 /**

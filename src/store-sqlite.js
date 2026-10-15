@@ -111,7 +111,21 @@ function rowToMember(row) {
     lastSyncedAt: row.last_synced_at ?? null,
     eventsSyncedAt: row.events_synced_at ?? null,
     usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
+    prevCycleSummary: parsePrevCycleSummary(row.prev_cycle_summary),
   };
+}
+
+/**
+ * 上个周期汇总缓存坏了就当没有，下次进页面重新向 Cursor 拉。
+ * @param {unknown} raw
+ */
+function parsePrevCycleSummary(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -225,6 +239,7 @@ function ensureMemberColumns() {
     ['hard_limit', 'REAL'],
     ['usage_percent_history', 'TEXT'],
     ['events_synced_at', 'TEXT'],
+    ['prev_cycle_summary', 'TEXT'],
     // 缺省 report：旧行继续允许插件续 Token，避免误锁
     ['source', "TEXT NOT NULL DEFAULT 'report'"],
   ];
@@ -1071,6 +1086,17 @@ export async function setUsagePercentHistory(id, history) {
     `UPDATE members SET usage_percent_history=?, updated_at=? WHERE id=?`,
     [JSON.stringify(history || []), now, id],
   );
+  await persist();
+}
+
+/**
+ * 写入上个账单周期汇总；周期已结束数据不再变，存一次后详情页直接读库。
+ * 不推进 updated_at：这是缓存，不算账号资料变更。
+ * @param {string} id
+ * @param {object} summary
+ */
+export async function setPrevCycleSummary(id, summary) {
+  run(`UPDATE members SET prev_cycle_summary=? WHERE id=?`, [JSON.stringify(summary), id]);
   await persist();
 }
 
