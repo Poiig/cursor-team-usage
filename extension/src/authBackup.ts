@@ -30,11 +30,10 @@ export function authBackupDir(storageRoot: string): string {
  * 无有效 Token 时跳过，不抛错（首次未登录仍允许切到看板账号）。
  */
 export async function backupCurrentLocalAuth(
-  readerPy: string,
   storageRoot: string,
   note?: string | null,
 ): Promise<AuthBackupRecord | null> {
-  const snap = await readLocalAuthSnapshot(readerPy);
+  const snap = await readLocalAuthSnapshot();
   if (!snap?.auth?.accessToken) return null;
 
   const record: AuthBackupRecord = {

@@ -7,7 +7,6 @@ WORKDIR /app
 ARG BUILD_NUMBER=local
 ENV BUILD_NUMBER=$BUILD_NUMBER
 
-# esbuild 会把仓库 scripts/*.py 拷进 extension/dist
 COPY scripts ./scripts
 COPY extension ./extension
 

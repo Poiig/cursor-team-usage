@@ -2,16 +2,14 @@
  * 把看板下发的会话写入本机 Cursor state.vscdb，并安排重启以加载新登录态。
  */
 
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import type { LocalAuthPayload } from './authReader';
-
-const execFileAsync = promisify(execFile);
+import { writeCursorAuthPairs } from './cursorAuthDb';
 
 export type { LocalAuthPayload };
 
@@ -32,49 +30,30 @@ function candidateDbPaths(): string[] {
 }
 
 /**
- * 调用打包进扩展的 Python 脚本写入 auth 键。
+ * 用扩展内 Node 写入 auth 键，不再调用本机 Python。
  */
 export async function writeLocalCursorAuth(
-  writerPy: string,
   auth: LocalAuthPayload,
 ): Promise<{ dbPath: string; written: string[] }> {
   const dbPath = candidateDbPaths()[0];
   if (!dbPath) throw new Error('未找到本机 Cursor state.vscdb，请确认已安装并启动过 Cursor');
 
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'ctu-auth-'));
-  const payloadPath = path.join(dir, 'auth.json');
-  await writeFile(payloadPath, JSON.stringify(auth), 'utf8');
-
-  const attempts: Array<[string, string[]]> =
-    process.platform === 'win32'
-      ? [
-          ['py', ['-3', writerPy, dbPath, payloadPath]],
-          ['python', [writerPy, dbPath, payloadPath]],
-        ]
-      : [
-          ['python3', [writerPy, dbPath, payloadPath]],
-          ['python', [writerPy, dbPath, payloadPath]],
-        ];
-
-  let lastError: unknown;
-  for (const [bin, args] of attempts) {
-    try {
-      const { stdout } = await execFileAsync(bin, args, {
-        timeout: 20000,
-        maxBuffer: 2 * 1024 * 1024,
-        windowsHide: true,
-      });
-      const data = JSON.parse(stdout.trim() || '{}') as {
-        error?: string;
-        written?: string[];
-      };
-      if (data.error) throw new Error(data.error);
-      return { dbPath, written: data.written || [] };
-    } catch (e) {
-      lastError = e;
-    }
+  const allowed: Array<[string, string | null | undefined]> = [
+    ['cursorAuth/accessToken', auth.accessToken],
+    ['cursorAuth/refreshToken', auth.refreshToken || auth.accessToken],
+    ['cursorAuth/cachedEmail', auth.cachedEmail],
+    ['cursorAuth/stripeMembershipAuthId', auth.stripeMembershipAuthId],
+    ['cursorAuth/cachedSignUpType', auth.cachedSignUpType],
+  ];
+  const pairs = allowed.filter(
+    (pair): pair is [string, string] => typeof pair[1] === 'string' && Boolean(pair[1]),
+  );
+  if (!pairs.some(([k]) => k.endsWith('accessToken'))) {
+    throw new Error('missing accessToken');
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+
+  const written = await writeCursorAuthPairs(dbPath, pairs);
+  return { dbPath, written };
 }
 
 /** Windows 上 cursor 命令多是 cursor.cmd，Start-Process 会留下乱码 cmd 窗口。 */

@@ -7,5 +7,6 @@ tsconfig.json
 **/*.map
 **/*.ts
 !dist/extension.js
+!dist/sql-wasm-inline.js
 !build-info.json
 *.vsix

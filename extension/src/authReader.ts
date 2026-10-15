@@ -1,10 +1,7 @@
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { CURSOR_AUTH_KEYS, readCursorAuthKeys } from './cursorAuthDb';
 
 export type LocalSession = {
   cookieValue: string;
@@ -67,51 +64,11 @@ function buildCookieValue(userId: string, token: string): string {
 }
 
 /**
- * 用打包进扩展的 Python 脚本只读 Cursor state.vscdb。
- */
-async function readAuthViaPython(dbPath: string, readerPy: string): Promise<Map<string, string>> {
-  const attempts: Array<[string, string[]]> =
-    process.platform === 'win32'
-      ? [
-          ['py', ['-3', readerPy, dbPath]],
-          ['python', [readerPy, dbPath]],
-        ]
-      : [
-          ['python3', [readerPy, dbPath]],
-          ['python', [readerPy, dbPath]],
-        ];
-
-  let lastError: unknown;
-  for (const [bin, args] of attempts) {
-    try {
-      const { stdout } = await execFileAsync(bin, args, {
-        timeout: 20000,
-        maxBuffer: 8 * 1024 * 1024,
-        windowsHide: true,
-      });
-      const data = JSON.parse(stdout.trim() || '{}') as {
-        error?: string;
-        values?: Record<string, string>;
-      };
-      if (data.error) throw new Error(data.error);
-      const out = new Map<string, string>();
-      for (const [k, v] of Object.entries(data.values || {})) {
-        if (typeof v === 'string') out.set(k, v);
-      }
-      return out;
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-/**
  * 读本机 cursorAuth 全量（不过滤过期），供切换前备份。
  */
-export async function readLocalAuthSnapshot(readerPy: string): Promise<LocalAuthSnapshot | null> {
+export async function readLocalAuthSnapshot(): Promise<LocalAuthSnapshot | null> {
   for (const dbPath of candidateDbPaths()) {
-    const values = await readAuthViaPython(dbPath, readerPy);
+    const values = await readCursorAuthKeys(dbPath, CURSOR_AUTH_KEYS);
     const token = values.get('cursorAuth/accessToken');
     if (!token) continue;
     const payload = decodeJwtPayload(token);
@@ -138,8 +95,8 @@ export async function readLocalAuthSnapshot(readerPy: string): Promise<LocalAuth
 /**
  * 解析本机 Cursor 登录态；过期 JWT 丢弃。
  */
-export async function resolveLocalCursorSession(readerPy: string): Promise<LocalSession | null> {
-  const snap = await readLocalAuthSnapshot(readerPy);
+export async function resolveLocalCursorSession(): Promise<LocalSession | null> {
+  const snap = await readLocalAuthSnapshot();
   if (!snap?.auth.accessToken || !snap.auth.userId) return null;
   if (typeof snap.exp === 'number' && snap.exp * 1000 < Date.now()) return null;
   return {

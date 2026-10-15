@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import type { Server } from 'node:http';
-import path from 'node:path';
 import {
   backupCurrentLocalAuth,
   loadLastAuthBackup,
@@ -35,14 +34,6 @@ let lastMessage = '尚未上报';
 /** 避免同一 URI / 票据被并发处理两次。 */
 let switching = false;
 
-function readerScriptPath(context: vscode.ExtensionContext): string {
-  return path.join(context.extensionPath, 'dist', 'read_cursor_auth.py');
-}
-
-function writerScriptPath(context: vscode.ExtensionContext): string {
-  return path.join(context.extensionPath, 'dist', 'write_cursor_auth.py');
-}
-
 function storageRoot(context: vscode.ExtensionContext): string {
   return context.globalStorageUri.fsPath;
 }
@@ -58,7 +49,7 @@ function updateStatus(text: string) {
 async function doReport(context: vscode.ExtensionContext, silent: boolean) {
   const config = readReporterConfig();
   try {
-    const session = await resolveLocalCursorSession(readerScriptPath(context));
+    const session = await resolveLocalCursorSession();
     if (!session) {
       throw new Error('未找到有效的 Cursor 登录态，请先在本机登录 Cursor');
     }
@@ -113,7 +104,6 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
 
     // 先备份当前本机账号，再写入目标；无当前登录态时跳过备份
     const backup = await backupCurrentLocalAuth(
-      readerScriptPath(context),
       storageRoot(context),
       `切换前备份 → ${label}`,
     );
@@ -121,7 +111,7 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
       updateStatus(`已备份 ${backup.email || backup.userId || '当前账号'}，正在写入…`);
     }
 
-    await writeLocalCursorAuth(writerScriptPath(context), claimed.auth);
+    await writeLocalCursorAuth(claimed.auth);
     await reportSwitchResult(config, { logId, ok: true });
     updateStatus(`已写入 ${label}，正在重启 Cursor…`);
     void vscode.window.showInformationMessage(
@@ -177,12 +167,8 @@ async function handleRestoreLastAccount(context: vscode.ExtensionContext) {
     }
 
     // 恢复前备份当前，便于再次「恢复」回到此刻
-    await backupCurrentLocalAuth(
-      readerScriptPath(context),
-      storageRoot(context),
-      `恢复前备份 ← ${label}`,
-    );
-    await writeLocalCursorAuth(writerScriptPath(context), last.auth);
+    await backupCurrentLocalAuth(storageRoot(context), `恢复前备份 ← ${label}`);
+    await writeLocalCursorAuth(last.auth);
     updateStatus(`已恢复 ${label}，正在重启 Cursor…`);
     void vscode.window.showInformationMessage(
       `Cursor Team Usage：已恢复 ${label}，即将重启 Cursor`,
@@ -263,7 +249,7 @@ async function setupLocalBridge(context: vscode.ExtensionContext) {
         return { ok: true, message: 'installed', reloadScheduled: true };
       },
       async () => {
-        const session = await resolveLocalCursorSession(readerScriptPath(context));
+        const session = await resolveLocalCursorSession();
         if (!session) return { available: false };
         return {
           available: true,

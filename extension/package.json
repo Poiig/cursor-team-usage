@@ -2,7 +2,7 @@
   "name": "cursor-team-usage-reporter",
   "displayName": "Cursor Team Usage Reporter",
   "description": "上报本机 Cursor 会话到看板，并支持从看板一键切换本机登录账号",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "publisher": "poiig",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -111,5 +111,7 @@
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "sql.js": "^1.15.0"
+  }
 }
