@@ -18,7 +18,7 @@
               <h1>Cursor Team Usage</h1>
             </div>
             <p class="footer-links">
-              <a href="/">← 返回账号列表</a>
+              <a href="/" data-back>← 返回账号列表</a>
               <span>·</span>
               <a href="https://cursor.com/dashboard/usage" target="_blank" rel="noreferrer">Official usage ↗</a>
             </p>
@@ -36,12 +36,16 @@
             </div>
           </div>
           <div class="toolbar">
-            <button type="button" class="btn" id="btnPrevCycle">上个周期</button>
+            <nav class="cycle-tabs" aria-label="账单周期">
+              <a class="cycle-tab active" data-cycle="current" href="#">当前周期</a>
+              <a class="cycle-tab" data-cycle="prev" href="#">上个周期</a>
+            </nav>
             <button type="button" class="btn" id="btnDetailRefresh">刷新用量</button>
           </div>
         </div>
-        <div id="detailMeters" class="panel-lines"></div>
         <section id="prevCycle" class="prev-cycle hidden" aria-label="上个账单周期"></section>
+        <div id="currentCycleView">
+        <div id="detailMeters" class="panel-lines"></div>
         <div class="charts">
           <article class="chart-card">
             <h3>Daily spend (30d)</h3>
@@ -105,6 +109,7 @@
             </table>
             <div id="eventsScrollSentinel" class="events-scroll-sentinel" aria-hidden="true"></div>
           </div>
+        </div>
         </div>
       </section>
     </div>

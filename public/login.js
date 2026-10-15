@@ -35,7 +35,10 @@ form?.addEventListener('submit', async (e) => {
     }
     const cached = readApplication();
     if (cached && cached.username === data.username) clearApplication();
-    location.href = '/';
+    // 回到登录前的页面；只接受站内路径，防开放跳转
+    const next = new URLSearchParams(location.search).get('next') || '/';
+    const safe = next.startsWith('/') && !next.startsWith('//') ? next : '/';
+    location.href = `${safe}${location.hash}`;
   } catch (err) {
     if (errEl) {
       errEl.textContent = err.message || String(err);

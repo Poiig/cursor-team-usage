@@ -51,8 +51,8 @@ const els = {
   btnRefresh: document.getElementById('btnDetailRefresh'),
   btnLoadEvents: document.getElementById('btnLoadEvents'),
   btnExportCsv: document.getElementById('btnExportCsv'),
-  btnPrevCycle: document.getElementById('btnPrevCycle'),
   prevCycle: document.getElementById('prevCycle'),
+  currentCycleView: document.getElementById('currentCycleView'),
 };
 
 /** @type {object | null} */
@@ -688,26 +688,44 @@ function renderPrevCycle(d) {
   );
 }
 
-els.btnPrevCycle?.addEventListener('click', async () => {
-  if (!els.prevCycle) return;
-  if (!els.prevCycle.classList.contains('hidden')) {
-    els.prevCycle.classList.add('hidden');
-    els.btnPrevCycle.textContent = '上个周期';
-    return;
-  }
-  setBusy(els.btnPrevCycle, true, '加载中…');
+/** 周期视图写在 URL（?cycle=prev），刷新 / 后退 / 分享都停在同一视图。 */
+function cycleHref(cycle) {
+  const p = new URLSearchParams(location.search);
+  if (cycle === 'prev') p.set('cycle', 'prev');
+  else p.delete('cycle');
+  return `${location.pathname}?${p}`;
+}
+
+/** @type {object | null} */
+let prevCycleData = null;
+
+async function applyCycleView() {
+  const cycle = new URLSearchParams(location.search).get('cycle') === 'prev' ? 'prev' : 'current';
+  document.querySelectorAll('.cycle-tab').forEach((a) => {
+    a.classList.toggle('active', a.dataset.cycle === cycle);
+    a.setAttribute('href', cycleHref(a.dataset.cycle));
+  });
+  els.currentCycleView?.classList.toggle('hidden', cycle !== 'current');
+  els.prevCycle?.classList.toggle('hidden', cycle !== 'prev');
+  if (cycle !== 'prev' || prevCycleData || !els.prevCycle) return;
+  els.prevCycle.innerHTML = '<p class="muted">正在从 Cursor 拉取上个周期数据…</p>';
   try {
-    const data = await api(`/api/members/${encodeURIComponent(memberId)}/previous-cycle`);
-    renderPrevCycle(data);
-    els.prevCycle.classList.remove('hidden');
-    els.prevCycle.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    prevCycleData = await api(`/api/members/${encodeURIComponent(memberId)}/previous-cycle`);
+    renderPrevCycle(prevCycleData);
   } catch (e) {
-    toast(e.message || String(e));
-  } finally {
-    setBusy(els.btnPrevCycle, false);
-    if (!els.prevCycle.classList.contains('hidden')) els.btnPrevCycle.textContent = '收起上个周期';
+    els.prevCycle.innerHTML = `<p class="muted">加载失败：${escapeHtml(e.message || String(e))}</p>`;
   }
+}
+
+document.querySelector('.cycle-tabs')?.addEventListener('click', (event) => {
+  const a = event.target.closest('.cycle-tab');
+  if (!a) return;
+  event.preventDefault();
+  history.pushState(null, '', cycleHref(a.dataset.cycle));
+  void applyCycleView();
 });
+window.addEventListener('popstate', () => void applyCycleView());
+if (memberId) void applyCycleView();
 
 els.btnLoadEvents?.addEventListener('click', () => loadEvents({ reset: true, forceSync: true }));
 els.eventsDays?.addEventListener('change', () => loadEvents({ reset: true }));

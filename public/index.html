@@ -100,9 +100,22 @@
             <button type="button" class="btn" id="btnRefreshReports">刷新</button>
           </div>
         </div>
+        <div class="stats report-kpis" id="reportKpis"></div>
         <div class="charts report-charts">
+          <article class="chart-card chart-card--wide">
+            <h3>团队每日 Tokens（近 30 日）</h3>
+            <div id="chartTeamTokens" class="chart-box chart-box--clickable"></div>
+          </article>
           <article class="chart-card">
-            <h3>团队日均用量 %</h3>
+            <h3>团队每日花费（近 30 日）</h3>
+            <div id="chartTeamSpend" class="chart-box chart-box--clickable"></div>
+          </article>
+          <article class="chart-card">
+            <h3>团队每日请求次数（近 30 日）</h3>
+            <div id="chartTeamRequests" class="chart-box chart-box--clickable"></div>
+          </article>
+          <article class="chart-card">
+            <h3>团队平均用量 %（按日）</h3>
             <div id="chartTeamUsage" class="chart-box"></div>
           </article>
           <article class="chart-card">
@@ -110,8 +123,22 @@
             <div id="chartSwitchDaily" class="chart-box"></div>
           </article>
           <article class="chart-card">
-            <h3>各账号当前用量 %</h3>
+            <h3>各账号剩余用量 %</h3>
+            <p class="chart-note">从多到少；红色剩余 &lt;20%，黄色 &lt;40%。</p>
             <div id="chartAccountUsage" class="chart-box chart-box--scroll"></div>
+          </article>
+          <article class="chart-card">
+            <h3>各账号预计期末用量 %</h3>
+            <p class="chart-note">按本周期工作日节奏推算；红色会超额，黄色 ≥90%。</p>
+            <div id="chartAccountPace" class="chart-box chart-box--scroll"></div>
+          </article>
+          <article class="chart-card">
+            <h3>各账号近 30 日 Tokens</h3>
+            <div id="chartAccountTokens" class="chart-box chart-box--scroll"></div>
+          </article>
+          <article class="chart-card">
+            <h3>今日模型分布（Tokens）</h3>
+            <div id="chartTodayModels" class="chart-box chart-box--scroll"></div>
           </article>
           <article class="chart-card">
             <h3>按人切换量</h3>
@@ -143,6 +170,7 @@
                       <th>操作者</th>
                       <th>目标账号</th>
                       <th>Total usage</th>
+                      <th title="到下次切到该账号时（没有则到当前）Total usage 增加了多少">切换后新增</th>
                       <th>主机</th>
                       <th>IP</th>
                       <th>状态</th>
@@ -286,17 +314,17 @@
     <dialog id="todayRankDialog" class="sheet sheet-wide">
       <div class="sheet-body">
         <header>
-          <h3>今日用量排行</h3>
+          <h3 id="todayRankTitle">今日用量排行</h3>
           <button type="button" class="icon-close" id="btnTodayRankClose" aria-label="关闭">×</button>
         </header>
-        <p class="hint">按今日 tokens 从高到低；点击行可进入账号详情。</p>
+        <p class="hint" id="todayRankHint">按今日 tokens 从高到低；点击行可进入账号详情。</p>
         <div class="rank-table-wrap">
           <table class="rank-table" id="todayRankTable">
             <thead>
               <tr>
                 <th>#</th>
                 <th>用户名</th>
-                <th>今日 tokens</th>
+                <th id="todayRankTokensTh">今日 tokens</th>
                 <th>次数</th>
                 <th>花费</th>
               </tr>

@@ -12,6 +12,7 @@ import {
   downloadText,
   escapeHtml,
   fieldForProgressLabel,
+  formatAgo,
   formatDateTime,
   formatDeltaVsYesterday,
   formatPlanLabel,
@@ -85,6 +86,13 @@ const els = {
   chartSwitchDaily: document.getElementById('chartSwitchDaily'),
   chartAccountUsage: document.getElementById('chartAccountUsage'),
   chartSwitchByUser: document.getElementById('chartSwitchByUser'),
+  reportKpis: document.getElementById('reportKpis'),
+  chartTeamTokens: document.getElementById('chartTeamTokens'),
+  chartTeamSpend: document.getElementById('chartTeamSpend'),
+  chartTeamRequests: document.getElementById('chartTeamRequests'),
+  chartAccountPace: document.getElementById('chartAccountPace'),
+  chartAccountTokens: document.getElementById('chartAccountTokens'),
+  chartTodayModels: document.getElementById('chartTodayModels'),
   statusFilter: document.getElementById('statusFilter'),
   userTableBody: document.getElementById('userTableBody'),
   userDialog: document.getElementById('userDialog'),
@@ -615,17 +623,42 @@ function renderSummary(summary) {
 
 /** 打开今日用量排行：按 tokens 倒序，展示用户名。 */
 function openTodayRank() {
-  const ranked = [...membersCache].sort((a, b) => todayTokensOf(b) - todayTokensOf(a));
+  openDayRank(null);
+}
+
+/**
+ * 打开某日用量排行；date 为空表示今日（取 spend.today），否则取 spend.daily 里该日数据，
+ * 供报表页点击每日柱子复用同一个弹窗。
+ * @param {string | null} date YYYY-MM-DD
+ */
+function openDayRank(date) {
+  const usageOf = (m) => {
+    if (!date) return { tokens: todayTokensOf(m), requests: todayRequestsOf(m), dollars: todayDollarsOf(m) };
+    const row = (m.lastSnapshot?.spend?.daily || []).find((d) => d?.date === date);
+    return {
+      tokens: Number(row?.tokens) || 0,
+      requests: Number(row?.requests) || 0,
+      dollars: Number(row?.dollars) || 0,
+    };
+  };
+  const dayText = date || '今日';
+  const titleEl = document.getElementById('todayRankTitle');
+  const hintEl = document.getElementById('todayRankHint');
+  const thEl = document.getElementById('todayRankTokensTh');
+  if (titleEl) titleEl.textContent = `${dayText}用量排行`;
+  if (hintEl) hintEl.textContent = `按${dayText} tokens 从高到低；点击行可进入账号详情。`;
+  if (thEl) thEl.textContent = date ? '当日 tokens' : '今日 tokens';
+  const ranked = membersCache
+    .map((m) => ({ m, u: usageOf(m) }))
+    .sort((a, b) => b.u.tokens - a.u.tokens);
   if (!els.todayRankBody) return;
   if (!ranked.length) {
     els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">暂无账号</td></tr>`;
   } else {
     els.todayRankBody.innerHTML = ranked
-      .map((m, i) => {
+      .map(({ m, u }, i) => {
         const idn = accountIdentity(m, settings.privacyMode);
-        const tokens = todayTokensOf(m);
-        const reqs = todayRequestsOf(m);
-        const dollars = todayDollarsOf(m);
+        const { tokens, requests: reqs, dollars } = u;
         return `
           <tr class="rank-row" data-id="${escapeHtml(m.id)}" title="打开详情">
             <td class="rank-num">${i + 1}</td>
@@ -701,10 +734,78 @@ function syncStatusFilterUi() {
 
 /** @param {'all' | 'ok' | 'expiring' | 'error'} next */
 function setAccountStatusFilter(next) {
-  accountStatusFilter = next;
-  renderList();
-  syncNotifyFab();
+  navigate('accounts', next === 'all' ? '' : next, accountRouteParams());
 }
+
+/*
+ * 地址路由：每个页面 / 筛选都有自己的 URL，刷新、后退、分享链接都能回到原处。
+ * #/accounts[/ok|expiring|error][?sort=&q=] · #/reports · #/logs/<kind> · #/users · #/help
+ */
+const ACCOUNT_FILTERS = new Set(['ok', 'expiring', 'error']);
+const LOG_KINDS = new Set(['switches', 'reports', 'logins']);
+
+function parseRoute() {
+  const raw = location.hash.replace(/^#\/?/, '');
+  const [path, query = ''] = raw.split('?');
+  const [view = 'accounts', sub = ''] = path.split('/').filter(Boolean);
+  return { view, sub, params: new URLSearchParams(query) };
+}
+
+/** @param {string} view @param {string} [sub] @param {URLSearchParams} [params] */
+function routeHash(view, sub = '', params) {
+  const qs = params && String(params) ? `?${params}` : '';
+  return `#/${view}${sub ? `/${sub}` : ''}${qs}`;
+}
+
+/** 账号页的排序与搜索也进 URL（默认值不写）。 */
+function accountRouteParams() {
+  const params = new URLSearchParams();
+  const sort = els.sortBy?.value || 'reset';
+  if (sort !== 'reset') params.set('sort', sort);
+  const q = (els.searchInput?.value || '').trim();
+  if (q) params.set('q', q);
+  return params;
+}
+
+/**
+ * @param {string} view
+ * @param {string} [sub]
+ * @param {URLSearchParams} [params]
+ * @param {{ replace?: boolean }} [opts] replace=true 不新增历史（排序 / 搜索）
+ */
+function navigate(view, sub = '', params, { replace = false } = {}) {
+  const hash = routeHash(view, sub, params);
+  if (replace || hash === location.hash) {
+    history.replaceState(null, '', hash);
+    applyRoute();
+  } else {
+    location.hash = hash;
+  }
+}
+
+function applyRoute() {
+  if (!currentUser) return;
+  const { view, sub, params } = parseRoute();
+  if (view === 'logs') setLogKind(LOG_KINDS.has(sub) ? sub : 'switches');
+  if (view === 'accounts') {
+    accountStatusFilter = ACCOUNT_FILTERS.has(sub) ? sub : 'all';
+    if (els.sortBy) {
+      els.sortBy.value = params.get('sort') || 'reset';
+      if (!els.sortBy.value) els.sortBy.value = 'reset';
+    }
+    const q = params.get('q') || '';
+    if (els.searchInput && els.searchInput.value.trim() !== q) els.searchInput.value = q;
+  }
+  const shown = showView(view);
+  // 无权限或未知页面：地址纠正为实际显示的页面
+  if (shown !== view) history.replaceState(null, '', routeHash(shown));
+  else if (view === 'logs' && sub !== activeLogKind) {
+    history.replaceState(null, '', routeHash('logs', activeLogKind));
+  }
+  if (shown === 'accounts') renderList();
+}
+
+window.addEventListener('hashchange', applyRoute);
 
 function renderList() {
   renderSummary(summaryCache);
@@ -773,6 +874,7 @@ function showView(view) {
   if (next === 'logs') void loadLogs();
   if (next === 'reports' && isAdmin()) void loadReports();
   if (next === 'users' && isAdmin()) void loadUsers();
+  return next;
 }
 
 /** @param {'switches' | 'reports' | 'logins'} kind */
@@ -837,8 +939,8 @@ async function ensurePasswordPolicy() {
     const me = await api('/api/auth/me');
     currentUser = { username: me.username || '—', role: me.role || 'user' };
     applyRoleUi();
-    // 面板显隐只走 showView，避免 admin-only 把用户管理挂在账号列表下方
-    showView('accounts');
+    // 按地址恢复页面；面板显隐只走 showView，避免 admin-only 把用户管理挂在账号列表下方
+    applyRoute();
     forcePasswordRequired = Boolean(me.mustChangePassword);
     if (forcePasswordRequired || sessionStorage.getItem('ctu_force_password') === '1') {
       openForcePasswordDialog();
@@ -848,14 +950,47 @@ async function ensurePasswordPolicy() {
   }
 }
 
+/**
+ * 切换后新增用量：只有切换时快照这一个读数，所以拿同账号下一条切换日志的快照作终点，
+ * 没有更晚的记录就用账号当前用量；差值为负说明中间额度周期重置了。
+ * @param {any} log
+ * @param {any[]} logs 按时间倒序
+ * @param {number} index
+ */
+function switchUsageGainCell(log, logs, index) {
+  const start = log.usageTotalPercent;
+  if (log.status !== 'success' || start == null) return '<span class="muted">—</span>';
+  let end = null;
+  let endLabel = '至今';
+  for (let i = index - 1; i >= 0; i--) {
+    if (logs[i].memberId === log.memberId && logs[i].usageTotalPercent != null) {
+      end = Number(logs[i].usageTotalPercent);
+      endLabel = `至 ${formatDateTime(logs[i].createdAt)} 再次切入`;
+      break;
+    }
+  }
+  if (end == null) {
+    const m = membersCache.find((x) => x.id === log.memberId);
+    end =
+      m?.lastSnapshot?.meters?.totalPercentUsed ?? m?.lastSnapshot?.meters?.primaryPercent ?? m?.totalPercentUsed ?? null;
+  }
+  if (end == null) return '<span class="muted">—</span>';
+  const gain = Math.round((Number(end) - Number(start)) * 10) / 10;
+  const tip = `${formatUsageTotal(start)} → ${formatUsageTotal(end)}（${endLabel}）`;
+  if (gain < 0) return `<span class="usage-gain reset" title="${escapeHtml(tip)}">周期已重置</span>`;
+  // 单次切换涨 10% 以上算用得多，标橙
+  const level = gain === 0 ? 'zero' : gain >= 10 ? 'high' : 'up';
+  return `<span class="usage-gain ${level}" title="${escapeHtml(tip)}">+${gain.toFixed(1)}%</span>`;
+}
+
 function renderSwitchLogRows(logs) {
   if (!els.switchLogBody) return;
   if (!logs.length) {
-    els.switchLogBody.innerHTML = `<tr><td colspan="8" class="muted">暂无切换记录</td></tr>`;
+    els.switchLogBody.innerHTML = `<tr><td colspan="9" class="muted">暂无切换记录</td></tr>`;
     return;
   }
   els.switchLogBody.innerHTML = logs
-    .map((log) => {
+    .map((log, index) => {
       const account =
         log.memberDisplayName || log.memberEmail || log.memberUserId || log.memberId || '—';
       const when = formatDateTime(log.createdAt) || log.createdAt || '—';
@@ -875,6 +1010,7 @@ function renderSwitchLogRows(logs) {
               }
             </td>
             <td class="rank-metric">${escapeHtml(formatUsageTotal(log.usageTotalPercent))}</td>
+            <td class="rank-metric">${switchUsageGainCell(log, logs, index)}</td>
             <td>${escapeHtml(log.hostname || '—')}</td>
             <td>${escapeHtml(log.clientIp || '—')}</td>
             <td><span class="badge ${switchStatusClass(log.status)}">${escapeHtml(
@@ -895,7 +1031,11 @@ async function loadLogs() {
     if (isAdmin()) {
       tasks.push(api('/api/report-logs?limit=200'), api('/api/login-logs?limit=100'));
     }
+    // 「切换后新增」最新一段要用账号当前用量，直接打开日志页时账号列表可能还没加载
+    const membersTask = membersCache.length ? null : api('/api/members').catch(() => null);
     const [switchData, reportData, loginData] = await Promise.all(tasks);
+    const mem = await membersTask;
+    if (mem?.members) membersCache = mem.members;
     switchLogsCache = switchData.logs || [];
     renderSwitchLogRows(switchLogsCache);
 
@@ -952,14 +1092,12 @@ async function loadLogs() {
 async function loadReports() {
   if (!isAdmin()) return;
   try {
-    if (!membersCache.length) {
-      const mem = await api('/api/members');
-      membersCache = mem.members || [];
-    }
-    const [data, switchData] = await Promise.all([
+    const [mem, data, switchData] = await Promise.all([
+      api('/api/members'),
       api('/api/reports/switches?limit=500'),
       api('/api/switch-logs?limit=500'),
     ]);
+    membersCache = mem.members || [];
     const operators = data.operators || [];
     const recent = switchData.logs || data.recent || [];
 
@@ -1005,19 +1143,131 @@ async function loadReports() {
       (v) => String(Math.round(v)),
     );
 
-    // 各账号当前用量
-    const accountUsage = [...membersCache]
-      .map((m) => {
-        const used =
-          Number(m.lastSnapshot?.meters?.totalPercentUsed) ||
-          Number(m.totalPercentUsed) ||
-          0;
-        const name = (m.displayName || m.email || m.id || '—').trim();
-        return { label: name, value: used };
-      })
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 12);
-    renderHorizontalBars(els.chartAccountUsage, accountUsage, '#8aa2ff', (v) => `${v.toFixed(1)}%`);
+    const nameOf = (m) => (m.displayName || m.email || m.id || '—').trim();
+    const planBadgeOf = (m) => {
+      const raw = m.lastSnapshot?.plan?.planName || m.lastSnapshot?.plan?.membershipType || 'unknown';
+      return { text: formatPlanLabel(raw), className: planBadgeClass(raw) };
+    };
+    const tokensFmt = (v) => (v > 0 ? formatTokens(v) : '0');
+
+    // 团队每日 tokens / 花费 / 请求：各账号 spend.daily（近 30 日）按日求和
+    /** @type {Map<string, { tokens: number, dollars: number, requests: number }>} */
+    const teamDaily = new Map();
+    for (const m of membersCache) {
+      for (const d of m.lastSnapshot?.spend?.daily || []) {
+        if (!d?.date) continue;
+        const cur = teamDaily.get(d.date) || { tokens: 0, dollars: 0, requests: 0 };
+        cur.tokens += Number(d.tokens) || 0;
+        cur.dollars += Number(d.dollars) || 0;
+        cur.requests += Number(d.requests) || 0;
+        teamDaily.set(d.date, cur);
+      }
+    }
+    const dailyRows = [...teamDaily.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-30);
+    renderBarChart(
+      els.chartTeamTokens,
+      dailyRows.map(([date, v]) => ({ label: date, value: v.tokens })),
+      '#7c9cff',
+      tokensFmt,
+    );
+    renderBarChart(
+      els.chartTeamSpend,
+      dailyRows.map(([date, v]) => ({ label: date, value: Math.round(v.dollars * 100) / 100 })),
+      '#f0b35a',
+      (v) => money(v, v >= 100 ? 0 : 2),
+    );
+    renderBarChart(
+      els.chartTeamRequests,
+      dailyRows.map(([date, v]) => ({ label: date, value: v.requests })),
+      '#5fd18b',
+      (v) => String(Math.round(v)),
+    );
+
+    // 各账号剩余用量：多的在前，便于挑号
+    const remainingRows = membersCache
+      .map((m) => ({ m, left: remainingPercent(m) }))
+      .filter((r) => r.left != null)
+      .sort((a, b) => b.left - a.left)
+      .map(({ m, left }) => ({
+        label: nameOf(m),
+        badge: planBadgeOf(m),
+        value: left,
+        color: left < 20 ? '#f26d6d' : left < 40 ? '#f0b35a' : '#5fd18b',
+      }));
+    renderHorizontalBars(els.chartAccountUsage, remainingRows, '#5fd18b', (v) => `${v.toFixed(1)}%`, {
+      max: 100,
+    });
+
+    // 预计期末用量：按工作日节奏外推
+    const paceRows = membersCache
+      .map((m) => ({ m, pace: computeUsagePace(m) }))
+      .filter((r) => r.pace)
+      .sort((a, b) => b.pace.projectedEndPercent - a.pace.projectedEndPercent)
+      .map(({ m, pace }) => ({
+        label: nameOf(m),
+        badge: planBadgeOf(m),
+        value: pace.projectedEndPercent,
+        color: pace.projectedEndPercent >= 100 ? '#f26d6d' : pace.projectedEndPercent >= 90 ? '#f0b35a' : '#8aa2ff',
+        tip: `${nameOf(m)} · 已用 ${pace.usedPercent}% · 日均 ${pace.dailyPercent}%/工作日 · 预计期末 ${pace.projectedEndPercent}%`,
+      }));
+    const paceMax = Math.max(100, ...paceRows.map((r) => r.value));
+    renderHorizontalBars(els.chartAccountPace, paceRows, '#8aa2ff', (v) => `${v.toFixed(1)}%`, {
+      max: paceMax,
+    });
+
+    // 各账号近 30 日 tokens
+    const accountTokens = membersCache
+      .map((m) => ({
+        label: nameOf(m),
+        badge: planBadgeOf(m),
+        value: (m.lastSnapshot?.spend?.daily || []).reduce((s, d) => s + (Number(d.tokens) || 0), 0),
+      }))
+      .filter((r) => r.value > 0)
+      .sort((a, b) => b.value - a.value);
+    renderHorizontalBars(els.chartAccountTokens, accountTokens, '#7c9cff', tokensFmt);
+
+    // 今日模型分布：各账号 todayModels 合并
+    /** @type {Map<string, number>} */
+    const modelTokens = new Map();
+    for (const m of membersCache) {
+      for (const row of m.lastSnapshot?.spend?.todayModels || []) {
+        if (!row?.model) continue;
+        modelTokens.set(row.model, (modelTokens.get(row.model) || 0) + (Number(row.tokens) || 0));
+      }
+    }
+    const modelTotal = [...modelTokens.values()].reduce((s, v) => s + v, 0);
+    const modelRows = [...modelTokens.entries()]
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([model, v]) => ({
+        label: model,
+        value: v,
+        tip: `${model} · ${formatTokens(v)} · ${modelTotal ? ((v / modelTotal) * 100).toFixed(1) : 0}%`,
+      }));
+    renderHorizontalBars(els.chartTodayModels, modelRows, '#c38bff', (v) =>
+      `${formatTokens(v)} · ${modelTotal ? ((v / modelTotal) * 100).toFixed(1) : 0}%`,
+    );
+
+    // 顶部指标
+    const sum30 = dailyRows.reduce(
+      (s, [, v]) => ({ tokens: s.tokens + v.tokens, dollars: s.dollars + v.dollars, requests: s.requests + v.requests }),
+      { tokens: 0, dollars: 0, requests: 0 },
+    );
+    const avgLeft = remainingRows.length
+      ? remainingRows.reduce((s, r) => s + r.value, 0) / remainingRows.length
+      : null;
+    const overCount = paceRows.filter((r) => r.value >= 100).length;
+    const lowCount = remainingRows.filter((r) => r.value < 20).length;
+    const switch14 = [...switchByDay.values()].reduce((s, v) => s + v, 0);
+    if (els.reportKpis) {
+      els.reportKpis.innerHTML = `
+        <article class="stat"><p class="label">近 30 日 Tokens</p><p class="value">${escapeHtml(formatTokens(sum30.tokens))}</p><p class="note">日均 ${escapeHtml(formatTokens(dailyRows.length ? sum30.tokens / dailyRows.length : 0))}</p></article>
+        <article class="stat"><p class="label">近 30 日花费</p><p class="value">${escapeHtml(money(sum30.dollars, 0))}</p><p class="note">请求 ${sum30.requests} 次</p></article>
+        <article class="stat"><p class="label">平均剩余用量</p><p class="value">${avgLeft == null ? '—' : `${avgLeft.toFixed(1)}%`}</p><p class="note">剩余 &lt;20% 的账号 ${lowCount} 个</p></article>
+        <article class="stat"><p class="label">预计期末超额</p><p class="value ${overCount ? 'danger' : ''}">${overCount}</p><p class="note">按工作日节奏推算</p></article>
+        <article class="stat"><p class="label">近 14 日切换</p><p class="value">${switch14}</p><p class="note">日均 ${(switch14 / 14).toFixed(1)} 次</p></article>
+      `;
+    }
 
     // 按人切换量
     const byUser = operators
@@ -1033,17 +1283,42 @@ async function loadReports() {
   }
 }
 
-function pluginCell(plugin) {
-  if (!plugin?.version) return '<span class="muted">未安装</span>';
-  const ver = [plugin.version, plugin.build].filter(Boolean).join(' · ');
-  const when = formatDateTime(plugin.reportedAt || plugin.installedAt);
-  const how = plugin.state === 'reported' ? '已上报' : '已安装';
+/**
+ * 用户表插件列：在线状态 + 版本（落后最新版标「待升级」）+ 按上报新鲜度着色的时间标签，
+ * 管理员扫一眼就能挑出没升级、长期没上报的人。
+ * @param {string | null | undefined} latestVersion 服务端当前插件版本，未知时不做新旧比较
+ */
+function pluginCell(plugin, latestVersion) {
+  if (!plugin?.version) return '<span class="plugin-none">未安装</span>';
+  const at = plugin.reportedAt || plugin.installedAt;
+  const when = formatDateTime(at);
+  const ago = formatAgo(at);
+  const how = plugin.state === 'reported' ? '上报' : '安装';
   // online 由服务端按最近上报窗口计算；从未上报也算离线
-  const online = plugin.online === true;
-  const presence = online
-    ? '<span class="plugin-presence online">在线</span>'
-    : '<span class="plugin-presence offline">离线</span>';
-  return `${presence} ${escapeHtml(ver)}<div class="muted">${escapeHtml(how)}${when ? ` ${escapeHtml(when)}` : ''}</div>`;
+  const presence =
+    plugin.online === true
+      ? '<span class="plugin-presence online">在线</span>'
+      : '<span class="plugin-presence offline">离线</span>';
+  const nums = (v) => String(v).split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const [a, b] = [nums(plugin.version), nums(latestVersion || '')];
+  const outdated =
+    Boolean(latestVersion) &&
+    (() => {
+      for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0);
+      }
+      return false;
+    })();
+  const ver = outdated
+    ? `<span class="plugin-ver outdated" title="最新 ${escapeHtml(latestVersion)}">v${escapeHtml(plugin.version)} · 待升级</span>`
+    : `<span class="plugin-ver${latestVersion ? ' latest' : ''}">v${escapeHtml(plugin.version)}</span>`;
+  const ageSec = at ? (Date.now() - new Date(at).getTime()) / 1000 : Infinity;
+  // 新鲜度分档：10 分钟内 / 1 小时内 / 1 天内 / 更久
+  const fresh = ageSec < 600 ? 'fresh' : ageSec < 3600 ? 'recent' : ageSec < 86400 ? 'stale' : 'dead';
+  const time = ago
+    ? `<span class="plugin-age ${fresh}" title="${escapeHtml(`${how}于 ${when}`)}">${escapeHtml(`${how} ${ago}`)}</span>`
+    : '';
+  return `<div class="plugin-cell"><div class="plugin-line">${presence}${ver}</div>${time}</div>`;
 }
 
 async function loadUsers() {
@@ -1051,6 +1326,9 @@ async function loadUsers() {
   try {
     const data = await api('/api/users');
     usersCache = data.users || [];
+    // 用户表可能先于安装状态检查渲染，这里单独取一次最新版本号
+    const latestVersion =
+      extensionMeta?.version || (await api('/api/extension/meta').catch(() => null))?.version || null;
     els.userTableBody.innerHTML = usersCache
       .map((u) => {
         const created = formatDateTime(u.createdAt) || u.createdAt || '—';
@@ -1099,7 +1377,7 @@ async function loadUsers() {
               u.disabled ? 'danger' : u.pending || u.mustChangePassword ? 'warn' : 'ok'
             }">${escapeHtml(status)}</span></td>
             <td>${escapeHtml(activeAccounts || '—')}</td>
-            <td>${pluginCell(u.plugin)}</td>
+            <td>${pluginCell(u.plugin, latestVersion)}</td>
             <td class="cell-time">${escapeHtml(created)}</td>
             <td class="user-actions">${actions}</td>
           </tr>
@@ -1470,7 +1748,8 @@ async function importLocalCursor(displayName) {
 
 document.querySelectorAll('.nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
-    showView(btn.dataset.tab || 'accounts');
+    const tab = btn.dataset.tab || 'accounts';
+    navigate(tab, tab === 'logs' ? activeLogKind : '');
   });
 });
 
@@ -1482,7 +1761,7 @@ els.statusFilter?.addEventListener('click', (event) => {
   );
 });
 
-els.btnHelp.addEventListener('click', () => showView('help'));
+els.btnHelp.addEventListener('click', () => navigate('help'));
 els.btnAdd?.addEventListener('click', () => openMemberDialog());
 els.btnEmptyAdd?.addEventListener('click', () => openMemberDialog());
 els.btnRefreshLogs?.addEventListener('click', () => loadLogs());
@@ -1490,9 +1769,7 @@ els.btnRefreshReports?.addEventListener('click', () => loadReports());
 document.querySelector('.logs-nav')?.addEventListener('click', (event) => {
   const btn = event.target.closest('button[data-log]');
   if (!btn) return;
-  const kind = /** @type {'switches' | 'reports' | 'logins'} */ (btn.dataset.log || 'switches');
-  setLogKind(kind);
-  void loadLogs();
+  navigate('logs', btn.dataset.log || 'switches');
 });
 els.btnAddUser?.addEventListener('click', () => openUserDialog());
 els.btnInstallExtension?.addEventListener('click', () => oneClickInstallExtension());
@@ -1640,8 +1917,19 @@ els.todayRankBody?.addEventListener('click', (e) => {
   els.todayRankDialog?.close();
   location.href = `/detail.html?id=${encodeURIComponent(row.dataset.id)}`;
 });
-els.searchInput.addEventListener('input', renderList);
-els.sortBy?.addEventListener('change', renderList);
+// 图表每次刷新会重写 innerHTML，挂在容器上做委托才能一直生效
+for (const box of [els.chartTeamTokens, els.chartTeamSpend, els.chartTeamRequests]) {
+  box?.addEventListener('click', (e) => {
+    const date = e.target.closest('.chart-hit')?.dataset.label;
+    if (date) openDayRank(date);
+  });
+}
+const replaceAccountRoute = () =>
+  navigate('accounts', accountStatusFilter === 'all' ? '' : accountStatusFilter, accountRouteParams(), {
+    replace: true,
+  });
+els.searchInput.addEventListener('input', replaceAccountRoute);
+els.sortBy?.addEventListener('change', replaceAccountRoute);
 
 els.privacyMode?.addEventListener('change', () => {
   settings = saveSettings({ privacyMode: Boolean(els.privacyMode.checked) });

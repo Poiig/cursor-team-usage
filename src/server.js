@@ -657,6 +657,14 @@ async function assertAdmin(req) {
   }
 }
 
+/** 未登录跳登录页时带上原地址，登录后回到原页面（哈希由浏览器自动保留）。 */
+function loginRedirectUrl(url) {
+  const next = `${url.pathname}${url.search}`;
+  return next === '/' || next === '/index.html'
+    ? '/login.html'
+    : `/login.html?next=${encodeURIComponent(next)}`;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${HOST}:${PORT}`);
@@ -670,7 +678,7 @@ const server = http.createServer(async (req, res) => {
         if (pathname.startsWith('/api/')) {
           return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
         }
-        res.writeHead(302, { Location: '/login.html' });
+        res.writeHead(302, { Location: loginRedirectUrl(url) });
         res.end();
         return;
       }
@@ -679,7 +687,7 @@ const server = http.createServer(async (req, res) => {
         if (pathname.startsWith('/api/')) {
           return sendJson(res, 401, { error: '未登录', code: 'UNAUTHORIZED' });
         }
-        res.writeHead(302, { Location: '/login.html' });
+        res.writeHead(302, { Location: loginRedirectUrl(url) });
         res.end();
         return;
       }
@@ -1489,20 +1497,28 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' || method === 'HEAD') {
       if (pathname === '/' || pathname === '/index.html') {
         if (!readSessionFromRequest(req)) {
-          res.writeHead(302, { Location: '/login.html' });
+          res.writeHead(302, { Location: loginRedirectUrl(url) });
           res.end();
           return;
         }
       }
       const rel = pathname === '/' ? '/index.html' : pathname;
       if (!PUBLIC_STATIC.has(rel) && requiresConsoleAuth(rel, method) && !readSessionFromRequest(req)) {
-        res.writeHead(302, { Location: '/login.html' });
+        res.writeHead(302, { Location: loginRedirectUrl(url) });
         res.end();
         return;
       }
       const file = await serveStatic(rel);
       if (file) {
-        res.writeHead(200, { 'Content-Type': file.type });
+        // 前端无构建版本号：每次协商缓存，发版后浏览器立即拿到新 JS/CSS
+        const etag = bufferEtag(file.data);
+        const headers = { 'Content-Type': file.type, 'Cache-Control': 'no-cache', ETag: etag };
+        if (req.headers['if-none-match'] === etag) {
+          res.writeHead(304, headers);
+          res.end();
+          return;
+        }
+        res.writeHead(200, headers);
         res.end(method === 'HEAD' ? undefined : file.data);
         return;
       }

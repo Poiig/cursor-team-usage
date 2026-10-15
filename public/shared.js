@@ -34,7 +34,8 @@ export async function api(path, options = {}) {
     ...options,
   });
   if (res.status === 401 && !path.startsWith('/api/auth/login')) {
-    location.href = '/login.html';
+    const next = `${location.pathname}${location.search}`;
+    location.href = `/login.html${next === '/' ? '' : `?next=${encodeURIComponent(next)}`}${location.hash}`;
     throw new Error('未登录');
   }
   const data = await res.json().catch(() => ({}));
@@ -340,6 +341,25 @@ export function formatDateTime(iso) {
 }
 
 /**
+ * 距今多久：只取最大的两个单位（如「21 小时 11 分钟前」「3 分钟 5 秒前」），为 0 的单位省略，便于扫读。
+ * @param {string | null | undefined} iso
+ */
+export function formatAgo(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  let s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  const parts = [];
+  for (const [unit, size] of [['天', 86400], ['小时', 3600], ['分钟', 60]]) {
+    const n = Math.floor(s / size);
+    if (n) parts.push(`${n} ${unit}`);
+    s %= size;
+  }
+  if (s || !parts.length) parts.push(`${s} 秒`);
+  return `${parts.slice(0, 2).join(' ')}前`;
+}
+
+/**
  * 套餐文案 → badge 修饰类，按档位配色一眼区分 free / pro / pro+。
  * @param {string | null | undefined} plan
  * @returns {'plan-free' | 'plan-pro' | 'plan-pro-plus' | 'plan-ultra' | 'plan-business' | 'plan-unknown'}
@@ -399,6 +419,14 @@ export function accountIdentity(member, privacyMode) {
   if (email) return { title: email, subtitle: '' };
   return { title: member.userId || member.id || '账号', subtitle: '' };
 }
+
+// 「← 返回」：从本站页面进来时走浏览器后退，回到上一页原来的筛选与页签
+globalThis.document?.addEventListener('click', (event) => {
+  const a = event.target instanceof Element ? event.target.closest('a[data-back]') : null;
+  if (!a || !document.referrer.startsWith(location.origin) || history.length < 2) return;
+  event.preventDefault();
+  history.back();
+});
 
 /**
  * @param {HTMLElement | null} el
@@ -460,8 +488,8 @@ export function renderBarChart(el, points, color, formatValue = (v) => String(v)
     el.innerHTML = `<div class="chart-empty">暂无数据</div>`;
     return;
   }
-  const w = 640;
   const h = 180;
+  const w = chartViewWidth(el, h);
   const padL = 44;
   const padR = 12;
   const padT = 14;
@@ -480,27 +508,54 @@ export function renderBarChart(el, points, color, formatValue = (v) => String(v)
       <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(fmt(val))}</text>`;
     })
     .join('');
+  const showValues = bw >= 30;
   const bars = points
     .map((p, i) => {
       const value = Number(p.value) || 0;
       const bh = Math.max(1, (value / max) * plotH);
       const x = padL + i * bw + bw * 0.15;
       const y = padT + plotH - bh;
-      return `<rect class="chart-bar" x="${x}" y="${y}" width="${bw * 0.7}" height="${bh}" fill="${color}" rx="2" data-tip="${escapeHtml(`${p.label} · ${fmt(value)}`)}"></rect>`;
+      const valueText =
+        showValues && value > 0
+          ? `<text x="${x + bw * 0.35}" y="${y - 3}" text-anchor="middle" fill="currentColor" font-size="9" opacity="0.8">${escapeHtml(fmt(value))}</text>`
+          : '';
+      return `<rect class="chart-bar" x="${x}" y="${y}" width="${bw * 0.7}" height="${bh}" fill="${color}" rx="2"></rect>${valueText}`;
     })
     .join('');
-  const labels = points
-    .map((p, i) => {
-      if (points.length > 14 && i % Math.ceil(points.length / 7) !== 0 && i !== points.length - 1) {
-        return '';
-      }
-      const x = padL + i * bw + bw / 2;
-      const label = String(p.label || '').length > 10 ? String(p.label).slice(-5) : String(p.label || '');
-      return `<text x="${x}" y="${h - 8}" text-anchor="middle" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(label)}</text>`;
-    })
-    .join('');
-  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${yTicks}${bars}${labels}</svg><div class="chart-tooltip" hidden></div>`;
+  const hits = chartHitColumns(points, (i) => padL + i * bw, bw, padT, plotH, fmt);
+  const labels = chartXLabels(points, (i) => padL + i * bw + bw / 2, h, plotW);
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${yTicks}${bars}${labels}${hits}</svg><div class="chart-tooltip" hidden></div>`;
   bindChartTips(el);
+}
+
+/** viewBox 宽按容器实际宽高比算，宽卡片才能铺满而不是居中留白。 */
+function chartViewWidth(el, h) {
+  const { width, height } = el.getBoundingClientRect();
+  return width > 0 && height > 0 ? Math.max(320, Math.round((width / height) * h)) : 640;
+}
+
+/** X 轴日期只显示 MM-DD，并按点数抽稀，避免文字重叠。 */
+function chartXLabels(points, xAt, h, plotW) {
+  const step = Math.max(1, Math.ceil(points.length / Math.max(2, Math.floor(plotW / 48))));
+  return points
+    .map((p, i) => {
+      if (i % step !== 0 && i !== points.length - 1) return '';
+      if (i !== points.length - 1 && points.length - 1 - i < step / 2) return '';
+      const raw = String(p.label || '');
+      const label = /^\d{4}-\d{2}-\d{2}/.test(raw) ? raw.slice(5, 10) : raw;
+      return `<text x="${xAt(i)}" y="${h - 8}" text-anchor="middle" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(label)}</text>`;
+    })
+    .join('');
+}
+
+/** 每个点一整列透明热区：悬停该日任意高度都能看到数值（柱很矮 / 点很小时也可用）。 */
+function chartHitColumns(points, leftAt, colW, padT, plotH, fmt) {
+  return points
+    .map(
+      (p, i) =>
+        `<rect class="chart-hit" x="${leftAt(i)}" y="${padT}" width="${colW}" height="${plotH}" fill="transparent" data-label="${escapeHtml(p.label)}" data-tip="${escapeHtml(`${p.label} · ${fmt(p.value)}`)}"></rect>`,
+    )
+    .join('');
 }
 
 /**
@@ -516,10 +571,10 @@ export function renderLineChart(el, points, color, formatValue = (v) => String(v
     el.innerHTML = `<div class="chart-empty">暂无数据</div>`;
     return;
   }
-  const w = 640;
   const h = 180;
+  const w = chartViewWidth(el, h);
   const padL = 44;
-  const padR = 12;
+  const padR = 28;
   const padT = 14;
   const padB = 28;
   const max = Math.max(...points.map((p) => Number(p.value) || 0), 1);
@@ -533,12 +588,26 @@ export function renderLineChart(el, points, color, formatValue = (v) => String(v
     return { x, y, p };
   });
   const poly = coords.map((c) => `${c.x},${c.y}`).join(' ');
+  const showValues = points.length === 1 || step >= 30;
   const dots = coords
     .map(
       (c) =>
-        `<circle class="chart-dot" cx="${c.x}" cy="${c.y}" r="3.5" fill="${color}" data-tip="${escapeHtml(`${c.p.label} · ${fmt(c.p.value)}`)}"></circle>`,
+        `<circle class="chart-dot" cx="${c.x}" cy="${c.y}" r="3.5" fill="${color}"></circle>${
+          showValues
+            ? `<text x="${c.x}" y="${c.y - 7}" text-anchor="middle" fill="currentColor" font-size="9" opacity="0.8">${escapeHtml(fmt(c.p.value))}</text>`
+            : ''
+        }`,
     )
     .join('');
+  const colW = points.length > 1 ? step : plotW;
+  const hits = chartHitColumns(
+    points,
+    (i) => (points.length > 1 ? padL + i * step - step / 2 : padL),
+    colW,
+    padT,
+    plotH,
+    fmt,
+  );
   const yTicks = [0, 0.5, 1]
     .map((t) => {
       const val = max * t;
@@ -548,42 +617,38 @@ export function renderLineChart(el, points, color, formatValue = (v) => String(v
       <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(fmt(val))}</text>`;
     })
     .join('');
-  const labels = coords
-    .map((c, i) => {
-      if (points.length > 14 && i % Math.ceil(points.length / 7) !== 0 && i !== points.length - 1) {
-        return '';
-      }
-      const label =
-        String(c.p.label || '').length > 10 ? String(c.p.label).slice(-5) : String(c.p.label || '');
-      return `<text x="${c.x}" y="${h - 8}" text-anchor="middle" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(label)}</text>`;
-    })
-    .join('');
-  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${yTicks}<polyline fill="none" stroke="${color}" stroke-width="2.2" points="${poly}" />${dots}${labels}</svg><div class="chart-tooltip" hidden></div>`;
+  const labels = chartXLabels(points, (i) => coords[i].x, h, plotW);
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${yTicks}<polyline fill="none" stroke="${color}" stroke-width="2.2" points="${poly}" />${dots}${labels}${hits}</svg><div class="chart-tooltip" hidden></div>`;
   bindChartTips(el);
 }
 
 /**
  * 横向条形图。
  * @param {HTMLElement | null} el
- * @param {Array<{ label: string, value: number }>} items
+ * @param {Array<{ label: string, value: number, color?: string, tip?: string, badge?: { text: string, className: string } }>} items
  * @param {string} color
  * @param {(v: number) => string} [formatValue]
+ * @param {{ max?: number }} [opts] 百分比类传 max=100，条长才对应真实比例
  */
-export function renderHorizontalBars(el, items, color, formatValue = (v) => String(v)) {
+export function renderHorizontalBars(el, items, color, formatValue = (v) => String(v), opts = {}) {
   if (!el) return;
   if (!items.length) {
     el.innerHTML = `<div class="chart-empty">暂无数据</div>`;
     return;
   }
-  const max = Math.max(...items.map((i) => Number(i.value) || 0), 1);
+  const max = opts.max || Math.max(...items.map((i) => Number(i.value) || 0), 1);
   el.innerHTML = `<div class="h-bars">${items
-    .slice(0, 12)
     .map((item) => {
       const value = Number(item.value) || 0;
-      const pct = Math.max(2, (value / max) * 100);
-      return `<div class="h-bar-row" title="${escapeHtml(`${item.label} · ${formatValue(value)}`)}">
-        <span class="h-bar-label">${escapeHtml(item.label)}</span>
-        <span class="h-bar-track"><span class="h-bar-fill" style="width:${pct}%;background:${color}"></span></span>
+      const pct = Math.min(100, Math.max(2, (value / max) * 100));
+      const tip = item.tip || `${item.label} · ${formatValue(value)}`;
+      return `<div class="h-bar-row" title="${escapeHtml(tip)}">
+        <span class="h-bar-label"><span class="h-bar-name">${escapeHtml(item.label)}</span>${
+          item.badge
+            ? `<span class="badge plan ${escapeHtml(item.badge.className)}">${escapeHtml(item.badge.text)}</span>`
+            : ''
+        }</span>
+        <span class="h-bar-track"><span class="h-bar-fill" style="width:${pct}%;background:${item.color || color}"></span></span>
         <span class="h-bar-value">${escapeHtml(formatValue(value))}</span>
       </div>`;
     })
