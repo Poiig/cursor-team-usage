@@ -18,6 +18,7 @@ import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
 import { fetchMemberSnapshot } from './cursor-api.js';
 import {
   ensureMemberUsageEventsSynced,
+  loadPreviousCycle,
   persistSnapshotUsageEvents,
 } from './usage-events-sync.js';
 import { probeLocalCursorSession, resolveLocalCursorSession } from './local-session.js';
@@ -902,13 +903,22 @@ const server = http.createServer(async (req, res) => {
       const users = await listPublicUsers();
       const presence = await listPresenceByUsername();
       const plugins = await listPluginClientViews();
+      // 席位里的账号名是上报时快照，展示用号池里的最新别名与邮箱
+      const memberById = new Map((await listMembers()).map((m) => [m.id, m]));
       return sendJson(
         res,
         200,
         {
           users: users.map((user) => ({
             ...user,
-            activeAccounts: presence[user.username] || [],
+            activeAccounts: (presence[user.username] || []).map((row) => {
+              const member = memberById.get(row.memberId);
+              return {
+                ...row,
+                memberDisplayName: member?.displayName || row.memberDisplayName,
+                memberEmail: member?.email || null,
+              };
+            }),
             plugin: plugins[user.username] || null,
           })),
         },
@@ -920,6 +930,8 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && peopleMatch) {
       const personUsername = decodeURIComponent(peopleMatch[1]);
       const detail = await getPersonDetail(personUsername);
+      // 上报记录仅管理员可见；切换记录全员可见
+      if (!(await isAdminUsername(req.consoleUser))) detail.reports = null;
       return sendJson(res, 200, detail);
     }
 
@@ -1371,7 +1383,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const memberMatch = pathname.match(
-      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/switch|\/presence)?$/,
+      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/previous-cycle|\/switch|\/presence)?$/,
     );
     if (memberMatch) {
       const id = decodeURIComponent(memberMatch[1]);
@@ -1420,6 +1432,12 @@ const server = http.createServer(async (req, res) => {
         }
         const data = await listUsageEvents(id, { days, model, page, pageSize });
         return sendJson(res, 200, { ...data, fromCache: true });
+      }
+
+      if (method === 'GET' && suffix === '/previous-cycle') {
+        const member = await getMemberInternal(id);
+        if (!member) throw new Error('成员不存在');
+        return sendJson(res, 200, await loadPreviousCycle(member));
       }
 
       if (method === 'POST' && suffix === '/refresh') {

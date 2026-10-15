@@ -12,7 +12,7 @@ import {
   downloadText,
   escapeHtml,
   fieldForProgressLabel,
-  formatDateTimeDot,
+  formatDateTime,
   formatDeltaVsYesterday,
   formatPlanLabel,
   formatSpendPart,
@@ -360,10 +360,10 @@ function chipClassForTokenExp(iso) {
 function metaChips(member) {
   const remain = remainingPercent(member);
   const resetIso = member.lastSnapshot?.window?.resetIso;
-  const resetText = formatDateTimeDot(resetIso);
+  const resetText = formatDateTime(resetIso);
   const resetDays = daysUntil(resetIso);
-  const tokenExpText = formatDateTimeDot(member.tokenExpiresAt);
-  const syncedText = formatDateTimeDot(member.lastSyncedAt);
+  const tokenExpText = formatDateTime(member.tokenExpiresAt);
+  const syncedText = formatDateTime(member.lastSyncedAt);
   const remainChip =
     remain == null
       ? ''
@@ -858,7 +858,7 @@ function renderSwitchLogRows(logs) {
     .map((log) => {
       const account =
         log.memberDisplayName || log.memberEmail || log.memberUserId || log.memberId || '—';
-      const when = formatDateTimeDot(log.createdAt) || log.createdAt || '—';
+      const when = formatDateTime(log.createdAt) || log.createdAt || '—';
       return `
           <tr>
             <td>${escapeHtml(when)}</td>
@@ -906,7 +906,7 @@ async function loadLogs() {
             .map(
               (log) => `
           <tr>
-            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
+            <td>${escapeHtml(formatDateTime(log.createdAt) || log.createdAt || '—')}</td>
             <td>${escapeHtml(log.operatorUsername || log.hostRemark || '旧版插件')}</td>
             <td>${escapeHtml(log.memberDisplayName || log.memberEmail || '—')}</td>
             <td>${escapeHtml(
@@ -931,7 +931,7 @@ async function loadLogs() {
             .map(
               (log) => `
           <tr>
-            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
+            <td>${escapeHtml(formatDateTime(log.createdAt) || log.createdAt || '—')}</td>
             <td>${escapeHtml(log.username || '—')}</td>
             <td><span class="badge ${log.ok ? 'ok' : 'danger'}">${
               log.ok ? '成功' : '失败'
@@ -1036,7 +1036,7 @@ async function loadReports() {
 function pluginCell(plugin) {
   if (!plugin?.version) return '<span class="muted">未安装</span>';
   const ver = [plugin.version, plugin.build].filter(Boolean).join(' · ');
-  const when = formatDateTimeDot(plugin.reportedAt || plugin.installedAt);
+  const when = formatDateTime(plugin.reportedAt || plugin.installedAt);
   const how = plugin.state === 'reported' ? '已上报' : '已安装';
   // online 由服务端按最近上报窗口计算；从未上报也算离线
   const online = plugin.online === true;
@@ -1053,7 +1053,7 @@ async function loadUsers() {
     usersCache = data.users || [];
     els.userTableBody.innerHTML = usersCache
       .map((u) => {
-        const created = formatDateTimeDot(u.createdAt) || u.createdAt || '—';
+        const created = formatDateTime(u.createdAt) || u.createdAt || '—';
         const roleLabel = u.role === 'admin' ? '管理员' : '普通用户';
         const status = u.pending
           ? '待审批'
@@ -1064,12 +1064,13 @@ async function loadUsers() {
               : '正常';
         const canDelete = u.username !== 'admin';
         const activeAccounts = (u.activeAccounts || [])
-          .map(
-            (row) =>
-              `${row.memberDisplayName || row.memberId || '未知账号'} · ${
-                row.hostname || '未知主机'
-              }`,
-          )
+          .map((row) => {
+            const idn = accountIdentity(
+              { displayName: row.memberDisplayName, email: row.memberEmail, id: row.memberId },
+              settings.privacyMode,
+            );
+            return [idn.title, idn.subtitle].filter(Boolean).join(' · ') || '未知账号';
+          })
           .join('；');
         const actions = u.pending
           ? `<button type="button" class="btn sm primary" data-user-action="approve">同意</button>
@@ -1094,12 +1095,12 @@ async function loadUsers() {
                 : '—'
             }</td>
             <td>${escapeHtml(roleLabel)}</td>
-            <td>${
-              u.pending ? `<span class="badge warn">${escapeHtml(status)}</span>` : escapeHtml(status)
-            }</td>
+            <td><span class="badge ${
+              u.disabled ? 'danger' : u.pending || u.mustChangePassword ? 'warn' : 'ok'
+            }">${escapeHtml(status)}</span></td>
             <td>${escapeHtml(activeAccounts || '—')}</td>
             <td>${pluginCell(u.plugin)}</td>
-            <td>${escapeHtml(created)}</td>
+            <td class="cell-time">${escapeHtml(created)}</td>
             <td class="user-actions">${actions}</td>
           </tr>
         `;
@@ -1315,7 +1316,7 @@ async function restoreLastLocalAccount() {
       return;
     }
     const label = info.email || info.userId || '上次账号';
-    const when = info.savedAt ? new Date(info.savedAt).toLocaleString('zh-CN') : '未知时间';
+    const when = info.savedAt ? formatDateTime(info.savedAt) : '未知时间';
     if (!confirm(`将从本机备份区恢复「${label}」（备份于 ${when}）并重启 Cursor。\n请在 Cursor 弹窗中确认。继续？`)) {
       return;
     }
@@ -1645,6 +1646,7 @@ els.sortBy?.addEventListener('change', renderList);
 els.privacyMode?.addEventListener('change', () => {
   settings = saveSettings({ privacyMode: Boolean(els.privacyMode.checked) });
   renderList();
+  void loadUsers();
 });
 
 els.btnForceChangePassword?.addEventListener('click', async () => {

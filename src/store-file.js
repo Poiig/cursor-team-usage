@@ -16,6 +16,7 @@ import {
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
 import { recordSyncPercents } from './usage-percent-history.js';
+import { carryCycleHistory } from './billing-cycle.js';
 import { createSideDataApi } from './store-side-data.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -370,6 +371,11 @@ export async function listUsageEvents(_memberId, opts = {}) {
   };
 }
 
+/** 文件存储不落用量事件。 */
+export async function listUsageEventsInRange() {
+  return [];
+}
+
 /** @param {string} id */
 export async function getMemberInternal(id) {
   const store = await readStore();
@@ -392,6 +398,7 @@ export async function saveSyncResult(id, result) {
   const member = store.members[idx];
   const now = new Date().toISOString();
   if (result.snapshot) {
+    carryCycleHistory(member.lastSnapshot, result.snapshot);
     const pulled = pulledColumnsFromSnapshot(result.snapshot);
     member.lastSnapshot = result.snapshot;
     member.email = pulled.email ?? member.email;

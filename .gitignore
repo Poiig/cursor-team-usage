@@ -18,3 +18,4 @@ data/*
 .idea/
 # 部署机 SSH MCP 含口令，不入库
 .cursor/mcp.json
+.cursor/

@@ -1160,3 +1160,62 @@ test('wecom expiring notify: filter and body', async () => {
   assert.ok(delay > 0 && delay < 2 * 3600 * 1000);
 });
 
+test('上个账单周期：窗口、收尾使用率留存与按模型汇总', async () => {
+  const {
+    carryCycleHistory,
+    previousCycleFinalPercents,
+    previousCycleWindow,
+    summarizeCycleEvents,
+  } = await import('../src/billing-cycle.js');
+
+  const cur = { window: { startIso: '2026-10-18T08:43:00.000Z', endIso: '2026-11-18T08:43:00.000Z' } };
+  const win = previousCycleWindow(cur);
+  assert.equal(new Date(win.startMs).toISOString(), '2026-09-18T08:43:00.000Z');
+  assert.equal(new Date(win.endMs).toISOString(), '2026-10-18T08:43:00.000Z');
+  assert.equal(previousCycleWindow({}), null);
+
+  const prev = {
+    window: { startIso: '2026-09-18T08:43:00.000Z', endIso: '2026-10-18T08:43:00.000Z' },
+    meters: { totalPercentUsed: 97.5, autoPercentUsed: 80, apiPercentUsed: 99 },
+    syncedAt: '2026-10-18T08:30:00.000Z',
+  };
+  const same = carryCycleHistory(prev, { window: { ...prev.window } });
+  assert.deepEqual(same.cycleHistory, []);
+  const next = carryCycleHistory(prev, { ...cur });
+  assert.equal(next.cycleHistory.length, 1);
+  assert.equal(next.cycleHistory[0].total, 97.5);
+
+  const exact = previousCycleFinalPercents({ lastSnapshot: next }, win);
+  assert.equal(exact.approximate, false);
+  assert.equal(exact.api, 99);
+  const approx = previousCycleFinalPercents(
+    {
+      lastSnapshot: cur,
+      usagePercentHistory: [
+        { date: '2026-10-16', total: 90, auto: 70, api: 95 },
+        { date: '2026-10-17', total: 96, auto: 79, api: 98 },
+        { date: '2026-10-18', total: 2, auto: 1, api: 3 },
+      ],
+    },
+    win,
+  );
+  assert.equal(approx.approximate, true);
+  assert.equal(approx.total, 96);
+
+  const t = Date.parse('2026-10-01T04:00:00Z');
+  const s = summarizeCycleEvents([
+    { timestamp: t, model: 'auto', inputTokens: 100, outputTokens: 0, tokenCents: 10 },
+    { timestamp: t, model: 'claude-4.5-sonnet', inputTokens: 300, outputTokens: 0, chargedCents: 30 },
+    { timestamp: t + 1000, model: 'claude-4.5-sonnet', inputTokens: 600, outputTokens: 0, tokenCents: 60 },
+  ]);
+  assert.equal(s.totals.requests, 3);
+  assert.equal(s.totals.totalTokens, 1000);
+  assert.equal(s.totals.dollars, 1);
+  assert.equal(s.totals.billedDollars, 0.3);
+  assert.equal(s.models[0].model, 'claude-4.5-sonnet');
+  assert.equal(s.models[0].tokenShare, 90);
+  assert.equal(s.groups.cursor.requests, 1);
+  assert.equal(s.groups.other.tokenShare, 90);
+  assert.equal(s.daily.length, 1);
+});
+

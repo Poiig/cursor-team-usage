@@ -328,16 +328,15 @@ export function computeUsagePace(member, nowMs = Date.now()) {
  * 有效时间展示：2026-09-16 11.00（本地时区）。
  * @param {string | null | undefined} iso
  */
-export function formatDateTimeDot(iso) {
+export function formatDateTime(iso) {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${y}-${m}-${day} ${hh}.${mm}`;
+  const p = (n) => String(n).padStart(2, '0');
+  // 日期与时间间用不换行空格，表格窄时也不折成两行
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}\u00a0${p(d.getHours())}:${p(
+    d.getMinutes(),
+  )}:${p(d.getSeconds())}`;
 }
 
 /**

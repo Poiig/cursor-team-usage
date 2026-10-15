@@ -3,7 +3,7 @@
  * 全员可读；管理员可移出席位 / 删除号池账号（不回收授权）。
  */
 
-import { api, createToast, escapeHtml, formatDateTimeDot, formatOperatorLabel } from './shared.js';
+import { api, createToast, escapeHtml, formatDateTime, formatOperatorLabel } from './shared.js';
 
 const params = new URLSearchParams(location.search);
 const username = String(params.get('u') || params.get('username') || '').trim();
@@ -51,7 +51,7 @@ function renderAccounts() {
     .map((row) => {
       const memberLabel = row.memberDisplayName || row.memberId || '未知账号';
       const host = row.hostname || '—';
-      const seen = formatDateTimeDot(row.lastSeenAt) || '—';
+      const seen = formatDateTime(row.lastSeenAt) || '—';
       const href = row.memberId
         ? `/detail.html?id=${encodeURIComponent(row.memberId)}`
         : '';
@@ -136,10 +136,10 @@ async function load() {
   const facts = [
     ['用户名', data.username],
     ['别名', alias || '—'],
-    ['注册时间', formatDateTimeDot(user?.createdAt) || (user ? '—' : '无看板账号')],
+    ['注册时间', formatDateTime(user?.createdAt) || (user ? '—' : '无看板账号')],
     ['插件状态', pluginOnlineHtml],
-    ['最近上报', formatDateTimeDot(plugin?.reportedAt) || '—'],
-    ['插件安装', formatDateTimeDot(plugin?.installedAt) || '—'],
+    ['最近上报', formatDateTime(plugin?.reportedAt) || '—'],
+    ['插件安装', formatDateTime(plugin?.installedAt) || '—'],
     [
       '插件版本',
       plugin?.version
@@ -169,7 +169,7 @@ async function load() {
             ? `<a href="/detail.html?id=${encodeURIComponent(log.memberId)}">${escapeHtml(member)}</a>`
             : escapeHtml(member);
           return `<tr>
-            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
+            <td>${escapeHtml(formatDateTime(log.createdAt) || log.createdAt || '—')}</td>
             <td>${memberHtml}</td>
             <td>${escapeHtml(log.hostname || '—')}</td>
             <td>${statusBadge(
@@ -181,6 +181,7 @@ async function load() {
         .join('')
     : emptyRow(4, '暂无切换记录');
 
+  document.getElementById('personReportCard')?.classList.toggle('hidden', !data.reports);
   const reports = data.reports || [];
   els.reportBody.innerHTML = reports.length
     ? reports
@@ -193,7 +194,7 @@ async function load() {
             [log.pluginVersion, log.pluginBuild].filter(Boolean).join(' · ') || '—';
           const host = [log.hostname, log.hostRemark].filter(Boolean).join(' / ') || '—';
           return `<tr>
-            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
+            <td>${escapeHtml(formatDateTime(log.createdAt) || log.createdAt || '—')}</td>
             <td>${memberHtml}</td>
             <td>${escapeHtml(host)}</td>
             <td>${escapeHtml(pluginText)}</td>

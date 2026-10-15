@@ -169,6 +169,11 @@ export async function listUsageEvents(memberId, opts) {
   return api().listUsageEvents(memberId, opts);
 }
 
+/** @param {string} memberId @param {number} startMs @param {number} endMs */
+export async function listUsageEventsInRange(memberId, startMs, endMs) {
+  return api().listUsageEventsInRange(memberId, startMs, endMs);
+}
+
 /** 账号使用人席位（按主机）。 */
 export async function loadAccountPresenceMap() {
   return api().loadAccountPresenceMap();

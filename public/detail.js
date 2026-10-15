@@ -13,7 +13,7 @@ import {
   downloadText,
   escapeHtml,
   fieldForProgressLabel,
-  formatDateTimeDot,
+  formatDateTime,
   formatDeltaVsYesterday,
   formatPlanLabel,
   formatSpendPart,
@@ -51,6 +51,8 @@ const els = {
   btnRefresh: document.getElementById('btnDetailRefresh'),
   btnLoadEvents: document.getElementById('btnLoadEvents'),
   btnExportCsv: document.getElementById('btnExportCsv'),
+  btnPrevCycle: document.getElementById('btnPrevCycle'),
+  prevCycle: document.getElementById('prevCycle'),
 };
 
 /** @type {object | null} */
@@ -247,7 +249,7 @@ function formatEventDate(timestamp) {
   if (!Number.isFinite(ms)) ms = Date.parse(String(timestamp));
   if (!Number.isFinite(ms) || ms <= 0) return '—';
   if (ms < 1e12) ms *= 1000;
-  return formatDateTimeDot(new Date(ms).toISOString()) || '—';
+  return formatDateTime(new Date(ms).toISOString()) || '—';
 }
 
 function eventRowHtml(e) {
@@ -283,7 +285,7 @@ function updateEventsMeta() {
   const model = String(els.eventsModel?.value || '').trim();
   const modelNote = model ? ` · ${model}` : '';
   const syncNote = eventsSyncedAt
-    ? ` · 同步 ${formatDateTimeDot(eventsSyncedAt) || eventsSyncedAt}`
+    ? ` · 同步 ${formatDateTime(eventsSyncedAt) || eventsSyncedAt}`
     : '';
   const rangeLabel = days === 1 ? '今天' : `近 ${days} 天`;
   const tokensNote = ` · 总 ${formatTokens(eventsTotalTokens)} tokens`;
@@ -341,10 +343,10 @@ function chipClassForTokenExp(iso) {
 /** 详情页元信息：有效期/Token/更新时间（更新不放在列表头部）。 */
 function renderDetailMeta(member) {
   const resetIso = member.lastSnapshot?.window?.resetIso;
-  const resetText = formatDateTimeDot(resetIso);
+  const resetText = formatDateTime(resetIso);
   const resetDays = daysUntil(resetIso);
-  const tokenExpText = formatDateTimeDot(member.tokenExpiresAt);
-  const syncedText = formatDateTimeDot(member.lastSyncedAt);
+  const tokenExpText = formatDateTime(member.tokenExpiresAt);
+  const syncedText = formatDateTime(member.lastSyncedAt);
   const chips = [];
   if (resetText) {
     chips.push(
@@ -560,6 +562,150 @@ els.btnRefresh?.addEventListener('click', async () => {
     toast(e.message || String(e));
   } finally {
     setBusy(els.btnRefresh, false);
+  }
+});
+
+/** 上个周期：最终使用率 + 请求/Tokens/金额 + Cursor/Other 分组 + 模型占比 + 按日 + 计费类型。 */
+function renderPrevCycle(d) {
+  const t = d.totals;
+  const fp = d.finalPercents;
+  const pctText = (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`);
+  const meter = (label, v) => {
+    const w = v == null ? 0 : Math.min(100, Number(v));
+    return `
+      <div class="panel-line">
+        <div class="panel-line-head">
+          <span class="panel-line-label">${escapeHtml(label)}</span>
+          <span class="panel-line-value">${pctText(v)}</span>
+        </div>
+        <div class="panel-track"><div class="panel-fill ${fillClass(v)}" style="width:${w}%"></div></div>
+      </div>`;
+  };
+  const fpNote = !fp
+    ? '<p class="muted">没有该周期的使用率记录（看板接入此账号晚于该周期结束）。</p>'
+    : fp.approximate
+      ? `<p class="muted">近似值：取重置前一天（${escapeHtml(fp.closedAt || '')}）日终快照，不含重置当天的用量。</p>`
+      : `<p class="muted">周期切换前最后一次同步（${escapeHtml(formatDateTime(fp.closedAt) || '—')}）的值。</p>`;
+  const stat = (k, v, sub = '') => `
+    <div class="prev-stat">
+      <span class="k">${escapeHtml(k)}</span>
+      <span class="v">${escapeHtml(v)}</span>
+      ${sub ? `<span class="s">${escapeHtml(sub)}</span>` : ''}
+    </div>`;
+  const tok = (n) => (n > 0 ? formatTokens(n) : '0');
+  const group = (label, g) => `
+    <tr>
+      <td>${escapeHtml(label)}</td>
+      <td class="num">${g.requests}</td><td class="num">${g.requestShare}%</td>
+      <td class="num">${tok(g.totalTokens)}</td><td class="num">${g.tokenShare}%</td>
+      <td class="num">${money(g.dollars)}</td><td class="num">${g.dollarShare}%</td>
+    </tr>`;
+  const modelRows = d.models
+    .map(
+      (m) => `
+    <tr>
+      <td>${escapeHtml(m.model)} <span class="badge ${m.isCursor ? 'ok' : 'muted'}">${m.isCursor ? 'Cursor' : 'Other'}</span></td>
+      <td class="num">${m.requests}</td><td class="num">${m.requestShare}%</td>
+      <td class="num">${tok(m.totalTokens)}</td>
+      <td class="share-cell"><div class="share-bar"><span style="width:${m.tokenShare}%"></span></div>${m.tokenShare}%</td>
+      <td class="num">${tok(m.inputTokens)} / ${tok(m.outputTokens)}</td>
+      <td class="num">${tok(m.cacheReadTokens + m.cacheWriteTokens)}</td>
+      <td class="num">${money(m.dollars)}</td><td class="num">${m.dollarShare}%</td>
+    </tr>`,
+    )
+    .join('');
+  const kindRows = d.kinds
+    .map(
+      (k) =>
+        `<tr><td>${escapeHtml(k.kind)}</td><td class="num">${k.requests}</td><td class="num">${k.requestShare}%</td><td class="num">${tok(k.totalTokens)}</td><td class="num">${money(k.dollars)}</td></tr>`,
+    )
+    .join('');
+  const sourceBadge =
+    d.source === 'cursor'
+      ? '<span class="badge ok">Cursor 实时</span>'
+      : `<span class="badge warn" title="${escapeHtml(d.fetchError || '')}">本地缓存（可能不全）</span>`;
+
+  els.prevCycle.innerHTML = `
+    <div class="prev-cycle-head">
+      <h3>上个账单周期</h3>
+      <span class="muted">${escapeHtml(formatDateTime(d.startIso) || '')} → ${escapeHtml(formatDateTime(d.endIso) || '')}</span>
+      ${sourceBadge}
+    </div>
+    <div class="prev-cycle-grid">
+      <div class="prev-card">
+        <h4>最终使用率</h4>
+        ${meter('Total usage', fp?.total)}
+        ${meter('Cursor Models', fp?.auto)}
+        ${meter('Other Models', fp?.api)}
+        ${fpNote}
+      </div>
+      <div class="prev-card">
+        <h4>总量</h4>
+        <div class="prev-stats">
+          ${stat('请求次数', String(t.requests))}
+          ${stat('Tokens', tok(t.totalTokens), `输入 ${tok(t.inputTokens)} · 输出 ${tok(t.outputTokens)}`)}
+          ${stat('缓存', tok(t.cacheReadTokens + t.cacheWriteTokens), `读 ${tok(t.cacheReadTokens)} · 写 ${tok(t.cacheWriteTokens)}`)}
+          ${stat('用量价值', money(t.dollars), `其中实际计费 ${money(t.billedDollars)}`)}
+        </div>
+      </div>
+    </div>
+    <div class="prev-card">
+      <h4>Cursor Models / Other Models（按事件统计）</h4>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>分组</th><th>请求</th><th>占比</th><th>Tokens</th><th>占比</th><th>价值</th><th>占比</th></tr></thead>
+        <tbody>${group('Cursor Models', d.groups.cursor)}${group('Other Models', d.groups.other)}</tbody>
+      </table></div>
+    </div>
+    <div class="prev-card">
+      <h4>按模型（${d.models.length} 个，按 Tokens 排序）</h4>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>模型</th><th>请求</th><th>占比</th><th>Tokens</th><th>Tokens 占比</th><th>输入 / 输出</th><th>缓存</th><th>价值</th><th>占比</th></tr></thead>
+        <tbody>${modelRows || '<tr><td colspan="9" class="muted">该周期没有用量事件</td></tr>'}</tbody>
+      </table></div>
+    </div>
+    <div class="charts">
+      <article class="chart-card"><h3>每日请求次数</h3><div id="prevChartRequests" class="chart-box"></div></article>
+      <article class="chart-card"><h3>每日 Tokens</h3><div id="prevChartTokens" class="chart-box"></div></article>
+    </div>
+    <div class="prev-card">
+      <h4>按计费类型</h4>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>类型</th><th>请求</th><th>占比</th><th>Tokens</th><th>价值</th></tr></thead>
+        <tbody>${kindRows || '<tr><td colspan="5" class="muted">—</td></tr>'}</tbody>
+      </table></div>
+    </div>
+  `;
+  renderBarChart(
+    document.getElementById('prevChartRequests'),
+    d.daily.map((x) => ({ label: x.date, value: x.requests })),
+    '#a78bfa',
+  );
+  renderBarChart(
+    document.getElementById('prevChartTokens'),
+    d.daily.map((x) => ({ label: x.date, value: x.tokens })),
+    '#4daafc',
+    (v) => (v <= 0 ? '0' : formatTokens(v)),
+  );
+}
+
+els.btnPrevCycle?.addEventListener('click', async () => {
+  if (!els.prevCycle) return;
+  if (!els.prevCycle.classList.contains('hidden')) {
+    els.prevCycle.classList.add('hidden');
+    els.btnPrevCycle.textContent = '上个周期';
+    return;
+  }
+  setBusy(els.btnPrevCycle, true, '加载中…');
+  try {
+    const data = await api(`/api/members/${encodeURIComponent(memberId)}/previous-cycle`);
+    renderPrevCycle(data);
+    els.prevCycle.classList.remove('hidden');
+    els.prevCycle.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(els.btnPrevCycle, false);
+    if (!els.prevCycle.classList.contains('hidden')) els.btnPrevCycle.textContent = '收起上个周期';
   }
 });
 

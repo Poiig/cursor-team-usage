@@ -15,6 +15,7 @@ import {
   tokenExpiresAtFromCookie,
 } from './store-member-fields.js';
 import { recordSyncPercents } from './usage-percent-history.js';
+import { carryCycleHistory } from './billing-cycle.js';
 import {
   USAGE_EVENTS_RETENTION_DAYS,
   normalizeUsageEventForStore,
@@ -799,6 +800,20 @@ export async function listUsageEvents(memberId, opts = {}) {
   };
 }
 
+/**
+ * 时间段内全部事件（上个账单周期统计用，不分页）。
+ * @param {string} memberId
+ * @param {number} startMs
+ * @param {number} endMs
+ */
+export async function listUsageEventsInRange(memberId, startMs, endMs) {
+  const { rows } = await db().query(
+    'SELECT * FROM usage_events WHERE member_id = $1 AND ts_ms >= $2 AND ts_ms < $3 ORDER BY ts_ms ASC',
+    [memberId, startMs, endMs],
+  );
+  return rows.map(usageEventFromStoreRow);
+}
+
 /** @param {string} id */
 export async function getMemberInternal(id) {
   const { rows } = await db().query('SELECT * FROM members WHERE id = $1', [id]);
@@ -820,6 +835,7 @@ export async function saveSyncResult(id, result) {
   const now = new Date().toISOString();
   if (result.snapshot) {
     if (result.snapshot._usageEvents) delete result.snapshot._usageEvents;
+    carryCycleHistory(member.lastSnapshot, result.snapshot);
     const syncedAt = result.snapshot.syncedAt || now;
     const pulled = pulledColumnsFromSnapshot(result.snapshot);
     // 同步时覆写「今天」累计%，凌晨归档再盖写昨天收盘值。
