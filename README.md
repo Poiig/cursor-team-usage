@@ -144,8 +144,6 @@ cd D:\AppData\wslc\cursor-team-usage
 | `cursorTeamUsage.apiBaseUrl` | 一键安装已写入默认值；也可手改 |
 | `cursorTeamUsage.accessKey` | 与 `.env` 的 `ACCESS_KEY` 相同（安装包已注入） |
 | `cursorTeamUsage.displayName` | 可选；**仅新建时**用作显示名（留空则机器名） |
-| `cursorTeamUsage.autoReportIntervalMinutes` | 启动先报一次，之后按间隔（分钟）；默认 30；`0`=仅手动 |
-
 本地开发可 `npm run ext:asset` 生成 `assets/`，再 `npm start`。详情见 [extension/README.md](./extension/README.md)。
 
 ## 安全

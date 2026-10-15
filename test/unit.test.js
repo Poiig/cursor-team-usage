@@ -629,7 +629,7 @@ test('使用人席位：别名优先，老插件回退主机中文备注', async
       { username: 'zephyrwang', hostname: 'DESKTOP-Q6VL93B', label: 'zephyrwang' },
       { aliasByUsername, nameByHostname },
     ),
-    '王路峰',
+    'zephyrwang',
   );
 });
 

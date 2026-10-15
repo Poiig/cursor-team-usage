@@ -10,13 +10,16 @@ import { scheduleCursorRestart, writeLocalCursorAuth } from './authWriter';
 import {
   downloadAndInstallVsix,
   fetchRemoteBuildMeta,
+  installAndOfferReload,
   installFromBoardWithAccessKey,
   maybePromptUpdate,
+  promptReinstallFromBoard,
   readLocalBuildInfo,
 } from './extensionInstall';
 import { readLocalBridgePort, startLocalBridge } from './localBridge';
 import {
   claimSwitchTicket,
+  OperatorProofError,
   readReporterConfig,
   reportSession,
   reportSwitchResult,
@@ -25,12 +28,15 @@ import {
 
 /** 与服务端 PLUGIN_ONLINE_MS=5min 对齐：约 2.5 个周期内无 ping 判离线。 */
 const HEARTBEAT_MS = 2 * 60_000;
+/** 固定行为，不开放配置。 */
+const AUTO_REPORT_MS = 10 * 60_000;
 
 let statusBar: vscode.StatusBarItem | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let bridgeServer: Server | undefined;
 let lastMessage = '尚未上报';
+let operatorWarned = false;
 /** 避免同一 URI / 票据被并发处理两次。 */
 let switching = false;
 
@@ -46,6 +52,14 @@ function updateStatus(text: string) {
   }
 }
 
+/** 签名问题每个窗口只弹一次，之后仅在状态栏体现。 */
+function warnOperatorProof(reason: string) {
+  if (statusBar) statusBar.text = '$(warning) CTU';
+  if (operatorWarned) return;
+  operatorWarned = true;
+  void promptReinstallFromBoard(reason);
+}
+
 async function doReport(context: vscode.ExtensionContext, silent: boolean) {
   const config = readReporterConfig();
   try {
@@ -58,6 +72,11 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
       ? new Date(session.exp * 1000).toLocaleString('zh-CN')
       : '未知';
     const msg = `${result.created ? '已注册' : '已更新'} ${session.email || session.userId} · Token 至 ${exp}`;
+    if (result.operatorError) {
+      updateStatus(`${msg}，但未关联到看板用户（${result.operatorError}）`);
+      warnOperatorProof(`上报未关联到你的看板用户（${result.operatorError}）`);
+      return;
+    }
     updateStatus(`${msg} · ${new Date().toLocaleString('zh-CN')}`);
     if (!silent) {
       void vscode.window.showInformationMessage(`Cursor Team Usage：${msg}`);
@@ -184,19 +203,9 @@ async function handleRestoreLastAccount(context: vscode.ExtensionContext) {
 }
 
 function setupAutoReport(context: vscode.ExtensionContext) {
-  if (timer) {
-    clearInterval(timer);
-    timer = undefined;
-  }
-  const mins = readReporterConfig().autoReportIntervalMinutes;
-  if (!mins || mins <= 0) {
-    updateStatus(lastMessage.includes('失败') ? lastMessage : '自动上报已关闭（仅手动）');
-    return;
-  }
-  const ms = Math.max(1, mins) * 60_000;
   timer = setInterval(() => {
     void doReport(context, true);
-  }, ms);
+  }, AUTO_REPORT_MS);
 }
 
 /**
@@ -208,8 +217,12 @@ function setupHeartbeat() {
     heartbeatTimer = undefined;
   }
   const tick = () => {
-    void sendHeartbeat(readReporterConfig()).catch(() => {
-      /* 网络/签名失败不弹窗；状态栏仍以上报结果为主 */
+    void sendHeartbeat(readReporterConfig()).catch((e) => {
+      // 网络抖动静默；签名无效会导致看板一直离线，必须让用户知道
+      if (e instanceof OperatorProofError) {
+        updateStatus(`心跳被拒：${e.message}`);
+        warnOperatorProof(e.message);
+      }
     });
   };
   tick();
@@ -331,17 +344,10 @@ export function activate(context: vscode.ExtensionContext) {
           '取消',
         );
         if (choice !== '重装' && choice !== '立即更新') return;
-        const meta = await installFromBoardWithAccessKey();
-        const reload = await vscode.window.showInformationMessage(
-          `已安装 ${meta.version} (${meta.build})，需重载窗口`,
-          '重载窗口',
-        );
-        if (reload === '重载窗口') {
-          await vscode.commands.executeCommand('workbench.action.reloadWindow');
-        }
+        await installAndOfferReload();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        void vscode.window.showErrorMessage(`Cursor Team Usage 更新失败：${msg}`);
+        void vscode.window.showErrorMessage(`Cursor Team Usage 检查更新失败：${msg}`);
       }
     }),
     vscode.window.registerUriHandler({
@@ -356,11 +362,8 @@ export function activate(context: vscode.ExtensionContext) {
       },
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('cursorTeamUsage')) {
-        setupAutoReport(context);
-        if (e.affectsConfiguration('cursorTeamUsage.localBridgePort')) {
-          void setupLocalBridge(context);
-        }
+      if (e.affectsConfiguration('cursorTeamUsage.localBridgePort')) {
+        void setupLocalBridge(context);
       }
     }),
   );

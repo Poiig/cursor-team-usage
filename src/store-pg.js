@@ -529,9 +529,8 @@ export async function updateMember(id, patch) {
   }
 
   const now = new Date().toISOString();
-  const promoteManual =
-    (patch.sessionToken != null && String(patch.sessionToken).trim()) ||
-    patch.displayName != null;
+  // 只有网页改 Token 才升为人工号；改显示名不应把插件上报号标成「人工」
+  const promoteManual = Boolean(patch.sessionToken != null && String(patch.sessionToken).trim());
   if (promoteManual) {
     await db().query(
       `UPDATE members SET display_name=$1, cookie_value=$2, user_id=$3, hostname=$4, token_expires_at=$5, source=$6, updated_at=$7 WHERE id=$8`,

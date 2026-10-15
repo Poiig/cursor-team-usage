@@ -252,10 +252,8 @@ export async function updateMember(id, patch) {
   if (patch.hostname != null) {
     member.hostname = String(patch.hostname).trim() || null;
   }
-  if (
-    (patch.sessionToken != null && String(patch.sessionToken).trim()) ||
-    patch.displayName != null
-  ) {
+  // 只有网页改 Token 才升为人工号；改显示名不应把插件上报号标成「人工」
+  if (patch.sessionToken != null && String(patch.sessionToken).trim()) {
     member.source = MEMBER_SOURCE_MANUAL;
   }
   member.updatedAt = new Date().toISOString();

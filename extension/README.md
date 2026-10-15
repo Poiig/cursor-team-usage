@@ -6,8 +6,8 @@
 
 1. 看板已启动；`ACCESS_KEY` 与扩展 `accessKey` 须一致（一键安装会自动注入）。
 2. 若扩展不在本机访问看板，看板需监听可达地址，并建议设置 `PUBLIC_BASE_URL`。
-3. 本机安装 **Python 3**（读写 `state.vscdb`：上报只读，切换会写入）。
-4. Cursor **开着**时扩展才会上报；关掉 IDE 即停止（这是正常行为）。
+3. 无需 Python：读写 `state.vscdb` 用 Cursor 自带的 Node。
+4. Cursor **开着**时扩展才会上报（启动后约 8 秒一次，之后每 10 分钟一次，不可配置）；关掉 IDE 即停止（这是正常行为）。
 
 ## 安装（推荐）
 
@@ -48,7 +48,6 @@ npm run watch
 | `accessKey` | 与服务端 `ACCESS_KEY` 一致 |
 | `operatorUsername` | 安装插件的看板用户名；个性化安装包自动注入 |
 | `displayName` | 可选显示名；留空用机器名 |
-| `autoReportIntervalMinutes` | 自动上报间隔（分钟）；`0`=仅手动 |
 | `localBridgePort` | 本机桥端口，默认 `3781`；`0`=关闭 |
 
 ## 本地桥

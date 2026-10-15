@@ -95,18 +95,17 @@ export function maxUsersForMember(member) {
 
 /**
  * 席位上给人看的名字。
- * 用户名有别名时用用户管理里的别名；否则用账号列表里该主机名对应的中文备注。
+ * 有看板用户名时只认用户（别名优先，否则用户名），不能借主机上 Cursor 账号的备注；
+ * 主机名备注只给不带用户名的旧插件兜底。
  * @param {{ username?: string|null, hostname?: string|null, label?: string|null }} row
  * @param {{ aliasByUsername?: Map<string, string>, nameByHostname?: Map<string, string> }} [ctx]
  */
 export function displayPresenceLabel(row, ctx = {}) {
   const username = String(row?.username || '').trim();
-  const alias = username ? ctx.aliasByUsername?.get(username.toLowerCase()) : '';
-  if (alias) return alias;
+  if (username) return ctx.aliasByUsername?.get(username.toLowerCase()) || username;
   const host = String(row?.hostname || '').trim().toLowerCase();
   const chinese = host ? ctx.nameByHostname?.get(host) : '';
   if (chinese) return chinese;
-  if (username) return username;
   return String(row?.label || row?.hostname || '').trim();
 }
 

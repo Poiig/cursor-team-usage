@@ -2,7 +2,7 @@
   "name": "cursor-team-usage-reporter",
   "displayName": "Cursor Team Usage Reporter",
   "description": "上报本机 Cursor 会话到看板，并支持从看板一键切换本机登录账号",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "publisher": "poiig",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -54,12 +54,6 @@
           "type": "string",
           "default": "",
           "markdownDescription": "上报显示名；留空则用本机机器名（`os.hostname()`）"
-        },
-        "cursorTeamUsage.autoReportIntervalMinutes": {
-          "type": "number",
-          "default": 30,
-          "minimum": 0,
-          "markdownDescription": "自动上报间隔（分钟）。启动时先上报一次，之后按此间隔。`0` = 仅手动上报"
         },
         "cursorTeamUsage.refreshAfterReport": {
           "type": "boolean",

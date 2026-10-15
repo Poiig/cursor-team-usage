@@ -9,7 +9,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import * as vscode from 'vscode';
-import { readReporterConfig } from './reporter';
+import { OperatorProofError, readReporterConfig } from './reporter';
 
 export type ExtensionBuildMeta = {
   version: string;
@@ -68,7 +68,9 @@ export async function readLocalBuildInfo(
 export async function fetchRemoteBuildMeta(
   apiBaseUrl: string,
 ): Promise<ExtensionBuildMeta> {
-  const res = await fetch(`${apiBaseUrl.replace(/\/+$/, '')}/api/extension/meta`);
+  const res = await fetch(`${apiBaseUrl.replace(/\/+$/, '')}/api/extension/meta`, {
+    signal: AbortSignal.timeout(15_000),
+  });
   if (!res.ok) {
     throw new Error(`检查更新失败 HTTP ${res.status}`);
   }
@@ -90,9 +92,11 @@ export async function downloadAndInstallVsix(
   vsixUrl: string,
   headers?: Record<string, string>,
 ): Promise<void> {
-  const res = await fetch(vsixUrl, { headers });
+  const res = await fetch(vsixUrl, { headers, signal: AbortSignal.timeout(180_000) });
   if (!res.ok || !res.body) {
-    throw new Error(`下载插件失败 HTTP ${res.status}`);
+    const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    const msg = data.error || `下载插件失败 HTTP ${res.status}`;
+    throw data.code === 'OPERATOR_PROOF' ? new OperatorProofError(msg) : new Error(msg);
   }
   const dir = path.join(tmpdir(), 'ctu-reporter-install');
   await mkdir(dir, { recursive: true });
@@ -148,15 +152,43 @@ export async function maybePromptUpdate(extensionPath: string): Promise<void> {
       '稍后',
     );
     if (choice !== '立即更新') return;
-    await installFromBoardWithAccessKey();
+  } catch (e) {
+    // 离线/看板不可达时静默，下次启动再查
+    console.warn('[ctu] update check skipped:', e);
+    return;
+  }
+  await installAndOfferReload();
+}
+
+/** 用户已确认更新：失败要让人看见，签名失效时引导去看板重装。 */
+export async function installAndOfferReload(): Promise<void> {
+  try {
+    const meta = await installFromBoardWithAccessKey();
     const reload = await vscode.window.showInformationMessage(
-      '插件已安装，需重载窗口后生效',
+      `已安装 ${meta.version} (${meta.build})，需重载窗口后生效`,
       '重载窗口',
     );
     if (reload === '重载窗口') {
       await vscode.commands.executeCommand('workbench.action.reloadWindow');
     }
   } catch (e) {
-    console.warn('[ctu] update check skipped:', e);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof OperatorProofError) {
+      await promptReinstallFromBoard(msg);
+    } else {
+      void vscode.window.showErrorMessage(`Cursor Team Usage 更新失败：${msg}`);
+    }
+  }
+}
+
+/** 打开看板，让用户登录后点「安装插件」拿到带自己签名的新包。 */
+export async function promptReinstallFromBoard(reason: string): Promise<void> {
+  const { apiBaseUrl } = readReporterConfig();
+  const choice = await vscode.window.showWarningMessage(
+    `Cursor Team Usage：${reason}。请登录看板后点「安装插件」重新安装。`,
+    '打开看板',
+  );
+  if (choice === '打开看板' && apiBaseUrl) {
+    await vscode.env.openExternal(vscode.Uri.parse(apiBaseUrl));
   }
 }

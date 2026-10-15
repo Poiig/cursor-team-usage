@@ -717,10 +717,10 @@ export async function updateMember(id, patch) {
   }
 
   const now = new Date().toISOString();
-  // 管理员在网页改 Token / 显示名 → 记为人工录入，避免被当成纯上报号
-  const promoteManual =
-    (patch.sessionToken != null && String(patch.sessionToken).trim()) ||
-    patch.displayName != null;
+  // 只有网页改 Token 才升为人工号；改显示名不应把插件上报号标成「人工」
+  const promoteManual = Boolean(
+    patch.sessionToken != null && String(patch.sessionToken).trim(),
+  );
   if (promoteManual) {
     run(
       `UPDATE members SET display_name=?, cookie_value=?, user_id=?, hostname=?, token_expires_at=?, source=?, updated_at=? WHERE id=?`,

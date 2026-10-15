@@ -200,12 +200,24 @@ function peerIp(req) {
  * @param {string} username
  * @param {string} proof
  */
-async function trustedOperatorName(username, proof) {
+async function checkOperator(username, proof) {
   const name = String(username || '').trim();
-  if (!verifyOperatorUsername(name, proof)) return null;
+  if (!name) return { username: null, reason: '未带使用人' };
+  if (!String(proof || '').trim()) return { username: null, reason: '缺少签名' };
+  if (!verifyOperatorUsername(name, proof)) return { username: null, reason: '签名不符' };
   const user = await getPublicUser(name);
-  if (!user || user.pending || user.disabled) return null;
-  return user.username;
+  if (!user) return { username: null, reason: '用户不存在' };
+  if (user.pending) return { username: null, reason: '用户待审批' };
+  if (user.disabled) return { username: null, reason: '用户已禁用' };
+  return { username: user.username, reason: '' };
+}
+
+/**
+ * @param {string} username
+ * @param {string} proof
+ */
+async function trustedOperatorName(username, proof) {
+  return (await checkOperator(username, proof)).username;
 }
 
 /**
@@ -1060,9 +1072,15 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && pathname === '/api/agent/heartbeat') {
       assertAccessKey(req);
       const body = await readBody(req);
-      const operatorUsername = await trustedOperatorName(body?.operatorUsername, body?.operatorProof);
+      const { username: operatorUsername, reason } = await checkOperator(
+        body?.operatorUsername,
+        body?.operatorProof,
+      );
       if (!operatorUsername) {
-        return sendJson(res, 401, { error: '插件使用人签名无效', code: 'OPERATOR_PROOF' });
+        return sendJson(res, 401, {
+          error: `插件使用人校验失败（${reason}），请在看板重新安装插件`,
+          code: 'OPERATOR_PROOF',
+        });
       }
       const view = await recordPluginHeartbeat(operatorUsername, {
         version: body?.pluginVersion,
@@ -1080,7 +1098,10 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const sessionToken = String(body?.sessionToken || '').trim();
       if (!sessionToken) throw new Error('缺少 sessionToken');
-      const operatorUsername = await trustedOperatorName(body?.operatorUsername, body?.operatorProof);
+      const { username: operatorUsername, reason: operatorReason } = await checkOperator(
+        body?.operatorUsername,
+        body?.operatorProof,
+      );
       // upsert：新建=上报来源；已有账号续 Token，不覆盖人工显示名/主机名
       const { member, created, manualProtected } = await upsertMemberBySession({
         sessionToken,
@@ -1107,7 +1128,8 @@ const server = http.createServer(async (req, res) => {
         操作: created ? '新建账号' : manualProtected ? '续期Token(人工号)' : '更新Token',
         来源: member.source || undefined,
         使用人: operatorUsername || undefined,
-        使用人校验: body?.operatorUsername && !operatorUsername ? '失败' : undefined,
+        使用人校验: operatorUsername ? undefined : `失败(${operatorReason})`,
+        声明使用人: !operatorUsername && body?.operatorUsername ? body.operatorUsername : undefined,
         主机名: body?.hostname || member?.hostname || undefined,
         邮箱: body?.email || member?.email || undefined,
         显示名请求: body?.displayName || undefined,
@@ -1142,6 +1164,8 @@ const server = http.createServer(async (req, res) => {
         created,
         member: refreshed,
         hostname: body?.hostname || null,
+        operatorVerified: Boolean(operatorUsername),
+        operatorError: operatorUsername ? null : operatorReason,
       });
     }
 

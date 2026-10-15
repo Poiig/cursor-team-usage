@@ -381,7 +381,7 @@ function metaChips(member) {
       : `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`;
   const sourceChip =
     member.source === 'manual'
-      ? '<span class="chip neutral" title="网页添加 / 粘贴 / 邮箱 / 本机导入；上报可续 Token，不改显示名">人工</span>'
+      ? '<span class="chip neutral" title="网页添加 / 粘贴 Token / 邮箱入池 / 本机导入；仅改显示名不会标人工">人工</span>'
       : '';
   const syncedChip =
     syncedText == null

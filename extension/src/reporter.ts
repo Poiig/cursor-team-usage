@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import type { LocalSession } from './authReader';
 import type { LocalAuthPayload } from './authWriter';
 
@@ -10,19 +12,37 @@ export type ReporterConfig = {
   operatorProof: string;
   displayName: string;
   refreshAfterReport: boolean;
-  autoReportIntervalMinutes: number;
 };
+
+const EXTENSION_ID = 'poiig.cursor-team-usage-reporter';
+
+/** 个性化安装包随附的使用人绑定；用户 settings 里残留的旧值不能盖过它。 */
+function readPackagedOperator(): { username: string; proof: string } | null {
+  const dir = vscode.extensions.getExtension(EXTENSION_ID)?.extensionPath;
+  if (!dir) return null;
+  try {
+    const j = JSON.parse(readFileSync(path.join(dir, 'build-info.json'), 'utf8')) as {
+      operatorUsername?: string;
+      operatorProof?: string;
+    };
+    const username = String(j.operatorUsername || '').trim();
+    const proof = String(j.operatorProof || '').trim();
+    return username && proof ? { username, proof } : null;
+  } catch {
+    return null;
+  }
+}
 
 export function readReporterConfig(): ReporterConfig {
   const cfg = vscode.workspace.getConfiguration('cursorTeamUsage');
+  const packaged = readPackagedOperator();
   return {
     apiBaseUrl: String(cfg.get('apiBaseUrl') || 'http://127.0.0.1:3780').replace(/\/+$/, ''),
     accessKey: String(cfg.get('accessKey') || '').trim(),
-    operatorUsername: String(cfg.get('operatorUsername') || '').trim(),
-    operatorProof: String(cfg.get('operatorProof') || '').trim(),
+    operatorUsername: packaged?.username || String(cfg.get('operatorUsername') || '').trim(),
+    operatorProof: packaged?.proof || String(cfg.get('operatorProof') || '').trim(),
     displayName: String(cfg.get('displayName') || '').trim(),
     refreshAfterReport: cfg.get('refreshAfterReport') !== false,
-    autoReportIntervalMinutes: Number(cfg.get('autoReportIntervalMinutes') ?? 60),
   };
 }
 
@@ -43,8 +63,9 @@ export async function sendHeartbeat(config: ReporterConfig): Promise<void> {
   if (!config.operatorUsername || !config.operatorProof) {
     throw new Error('未绑定看板用户（请用个性化安装包重装）');
   }
-  const own = vscode.extensions.getExtension('poiig.cursor-team-usage-reporter');
+  const own = vscode.extensions.getExtension(EXTENSION_ID);
   const res = await fetch(`${config.apiBaseUrl}/api/agent/heartbeat`, {
+    signal: AbortSignal.timeout(15_000),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -59,10 +80,14 @@ export async function sendHeartbeat(config: ReporterConfig): Promise<void> {
     }),
   });
   if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(data.error || `心跳失败 HTTP ${res.status}`);
+    const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    const msg = data.error || `心跳失败 HTTP ${res.status}`;
+    throw data.code === 'OPERATOR_PROOF' ? new OperatorProofError(msg) : new Error(msg);
   }
 }
+
+/** 安装包里的使用人签名不被看板认可，只能重新从看板安装。 */
+export class OperatorProofError extends Error {}
 
 /**
  * 调用看板 /api/agent/report，Header 带 Access Key。
@@ -70,12 +95,14 @@ export async function sendHeartbeat(config: ReporterConfig): Promise<void> {
 export async function reportSession(
   config: ReporterConfig,
   session: LocalSession,
-): Promise<{ created: boolean; memberId?: string }> {
+): Promise<{ created: boolean; memberId?: string; operatorError?: string | null }> {
   assertReporterConfig(config);
 
   const host = os.hostname();
-  const own = vscode.extensions.getExtension('poiig.cursor-team-usage-reporter');
+  const own = vscode.extensions.getExtension(EXTENSION_ID);
   const res = await fetch(`${config.apiBaseUrl}/api/agent/report`, {
+    // 服务端上报后会顺带刷新用量，留足时间
+    signal: AbortSignal.timeout(60_000),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -99,11 +126,18 @@ export async function reportSession(
     error?: string;
     created?: boolean;
     member?: { id?: string };
+    operatorVerified?: boolean;
+    operatorError?: string | null;
   };
   if (!res.ok) {
     throw new Error(data.error || `上报失败 HTTP ${res.status}`);
   }
-  return { created: Boolean(data.created), memberId: data.member?.id };
+  return {
+    created: Boolean(data.created),
+    memberId: data.member?.id,
+    // 旧服务端不返回该字段，视为通过
+    operatorError: data.operatorVerified === false ? data.operatorError || '签名无效' : null,
+  };
 }
 
 /**
@@ -122,6 +156,7 @@ export async function claimSwitchTicket(
 }> {
   assertReporterConfig(config);
   const res = await fetch(`${config.apiBaseUrl}/api/agent/switch/claim`, {
+    signal: AbortSignal.timeout(30_000),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -163,6 +198,7 @@ export async function reportSwitchResult(
 ): Promise<void> {
   assertReporterConfig(config);
   const res = await fetch(`${config.apiBaseUrl}/api/agent/switch/result`, {
+    signal: AbortSignal.timeout(30_000),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
