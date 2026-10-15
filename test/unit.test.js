@@ -43,6 +43,11 @@ import {
   normalizeUsageEventForStore,
   usageEventsNeedSync,
 } from '../src/usage-events.js';
+import {
+  consumeInstallToken,
+  getInstallToken,
+  issueInstallToken,
+} from '../src/extension-asset.js';
 
 test('normalizeManualToken 接受 cookie / name=value / 裸 JWT', () => {
   const jwt =
@@ -70,6 +75,13 @@ test('tokenExpiresAtIso 从 JWT exp 解析', () => {
     '.x';
   const cookie = buildCookieValue('user_abc', jwt);
   assert.equal(tokenExpiresAtIso(cookie), new Date(exp * 1000).toISOString());
+});
+
+test('安装令牌仅允许下载 VSIX 一次', () => {
+  const token = issueInstallToken('https://usage.example.com', 'alice');
+  assert.equal(getInstallToken(token)?.operatorUsername, 'alice');
+  assert.equal(consumeInstallToken(token)?.apiBaseUrl, 'https://usage.example.com');
+  assert.equal(consumeInstallToken(token), null);
 });
 
 test('未配置数据库时默认 sqlite 存储', async () => {

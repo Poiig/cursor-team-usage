@@ -645,35 +645,19 @@ export async function upsertUsageEvents(memberId, events) {
   if (!memberId) return { upserted: 0 };
   const syncedAt = new Date().toISOString();
   const list = Array.isArray(events) ? events : [];
-  let upserted = 0;
+  const normalized = list
+    .map((raw) => normalizeUsageEventForStore(raw, syncedAt))
+    .filter((event) => event.eventId && event.tsMs);
   const client = await db().connect();
   try {
     await client.query('BEGIN');
-    for (const raw of list) {
-      const e = normalizeUsageEventForStore(raw, syncedAt);
-      if (!e.eventId || !e.tsMs) continue;
-      await client.query(
-        `INSERT INTO usage_events (
-          member_id, event_id, ts_ms, model, kind, kind_label, is_token_based,
-          charged_cents, token_cents, input_tokens, output_tokens,
-          cache_read_tokens, cache_write_tokens, total_tokens, cost_label, synced_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-        ON CONFLICT (member_id, event_id) DO UPDATE SET
-          ts_ms=EXCLUDED.ts_ms,
-          model=EXCLUDED.model,
-          kind=EXCLUDED.kind,
-          kind_label=EXCLUDED.kind_label,
-          is_token_based=EXCLUDED.is_token_based,
-          charged_cents=EXCLUDED.charged_cents,
-          token_cents=EXCLUDED.token_cents,
-          input_tokens=EXCLUDED.input_tokens,
-          output_tokens=EXCLUDED.output_tokens,
-          cache_read_tokens=EXCLUDED.cache_read_tokens,
-          cache_write_tokens=EXCLUDED.cache_write_tokens,
-          total_tokens=EXCLUDED.total_tokens,
-          cost_label=EXCLUDED.cost_label,
-          synced_at=EXCLUDED.synced_at`,
-        [
+    // 每条事件原先各发一次 SQL；按 500 条合并，避免大周期同步产生数百次往返。
+    for (let offset = 0; offset < normalized.length; offset += 500) {
+      const batch = normalized.slice(offset, offset + 500);
+      const values = [];
+      const rows = batch.map((e, rowIndex) => {
+        const start = rowIndex * 16;
+        values.push(
           memberId,
           e.eventId,
           e.tsMs,
@@ -690,9 +674,32 @@ export async function upsertUsageEvents(memberId, events) {
           e.totalTokens,
           e.costLabel,
           e.syncedAt,
-        ],
+        );
+        return `(${Array.from({ length: 16 }, (_, i) => `$${start + i + 1}`).join(',')})`;
+      });
+      await client.query(
+        `INSERT INTO usage_events (
+          member_id, event_id, ts_ms, model, kind, kind_label, is_token_based,
+          charged_cents, token_cents, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, total_tokens, cost_label, synced_at
+        ) VALUES ${rows.join(',')}
+        ON CONFLICT (member_id, event_id) DO UPDATE SET
+          ts_ms=EXCLUDED.ts_ms,
+          model=EXCLUDED.model,
+          kind=EXCLUDED.kind,
+          kind_label=EXCLUDED.kind_label,
+          is_token_based=EXCLUDED.is_token_based,
+          charged_cents=EXCLUDED.charged_cents,
+          token_cents=EXCLUDED.token_cents,
+          input_tokens=EXCLUDED.input_tokens,
+          output_tokens=EXCLUDED.output_tokens,
+          cache_read_tokens=EXCLUDED.cache_read_tokens,
+          cache_write_tokens=EXCLUDED.cache_write_tokens,
+          total_tokens=EXCLUDED.total_tokens,
+          cost_label=EXCLUDED.cost_label,
+          synced_at=EXCLUDED.synced_at`,
+        values,
       );
-      upserted += 1;
     }
     const cutoff = Date.now() - USAGE_EVENTS_RETENTION_DAYS * 86400000;
     await client.query('DELETE FROM usage_events WHERE member_id = $1 AND ts_ms < $2', [
@@ -710,7 +717,7 @@ export async function upsertUsageEvents(memberId, events) {
   } finally {
     client.release();
   }
-  return { upserted };
+  return { upserted: normalized.length };
 }
 
 /**
@@ -1165,33 +1172,4 @@ export async function listSwitchLogs(opts = {}) {
 export async function getSwitchLog(id) {
   const { rows } = await db().query('SELECT * FROM account_switch_logs WHERE id = $1', [id]);
   return rows[0] ? rowToSwitchLog(rows[0]) : null;
-}
-
-/** @returns {Promise<ConsoleAdmin | null>} */
-export async function getConsoleAdmin() {
-  const user = await getConsoleUser('admin');
-  if (!user) return null;
-  return {
-    username: user.username,
-    passwordHash: user.passwordHash,
-    salt: user.salt,
-    createdAt: user.createdAt,
-    mustChangePassword: user.mustChangePassword,
-  };
-}
-
-/**
- * @param {ConsoleAdmin} admin
- */
-export async function saveConsoleAdmin(admin) {
-  await saveConsoleUser({
-    username: admin.username || 'admin',
-    passwordHash: admin.passwordHash,
-    salt: admin.salt,
-    role: 'admin',
-    createdAt: admin.createdAt,
-    mustChangePassword: Boolean(admin.mustChangePassword),
-    disabled: false,
-    pending: false,
-  });
 }

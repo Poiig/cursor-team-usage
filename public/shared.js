@@ -182,11 +182,6 @@ export function dailyPercentDeltaPoints(history, field = 'total') {
   return out;
 }
 
-/** 官方用量页 Tokens 列：与 formatTokens 相同（万 / 亿）。 */
-export function formatTokensWan(n) {
-  return formatTokens(n);
-}
-
 /**
  * 隐私模式：邮箱中间脱敏，便于投屏/截图。
  * @param {string} email
@@ -459,7 +454,12 @@ export function setBusy(btn, busy, busyLabel) {
     if (!btn.dataset.label) btn.dataset.label = btn.textContent || '';
     btn.classList.add('busy');
     btn.disabled = true;
-    if (busyLabel) btn.innerHTML = `<span class="spin">↻</span> ${busyLabel}`;
+    if (busyLabel) {
+      const spin = document.createElement('span');
+      spin.className = 'spin';
+      spin.textContent = '↻';
+      btn.replaceChildren(spin, document.createTextNode(` ${busyLabel}`));
+    }
   } else {
     btn.classList.remove('busy');
     btn.disabled = false;

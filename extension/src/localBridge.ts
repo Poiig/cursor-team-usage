@@ -12,9 +12,7 @@ export type RestoreHandler = () => void | Promise<void>;
 export type BackupInfoHandler = () =>
   | Promise<Record<string, unknown>>
   | Record<string, unknown>;
-export type InstallExtensionHandler = (body: {
-  vsixUrl?: string;
-}) => void | Promise<{ ok: boolean; message?: string }>;
+export type InstallExtensionHandler = () => void | Promise<{ ok: boolean; message?: string }>;
 export type CurrentAccountHandler = () =>
   | Promise<Record<string, unknown>>
   | Record<string, unknown>;
@@ -45,10 +43,18 @@ function writeCorsJson(
 }
 
 /**
- * 仅绑定环回地址；带 CORS，方便看板页（任意内网 Origin）调用。
+ * 浏览器会随跨域请求带 Origin；只接受已配置看板，避免任意网页驱动本机 Cursor。
+ */
+function isAllowedBoardOrigin(origin: string, expectedOrigin: string): boolean {
+  return Boolean(origin) && origin === expectedOrigin;
+}
+
+/**
+ * 仅绑定环回地址，并仅向已配置看板开放跨域状态操作。
  */
 export function startLocalBridge(
   port: number,
+  boardOrigin: string,
   onSwitch: BridgeHandler,
   onRestore?: RestoreHandler,
   onBackupInfo?: BackupInfoHandler,
@@ -61,9 +67,10 @@ export function startLocalBridge(
   }
 
   const server = http.createServer(async (req, res) => {
-    const origin = String(req.headers.origin || '*');
+    const origin = String(req.headers.origin || '');
+    const allowedOrigin = isAllowedBoardOrigin(origin, boardOrigin);
     const cors = {
-      'Access-Control-Allow-Origin': origin === 'null' ? '*' : origin,
+      ...(allowedOrigin ? { 'Access-Control-Allow-Origin': boardOrigin } : {}),
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Max-Age': '600',
@@ -71,7 +78,7 @@ export function startLocalBridge(
     };
 
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, cors);
+      res.writeHead(allowedOrigin ? 204 : 403, cors);
       res.end();
       return;
     }
@@ -114,6 +121,11 @@ export function startLocalBridge(
         const msg = e instanceof Error ? e.message : String(e);
         writeCorsJson(res, cors, 500, { error: msg });
       }
+      return;
+    }
+
+    if (req.method === 'POST' && !allowedOrigin) {
+      writeCorsJson(res, cors, 403, { error: '不受信任的看板来源' });
       return;
     }
 
@@ -165,11 +177,7 @@ export function startLocalBridge(
         return;
       }
       try {
-        const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
-        const raw = Buffer.concat(chunks).toString('utf8') || '{}';
-        const body = JSON.parse(raw) as { vsixUrl?: string };
-        const result = await onInstallExtension(body);
+        const result = await onInstallExtension();
         writeCorsJson(res, cors, 200, result);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

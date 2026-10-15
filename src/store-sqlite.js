@@ -1345,32 +1345,3 @@ export async function getSwitchLog(id) {
   const row = getOne('SELECT * FROM account_switch_logs WHERE id = ?', [id]);
   return row ? rowToSwitchLog(row) : null;
 }
-
-/** @returns {Promise<ConsoleAdmin | null>} */
-export async function getConsoleAdmin() {
-  const user = await getConsoleUser('admin');
-  if (!user) return null;
-  return {
-    username: user.username,
-    passwordHash: user.passwordHash,
-    salt: user.salt,
-    createdAt: user.createdAt,
-    mustChangePassword: user.mustChangePassword,
-  };
-}
-
-/**
- * @param {ConsoleAdmin} admin
- */
-export async function saveConsoleAdmin(admin) {
-  await saveConsoleUser({
-    username: admin.username || 'admin',
-    passwordHash: admin.passwordHash,
-    salt: admin.salt,
-    role: 'admin',
-    createdAt: admin.createdAt,
-    mustChangePassword: Boolean(admin.mustChangePassword),
-    disabled: false,
-    pending: false,
-  });
-}

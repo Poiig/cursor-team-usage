@@ -94,16 +94,6 @@ export async function setPrevCycleSummary(id, summary) {
   return api().setPrevCycleSummary(id, summary);
 }
 
-/** @returns {Promise<any>} */
-export async function getConsoleAdmin() {
-  return api().getConsoleAdmin();
-}
-
-/** @param {any} admin */
-export async function saveConsoleAdmin(admin) {
-  return api().saveConsoleAdmin(admin);
-}
-
 export async function listConsoleUsers() {
   return api().listConsoleUsers();
 }

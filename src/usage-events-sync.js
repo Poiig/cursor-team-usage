@@ -91,7 +91,8 @@ export async function loadPreviousCycle(member, opts = {}) {
     const session = sessionFromCookie(member.cookieValue);
     if (!session) throw new Error('会话 Token 格式无效');
     events = await fetchDashboardUsage(session, window.startMs, window.endMs - 1);
-    await upsertUsageEvents(member.id, events).catch(() => {});
+    // 远端统计只有与本地事件同时成功时才可缓存为周期终值，避免下次无从兜底。
+    await upsertUsageEvents(member.id, events);
   } catch (e) {
     source = 'local';
     fetchError = e instanceof Error ? e.message : String(e);

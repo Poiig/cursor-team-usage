@@ -203,12 +203,23 @@ export function consumeInstallToken(token) {
   sweepInstallTokens();
   const row = installTokens.get(String(token || ''));
   if (!row) return null;
-  // 允许多次下载（安装脚本可能重试），到期再删
   if (row.exp <= Date.now()) {
     installTokens.delete(token);
     return null;
   }
+  // VSIX 含上报密钥，首次下载后立即失效，避免安装链接被重放。
+  installTokens.delete(String(token || ''));
   return row;
+}
+
+/**
+ * 读取安装脚本需要的令牌，不消费它；实际下载 VSIX 时才使令牌失效。
+ * @param {string} token
+ */
+export function getInstallToken(token) {
+  sweepInstallTokens();
+  const row = installTokens.get(String(token || ''));
+  return row && row.exp > Date.now() ? row : null;
 }
 
 function sweepInstallTokens() {

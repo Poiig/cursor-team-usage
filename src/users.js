@@ -334,8 +334,3 @@ export async function isAdminUsername(username) {
   const user = await getConsoleUser(normalizeUsername(username || ''));
   return Boolean(user && user.role === 'admin' && !user.disabled && !user.pending);
 }
-
-/** 兼容旧调用：改 admin 自己的口令。 */
-export async function changeAdminPassword(password) {
-  return changeOwnPassword(ADMIN_NAME, password);
-}

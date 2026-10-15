@@ -676,35 +676,6 @@ export async function getSwitchLog(id) {
   return logs.find((l) => l.id === id) ?? null;
 }
 
-/** @returns {Promise<ConsoleAdmin | null>} */
-export async function getConsoleAdmin() {
-  const user = await getConsoleUser('admin');
-  if (!user) return null;
-  return {
-    username: user.username,
-    passwordHash: user.passwordHash,
-    salt: user.salt,
-    createdAt: user.createdAt,
-    mustChangePassword: user.mustChangePassword,
-  };
-}
-
-/**
- * @param {ConsoleAdmin} admin
- */
-export async function saveConsoleAdmin(admin) {
-  await saveConsoleUser({
-    username: admin.username || 'admin',
-    passwordHash: admin.passwordHash,
-    salt: admin.salt,
-    role: 'admin',
-    createdAt: admin.createdAt,
-    mustChangePassword: Boolean(admin.mustChangePassword),
-    disabled: false,
-    pending: false,
-  });
-}
-
 const PRESENCE_PATH = path.join(DATA_DIR, 'account-presence.json');
 
 /** 遗留 file 驱动仍用 JSON，与 sqlite/pg 的表形态对齐。 */

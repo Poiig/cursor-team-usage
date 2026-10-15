@@ -8,6 +8,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  DEFAULT_ACCESS_KEY,
+  getAccessKey,
   getListenConfig,
   getLogRetentionDays,
   getServerAutoRefreshSec,
@@ -108,6 +110,7 @@ import {
   consumeInstallToken,
   getExtensionBuildMeta,
   getConfiguredPublicBaseUrl,
+  getInstallToken,
   issueInstallToken,
   renderInstallPs1,
 } from './extension-asset.js';
@@ -115,7 +118,8 @@ import { startEmailLogin, verifyEmailLogin } from './cursor-email-login.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-const { host: HOST, port: PORT } = getListenConfig();
+let HOST;
+let PORT;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -608,6 +612,7 @@ function requiresAdmin(pathname, method) {
   if (pathname.startsWith('/api/reports')) return true;
   if (pathname === '/api/login-logs') return true;
   if (pathname === '/api/report-logs') return true;
+  if (pathname === '/api/refresh-all' && method === 'POST') return true;
   const memberWrite = pathname.match(/^\/api\/members\/[^/]+$/);
   if (memberWrite && (method === 'PUT' || method === 'DELETE')) return true;
   // 管理员手动移除账号使用人席位
@@ -787,7 +792,7 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'GET' && pathname === '/api/extension/install.ps1') {
       const token = String(url.searchParams.get('token') || '');
-      const row = consumeInstallToken(token);
+      const row = getInstallToken(token);
       if (!row) {
         return sendJson(res, 401, { error: '安装令牌无效或已过期', code: 'INSTALL_TOKEN' });
       }
@@ -1122,6 +1127,12 @@ const server = http.createServer(async (req, res) => {
         body?.operatorUsername,
         body?.operatorProof,
       );
+      if (!operatorUsername) {
+        return sendJson(res, 401, {
+          error: `插件使用人校验失败（${operatorReason}），请在看板重新安装插件`,
+          code: 'OPERATOR_PROOF',
+        });
+      }
       // upsert：新建=上报来源；已有账号续 Token，不覆盖人工显示名/主机名
       const { member, created, manualProtected } = await upsertMemberBySession({
         sessionToken,
@@ -1544,6 +1555,13 @@ const server = http.createServer(async (req, res) => {
 });
 
 await loadAppConfig();
+({ host: HOST, port: PORT } = getListenConfig());
+if (
+  !['127.0.0.1', '::1', 'localhost'].includes(HOST) &&
+  getAccessKey() === DEFAULT_ACCESS_KEY
+) {
+  throw new Error('对外监听时必须设置非默认 ACCESS_KEY');
+}
 // 控制台账号、席位与审计侧表同库，须先开库再写应用日志。
 await initStore();
 await initAppLog();

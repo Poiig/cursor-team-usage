@@ -8,7 +8,6 @@ import {
 import { resolveLocalCursorSession } from './authReader';
 import { scheduleCursorRestart, writeLocalCursorAuth } from './authWriter';
 import {
-  downloadAndInstallVsix,
   fetchRemoteBuildMeta,
   installAndOfferReload,
   installFromBoardWithAccessKey,
@@ -268,21 +267,19 @@ async function setupLocalBridge(context: vscode.ExtensionContext) {
     return;
   }
   try {
+    const boardOrigin = new URL(readReporterConfig().apiBaseUrl).origin;
     const { server, port: bound } = await startLocalBridge(
       port,
+      boardOrigin,
       (ticketId) => handleAccountSwitch(context, ticketId),
       () => handleRestoreLastAccount(context),
       async () => {
         const last = await loadLastAuthBackup(storageRoot(context));
         return summarizeBackup(last);
       },
-      async (body) => {
-        const vsixUrl = String(body?.vsixUrl || '').trim();
-        if (vsixUrl) {
-          await downloadAndInstallVsix(vsixUrl);
-        } else {
-          await installFromBoardWithAccessKey();
-        }
+      async () => {
+        // 仅从已配置看板拉包，不能让网页指定任意 VSIX 来源。
+        await installFromBoardWithAccessKey();
         // 让 HTTP 响应先返回给页面，再自动重载；否则运行中的旧扩展仍会报告旧版本。
         setTimeout(() => {
           void vscode.commands.executeCommand('workbench.action.reloadWindow');

@@ -20,7 +20,6 @@ import {
   formatPlanLabel,
   formatSpendPart,
   formatTokens,
-  formatTokensWan,
   loadSettings,
   money,
   planBadgeClass,
@@ -259,7 +258,7 @@ function eventRowHtml(e) {
   const tokens =
     e.isTokenBasedCall === false && !(e.totalTokens > 0)
       ? '—'
-      : formatTokensWan(e.totalTokens);
+      : formatTokens(e.totalTokens);
   return `
       <tr>
         <td>${escapeHtml(formatEventDate(e.timestamp))}</td>

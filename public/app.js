@@ -1541,7 +1541,7 @@ async function oneClickInstallExtension() {
       const res = await fetch(`http://127.0.0.1:${port}/install-extension`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ vsixUrl: link.vsixUrl }),
+        body: JSON.stringify({}),
         signal: AbortSignal.timeout(120_000),
       });
       const body = await res.json().catch(() => ({}));
