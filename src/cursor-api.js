@@ -790,6 +790,33 @@ export async function fetchPlanInfo(session) {
 }
 
 /**
+ * 账号在 Cursor 云端的 User Rules。后端把用户规则存在 Knowledge Base 里，接口名看不出是规则；
+ * 与其他接口不同，这里失败直接抛错，让下载按钮能提示真实原因。
+ * @param {string} cookieValue
+ * @returns {Promise<Array<{ id: string, title: string, content: string, createdAt: string | null }>>}
+ */
+export async function fetchUserRules(cookieValue) {
+  const jwt = jwtFromCookie(cookieValue);
+  if (!jwt) throw new Error('会话 Token 格式无效');
+  const data = await fetchJson('https://api2.cursor.sh/aiserver.v1.AiService/KnowledgeBaseList', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      'Content-Type': 'application/json',
+      'Connect-Protocol-Version': '1',
+      'User-Agent': USER_AGENT,
+    },
+    body: '{}',
+  });
+  return (data?.allResults || []).map((r) => ({
+    id: String(r.id ?? ''),
+    title: String(r.title ?? ''),
+    content: String(r.knowledge ?? ''),
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : null,
+  }));
+}
+
+/**
  * 组装面板 metric lines，供前端逐行渲染。
  * @param {{
  *   planMeters: ReturnType<typeof mergePlanMeters>,

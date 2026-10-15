@@ -26,6 +26,7 @@ import {
   usageCostLabel,
   eventTotalTokens,
   fetchMe,
+  fetchUserRules,
 } from '../src/cursor-api.js';
 import {
   archiveYesterdayPercents,
@@ -353,6 +354,38 @@ test('Cursor API 瞬时网络错误会重试并恢复', async () => {
     const me = await fetchMe({ cookieValue: 'x' });
     assert.equal(me.email, 'ok@example.com');
     assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('fetchUserRules 用 Bearer JWT 调 KnowledgeBaseList 并映射字段', async () => {
+  const realFetch = globalThis.fetch;
+  const jwt = 'h.eyJzdWIiOiJhdXRoMHx1c2VyXzEyMyJ9.s';
+  let seen;
+  try {
+    globalThis.fetch = async (url, init) => {
+      seen = { url, auth: init.headers.Authorization };
+      return new Response(
+        JSON.stringify({
+          success: true,
+          allResults: [
+            { id: '1', knowledge: '永远用中文', title: '中文', createdAt: '2026-10-15T05:43:51.014Z' },
+            { id: 2, knowledge: '无标题' },
+          ],
+        }),
+      );
+    };
+    const rules = await fetchUserRules(buildCookieValue('user_123', jwt));
+    assert.equal(seen.url, 'https://api2.cursor.sh/aiserver.v1.AiService/KnowledgeBaseList');
+    assert.equal(seen.auth, `Bearer ${jwt}`);
+    assert.deepEqual(rules, [
+      { id: '1', title: '中文', content: '永远用中文', createdAt: '2026-10-15T05:43:51.014Z' },
+      { id: '2', title: '', content: '无标题', createdAt: null },
+    ]);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ success: true }));
+    assert.deepEqual(await fetchUserRules(buildCookieValue('user_123', jwt)), []);
   } finally {
     globalThis.fetch = realFetch;
   }

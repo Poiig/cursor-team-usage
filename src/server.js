@@ -15,7 +15,7 @@ import {
   loadAppConfig,
 } from './config.js';
 import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
-import { fetchMemberSnapshot } from './cursor-api.js';
+import { fetchMemberSnapshot, fetchUserRules } from './cursor-api.js';
 import {
   ensureMemberUsageEventsSynced,
   loadPreviousCycle,
@@ -1391,7 +1391,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const memberMatch = pathname.match(
-      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/previous-cycle|\/switch|\/presence)?$/,
+      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/previous-cycle|\/user-rules|\/switch|\/presence)?$/,
     );
     if (memberMatch) {
       const id = decodeURIComponent(memberMatch[1]);
@@ -1446,6 +1446,17 @@ const server = http.createServer(async (req, res) => {
         const member = await getMemberInternal(id);
         if (!member) throw new Error('成员不存在');
         return sendJson(res, 200, await loadPreviousCycle(member));
+      }
+
+      if (method === 'GET' && suffix === '/user-rules') {
+        const member = await getMemberInternal(id);
+        if (!member) throw new Error('成员不存在');
+        try {
+          return sendJson(res, 200, { rules: await fetchUserRules(member.cookieValue) });
+        } catch (e) {
+          // 上游 401 原样透传会被前端当成看板登录失效而跳登录页
+          throw new Error(`拉取用户规则失败：${e?.message || e}`);
+        }
       }
 
       if (method === 'POST' && suffix === '/refresh') {
