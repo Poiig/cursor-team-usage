@@ -85,12 +85,14 @@ test('安装令牌仅允许下载 VSIX 一次', () => {
   assert.equal(consumeInstallToken(token), null);
 });
 
-test('macOS 安装命令下载 VSIX 后用 Cursor CLI 安装并启动', () => {
+test('macOS 安装命令下载 VSIX 后自动寻找 Cursor CLI 并启动', () => {
   const command = renderInstallSh({
     downloadUrl: 'https://usage.example.com/api/extension/reporter.vsix?token=abc',
   });
   assert.match(command, /curl -fL 'https:\/\/usage\.example\.com\/api\/extension\/reporter\.vsix\?token=abc'/);
-  assert.match(command, /cursor --install-extension/);
+  assert.match(command, /command -v cursor/);
+  assert.match(command, /\/Applications\/Cursor\.app\/Contents\/Resources\/app\/bin\/cursor/);
+  assert.match(command, /"\$cli" --install-extension "\$vsix" --force/);
   assert.match(command, /open -a Cursor$/);
 });
 
@@ -531,11 +533,47 @@ test('用户名与密码校验', async () => {
     mustChangePassword: true,
     disabled: false,
     pending: true,
+    guideCompleted: false,
   });
   assert.equal(pub.username, 'u1');
   assert.equal(pub.role, 'user');
   assert.equal(pub.pending, true);
+  assert.equal(pub.guideCompleted, false);
   assert.equal('passwordHash' in pub, false);
+});
+
+test('用户完成引导后持久化状态', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-guide-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 'guide.sqlite');
+  try {
+    await loadAppConfig();
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    const store = await import('../src/store.js');
+    await store.initStore();
+    const { completeGuideFor, getPublicUser, initUsers } = await import('../src/users.js');
+    await initUsers();
+    assert.equal((await getPublicUser('admin'))?.guideCompleted, false);
+    await completeGuideFor('admin');
+    assert.equal((await getPublicUser('admin'))?.guideCompleted, true);
+    await sqlite.close();
+    await store.initStore();
+    assert.equal((await getPublicUser('admin'))?.guideCompleted, true);
+  } finally {
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    if (prevDriver === undefined) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite === undefined) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('切换报表汇总与 Total usage 快照', async () => {

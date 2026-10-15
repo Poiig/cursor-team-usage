@@ -220,7 +220,7 @@
 
       <section class="panel users-panel hidden" id="tabUsers">
         <div class="panel-head">
-          <h2>用户管理</h2>
+          <h2>用户管理 <span class="section-count" id="userCount">0</span></h2>
           <div class="toolbar">
             <button type="button" class="btn primary" id="btnAddUser">+ 添加用户</button>
           </div>
@@ -246,7 +246,10 @@
       </section>
 
       <section class="panel help-panel hidden" id="tabHelp">
-        <h2>关于本看板</h2>
+        <div class="panel-head">
+          <h2>关于本看板</h2>
+          <button type="button" class="btn" id="btnRestartGuide">重新打开引导</button>
+        </div>
         <ol class="help-steps">
           <li>
             <strong>定位</strong>：本地 / 内网并排看多个 Cursor 账号的用量与花费，不是官方 Team Admin。
@@ -268,7 +271,7 @@
             <strong>录入账号</strong>：本机导入 / 粘贴 Token / 邮箱验证码入池；多机用 Reporter 扩展定时上报（显示名默认机器名）。
           </li>
           <li>
-            <strong>插件安装</strong>：登录后在账号页点「安装插件」。安装包绑定当前用户并写入签名；用户页能看到版本。地址只认 <code>PUBLIC_BASE_URL</code>。优先本机桥 <code>:3781</code>，否则按系统复制 PowerShell 或 macOS 终端命令。扩展启动会检查更新。
+            <strong>插件安装</strong>：登录后在账号页点「安装插件」。安装包绑定当前用户并写入签名；用户页能看到版本。地址只认 <code>PUBLIC_BASE_URL</code>。优先本机桥 <code>:3781</code>，否则会打开备用命令窗口，点击复制后在 PowerShell 或 macOS 终端执行。macOS 命令会自动寻找常见的 Cursor 安装路径。扩展启动会检查更新。
           </li>
           <li>
             <strong>刷新</strong>：服务端按每个账号的上次更新时间错开刷新（间隔见 <code>AUTO_REFRESH_SEC</code>，默认 900 秒）；上报后会立刻拉一次用量。列表「刷新用量」会从最久未更新的账号开始逐个刷新。
@@ -279,6 +282,24 @@
         </ol>
       </section>
     </div>
+
+    <dialog id="installCommandDialog" class="sheet">
+      <div class="sheet-body">
+        <header>
+          <h3 id="installCommandTitle">安装 Reporter 插件</h3>
+          <button type="button" class="icon-close" id="btnInstallCommandClose" aria-label="关闭">×</button>
+        </header>
+        <p class="hint" id="installCommandHint"></p>
+        <textarea id="installCommandText" rows="7" readonly spellcheck="false"></textarea>
+        <footer class="sheet-footer">
+          <p class="hint">复制后在本机终端粘贴执行。</p>
+          <div class="sheet-footer-right">
+            <button type="button" class="btn" id="btnInstallCommandCloseBottom">关闭</button>
+            <button type="button" class="btn primary" id="btnCopyInstallCommand">复制命令</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
 
     <dialog id="userDialog" class="sheet">
       <div class="sheet-body">
@@ -437,6 +458,27 @@
         <footer class="sheet-footer">
           <div class="sheet-footer-right">
             <button type="button" class="btn primary" id="btnForceChangePassword">保存新密码</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="onboardingDialog" class="sheet sheet-wide onboarding-sheet">
+      <div class="sheet-body">
+        <header>
+          <div>
+            <p class="onboarding-kicker" id="onboardingKicker">快速上手</p>
+            <h3 id="onboardingTitle">开始使用</h3>
+          </div>
+          <span class="onboarding-count" id="onboardingCount" aria-live="polite"></span>
+        </header>
+        <div class="onboarding-progress" id="onboardingProgress" aria-hidden="true"></div>
+        <div class="onboarding-content" id="onboardingContent"></div>
+        <footer class="sheet-footer onboarding-footer">
+          <button type="button" class="btn-link-inline" id="btnSkipGuide">跳过并不再提示</button>
+          <div class="sheet-footer-right">
+            <button type="button" class="btn" id="btnGuidePrev">上一步</button>
+            <button type="button" class="btn primary" id="btnGuideNext">下一步</button>
           </div>
         </footer>
       </div>

@@ -293,7 +293,8 @@ function ensureSchema() {
       created_at TEXT NOT NULL,
       must_change_password INTEGER NOT NULL DEFAULT 1,
       disabled INTEGER NOT NULL DEFAULT 0,
-      pending INTEGER NOT NULL DEFAULT 0
+      pending INTEGER NOT NULL DEFAULT 0,
+      guide_completed INTEGER NOT NULL DEFAULT 0
     )
   `);
   ensureConsoleUserColumns();
@@ -470,6 +471,7 @@ function migrateConsoleAdminToUsers() {
  *   disabled: boolean,
  *   pending: boolean,
  *   alias: string,
+ *   guideCompleted: boolean,
  * }} ConsoleUserRow
  */
 
@@ -481,6 +483,9 @@ function ensureConsoleUserColumns() {
   }
   if (!cols.has('alias')) {
     run("ALTER TABLE console_users ADD COLUMN alias TEXT NOT NULL DEFAULT ''");
+  }
+  if (!cols.has('guide_completed')) {
+    run('ALTER TABLE console_users ADD COLUMN guide_completed INTEGER NOT NULL DEFAULT 0');
   }
 }
 
@@ -500,6 +505,7 @@ function rowToConsoleUser(row) {
     disabled: Boolean(row.disabled),
     pending: Boolean(row.pending),
     alias: String(row.alias || ''),
+    guideCompleted: Boolean(row.guide_completed),
   };
 }
 
@@ -1123,8 +1129,8 @@ export async function createConsoleUser(user) {
   if (exists) throw new Error('用户名已存在');
   run(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias)
-     VALUES (?,?,?,?,?,?,?,?,?)`,
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias, guide_completed)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
     [
       user.username,
       user.passwordHash,
@@ -1135,6 +1141,7 @@ export async function createConsoleUser(user) {
       user.disabled ? 1 : 0,
       user.pending ? 1 : 0,
       String(user.alias || ''),
+      user.guideCompleted ? 1 : 0,
     ],
   );
   // 同步写回遗留 console_admin，避免旧工具只读那张表时丢 admin
@@ -1165,8 +1172,8 @@ export async function createConsoleUser(user) {
 export async function saveConsoleUser(user) {
   run(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias)
-     VALUES (?,?,?,?,?,?,?,?,?)
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias, guide_completed)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(username) DO UPDATE SET
        password_hash=excluded.password_hash,
        salt=excluded.salt,
@@ -1175,7 +1182,8 @@ export async function saveConsoleUser(user) {
        must_change_password=excluded.must_change_password,
        disabled=excluded.disabled,
        pending=excluded.pending,
-       alias=excluded.alias`,
+       alias=excluded.alias,
+       guide_completed=excluded.guide_completed`,
     [
       user.username,
       user.passwordHash,
@@ -1186,6 +1194,7 @@ export async function saveConsoleUser(user) {
       user.disabled ? 1 : 0,
       user.pending ? 1 : 0,
       String(user.alias || ''),
+      user.guideCompleted ? 1 : 0,
     ],
   );
   if (user.username === 'admin') {

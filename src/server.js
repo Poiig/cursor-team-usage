@@ -92,6 +92,7 @@ import {
   approveUser,
   authenticateUser,
   changeOwnPassword,
+  completeGuideFor,
   createUser,
   getPublicUser,
   initUsers,
@@ -896,6 +897,7 @@ const server = http.createServer(async (req, res) => {
         username: me.username,
         role: me.role,
         mustChangePassword: await mustChangePasswordFor(me.username),
+        guideCompleted: me.guideCompleted,
       });
     }
 
@@ -909,6 +911,17 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const user = await changeOwnPassword(session.username, String(body?.password || ''));
       await writeAppLog('改密', { 用户: session.username });
+      return sendJson(res, 200, { ok: true, user });
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/complete-guide') {
+      const session = readSessionFromRequest(req);
+      if (!session) {
+        const err = new Error('未登录');
+        err.status = 401;
+        throw err;
+      }
+      const user = await completeGuideFor(session.username);
       return sendJson(res, 200, { ok: true, user });
     }
 

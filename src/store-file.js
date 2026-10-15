@@ -477,6 +477,7 @@ export async function setPrevCycleSummary(id, summary) {
  *   disabled: boolean,
  *   pending: boolean,
  *   alias: string,
+ *   guideCompleted: boolean,
  * }} ConsoleUserRow
  */
 
@@ -531,6 +532,7 @@ async function readUsersFile() {
       ...u,
       pending: Boolean(u.pending),
       alias: String(u.alias || ''),
+      guideCompleted: Boolean(u.guideCompleted),
     }));
     return { users, admin: parsed.admin };
   } catch (e) {

@@ -41,6 +41,12 @@ const els = {
   empty: document.getElementById('emptyState'),
   dialog: document.getElementById('memberDialog'),
   forcePasswordDialog: document.getElementById('forcePasswordDialog'),
+  onboardingDialog: document.getElementById('onboardingDialog'),
+  onboardingKicker: document.getElementById('onboardingKicker'),
+  onboardingTitle: document.getElementById('onboardingTitle'),
+  onboardingCount: document.getElementById('onboardingCount'),
+  onboardingProgress: document.getElementById('onboardingProgress'),
+  onboardingContent: document.getElementById('onboardingContent'),
   displayName: document.getElementById('fieldDisplayName'),
   sessionToken: document.getElementById('fieldSessionToken'),
   memberMethodTabs: document.getElementById('memberMethodTabs'),
@@ -73,6 +79,10 @@ const els = {
   btnExport: document.getElementById('btnExport'),
   btnNotifyTest: document.getElementById('btnNotifyTest'),
   btnForceChangePassword: document.getElementById('btnForceChangePassword'),
+  btnGuidePrev: document.getElementById('btnGuidePrev'),
+  btnGuideNext: document.getElementById('btnGuideNext'),
+  btnSkipGuide: document.getElementById('btnSkipGuide'),
+  btnRestartGuide: document.getElementById('btnRestartGuide'),
   btnLogout: document.getElementById('btnLogout'),
   btnHelp: document.getElementById('btnHelp'),
   btnSaveMember: document.getElementById('btnSaveMember'),
@@ -106,6 +116,7 @@ const els = {
   chartTodayModels: document.getElementById('chartTodayModels'),
   statusFilter: document.getElementById('statusFilter'),
   userTableBody: document.getElementById('userTableBody'),
+  userCount: document.getElementById('userCount'),
   userDialog: document.getElementById('userDialog'),
   userDialogTitle: document.getElementById('userDialogTitle'),
   fieldUsername: document.getElementById('fieldUsername'),
@@ -113,6 +124,13 @@ const els = {
   fieldUserRole: document.getElementById('fieldUserRole'),
   btnAddUser: document.getElementById('btnAddUser'),
   btnInstallExtension: document.getElementById('btnInstallExtension'),
+  installCommandDialog: document.getElementById('installCommandDialog'),
+  installCommandTitle: document.getElementById('installCommandTitle'),
+  installCommandHint: document.getElementById('installCommandHint'),
+  installCommandText: document.getElementById('installCommandText'),
+  btnCopyInstallCommand: document.getElementById('btnCopyInstallCommand'),
+  btnInstallCommandClose: document.getElementById('btnInstallCommandClose'),
+  btnInstallCommandCloseBottom: document.getElementById('btnInstallCommandCloseBottom'),
   btnSaveUser: document.getElementById('btnSaveUser'),
   btnUserDialogClose: document.getElementById('btnUserDialogClose'),
   btnUserDialogCancel: document.getElementById('btnUserDialogCancel'),
@@ -129,7 +147,7 @@ let editing = null;
 let refreshingAll = false;
 let settings = loadSettings();
 let forcePasswordRequired = false;
-/** @type {{ username: string, role: string } | null} */
+/** @type {{ username: string, role: string, guideCompleted: boolean } | null} */
 let currentUser = null;
 /** @type {object[]} */
 let switchLogsCache = [];
@@ -143,6 +161,7 @@ let currentCursorChecked = false;
 let extensionMeta = null;
 let localExtensionInfo = null;
 let extensionInstallMode = 'install';
+let onboardingStep = 0;
 /** @type {'all' | 'ok' | 'expiring' | 'error'} */
 let accountStatusFilter = 'all';
 
@@ -916,7 +935,7 @@ async function load() {
   summaryCache = data.summary || {};
   recommendedSwitchId = data.recommendedSwitchId || null;
   renderList();
-  if (!currentCursorChecked) void detectCurrentCursorAccount();
+  if (!currentCursorChecked) await detectCurrentCursorAccount();
 }
 
 async function refreshAll(silent = false) {
@@ -949,11 +968,122 @@ function openForcePasswordDialog() {
   els.forceNewPassword?.focus();
 }
 
+/**
+ * 让引导内容与用户实际可见权限对齐，避免普通用户看到不能操作的管理员入口。
+ */
+function onboardingSteps() {
+  const steps = [
+    {
+      kicker: '第 1 步 · 安装插件',
+      title: '安装 Reporter 插件',
+      text: '点击看板右上角「安装插件」。本机 Cursor 已打开时会直接安装；否则会打开备用命令窗口，点击复制后在 PowerShell 或 macOS 终端粘贴执行即可。',
+      note: '插件会绑定当前看板用户，用于上报本机 Cursor 的登录状态和使用人信息。',
+      image: '/media/onboarding/install-command.png',
+      imageAlt: '看板提示复制 PowerShell 安装命令',
+      action: 'install',
+    },
+    {
+      kicker: '第 2 步 · 打开 IDE',
+      title: '在 Cursor 切换到 IDE 模式',
+      text: '打开 Cursor 后，点击右上角模式切换位置并选择 IDE 模式。保持 IDE 打开，Reporter 插件才会定时上报当前登录账号。',
+      note: 'Agent Review 等模式不等同于 IDE 模式；需要在 Cursor 的 IDE 窗口中运行插件。',
+      image: '/media/onboarding/cursor-ide-mode.png',
+      imageAlt: 'Cursor 右上角模式切换入口',
+    },
+    {
+      kicker: '第 3 步 · 确认上报',
+      title: '回到看板确认当前账号',
+      text: '插件启动后会自动上报。账号列表会显示当前 Cursor 账号及使用人；若尚未显示，请确认 Cursor 已登录且插件已安装。',
+    },
+    {
+      kicker: '第 4 步 · 开始使用',
+      title: '切换账号与查看帮助',
+      text: isAdmin()
+        ? '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。管理员还能添加账号、查看报表和管理用户。'
+        : '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。确认后会备份当前登录态、写入目标账号并重启 Cursor。',
+      warning: '切换账号前，必须先在 Cursor 打开 IDE 模式以激活插件；否则看板无法通知本机完成切换。',
+      note: '以后可在「说明」页面点击「重新打开引导」，随时回看这些步骤。',
+    },
+  ];
+  return steps;
+}
+
+/**
+ * 每次切换步骤都重绘静态引导内容，确保按钮文案和进度不会与角色状态脱节。
+ */
+function renderOnboarding() {
+  const steps = onboardingSteps();
+  onboardingStep = Math.max(0, Math.min(onboardingStep, steps.length - 1));
+  const step = steps[onboardingStep];
+  if (!step || !els.onboardingContent) return;
+  els.onboardingKicker.textContent = step.kicker;
+  els.onboardingTitle.textContent = step.title;
+  els.onboardingCount.textContent = `${onboardingStep + 1} / ${steps.length}`;
+  els.onboardingProgress.style.setProperty('--guide-steps', String(steps.length));
+  els.onboardingProgress.innerHTML = steps
+    .map((_, index) => `<span class="${index <= onboardingStep ? 'active' : ''}"></span>`)
+    .join('');
+  els.onboardingContent.innerHTML = `
+    <p class="onboarding-copy">${step.text}</p>
+    ${step.action ? '<button type="button" class="btn primary" data-guide-action="install">立即安装插件</button>' : ''}
+    ${step.warning ? `<p class="onboarding-note onboarding-note-danger">${step.warning}</p>` : ''}
+    ${step.note ? `<p class="onboarding-note">${step.note}</p>` : ''}
+    ${step.image ? `<img class="onboarding-image" src="${step.image}" alt="${step.imageAlt}" />` : ''}
+  `;
+  els.btnGuidePrev.disabled = onboardingStep === 0;
+  els.btnGuideNext.textContent = onboardingStep === steps.length - 1 ? '完成引导' : '下一步';
+}
+
+/**
+ * 重新打开只复看步骤；首次打开才依赖服务端状态决定是否展示。
+ */
+function openOnboarding() {
+  if (!els.onboardingDialog) return;
+  onboardingStep = 0;
+  renderOnboarding();
+  if (!els.onboardingDialog.open) els.onboardingDialog.showModal();
+}
+
+/**
+ * 写入当前用户的完成状态，避免跨浏览器或跨设备重复展示首次引导。
+ */
+async function finishOnboarding() {
+  try {
+    if (!currentUser?.guideCompleted) {
+      const data = await api('/api/auth/complete-guide', { method: 'POST', body: '{}' });
+      currentUser.guideCompleted = Boolean(data.user?.guideCompleted);
+    }
+    els.onboardingDialog?.close();
+  } catch (e) {
+    toast(e.message || String(e));
+  }
+}
+
+/**
+ * 强制改密优先于功能引导，避免两个弹窗争夺焦点。
+ */
+function maybeStartOnboarding() {
+  if (
+    !currentUser ||
+    currentUser.guideCompleted ||
+    forcePasswordRequired ||
+    els.forcePasswordDialog?.open ||
+    els.onboardingDialog?.open
+  ) {
+    return;
+  }
+  requestAnimationFrame(() => openOnboarding());
+}
+
 /** 启动时检查登录身份与是否须强制改密。 */
 async function ensurePasswordPolicy() {
   try {
     const me = await api('/api/auth/me');
-    currentUser = { username: me.username || '—', role: me.role || 'user' };
+    currentUser = {
+      username: me.username || '—',
+      role: me.role || 'user',
+      guideCompleted: Boolean(me.guideCompleted),
+    };
     applyRoleUi();
     // 按地址恢复页面；面板显隐只走 showView，避免 admin-only 把用户管理挂在账号列表下方
     applyRoute();
@@ -1342,6 +1472,7 @@ async function loadUsers() {
   try {
     const data = await api('/api/users');
     usersCache = data.users || [];
+    if (els.userCount) els.userCount.textContent = String(usersCache.length);
     // 用户表可能先于安装状态检查渲染，这里单独取一次最新版本号
     const latestVersion =
       extensionMeta?.version || (await api('/api/extension/meta').catch(() => null))?.version || null;
@@ -1416,6 +1547,51 @@ function openUserDialog() {
 
 function closeUserDialog() {
   if (els.userDialog?.open) els.userDialog.close();
+}
+
+/**
+ * 展示备用安装命令，并让用户在明确的点击动作中复制，规避异步请求后浏览器丢失剪贴板授权。
+ * @param {string} command
+ * @param {boolean} isMac
+ * @param {string} action
+ */
+function openInstallCommandDialog(command, isMac, action) {
+  const terminal = isMac ? '终端' : 'PowerShell';
+  if (!els.installCommandDialog || !els.installCommandText) {
+    window.prompt(`在本机${terminal}执行${action}命令：`, command);
+    return;
+  }
+  els.installCommandTitle.textContent = `${action} Reporter 插件`;
+  els.installCommandHint.textContent = `未能直接连接已打开的 Cursor。请点击“复制命令”，再在本机${terminal}粘贴执行。`;
+  els.installCommandText.value = command;
+  if (!els.installCommandDialog.open) els.installCommandDialog.showModal();
+  els.installCommandText.focus();
+  els.installCommandText.select();
+}
+
+/**
+ * 在用户点击时复制备用命令；剪贴板 API 不可用时退回选中文本的传统复制。
+ */
+async function copyInstallCommand() {
+  const input = els.installCommandText;
+  const command = input?.value || '';
+  if (!command) return;
+  try {
+    await navigator.clipboard.writeText(command);
+    toast('安装命令已复制');
+  } catch {
+    input.focus();
+    input.select();
+    const copied = document.execCommand('copy');
+    toast(copied ? '安装命令已复制' : '命令已选中，请按 Ctrl/Cmd+C 复制');
+  }
+}
+
+/**
+ * 关闭备用安装命令窗口，避免命令内容在后续安装中残留。
+ */
+function closeInstallCommandDialog() {
+  if (els.installCommandDialog?.open) els.installCommandDialog.close();
 }
 
 /** 本机扩展桥默认端口；与扩展设置 cursorTeamUsage.localBridgePort 一致。 */
@@ -1537,7 +1713,6 @@ async function oneClickInstallExtension() {
       body: JSON.stringify({}),
     });
     const isMac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
-    const terminal = isMac ? '终端' : 'PowerShell';
     const port = await findLocalBridgePort();
     if (port != null) {
       const res = await fetch(`http://127.0.0.1:${port}/install-extension`, {
@@ -1551,20 +1726,10 @@ async function oneClickInstallExtension() {
         toast(`已为「${username}」${action}插件，Cursor 正在自动重载`);
         return;
       }
-      toast(body.error || `${action}失败，已复制备用命令`);
-    } else {
-      toast(`未检测到本机桥，已复制${terminal} ${action}命令`);
+      toast(body.error || `${action}失败，请使用备用命令`);
     }
     const command = isMac ? link.macOneLiner : link.windowsOneLiner;
-    try {
-      await navigator.clipboard.writeText(command);
-    } catch {
-      /* 剪贴板失败时仍弹出 */
-    }
-    window.prompt(
-      `在本机${terminal}执行${action}（已尝试复制）：`,
-      command,
-    );
+    openInstallCommandDialog(command, isMac, action);
   } catch (e) {
     toast(e.message || String(e));
   } finally {
@@ -1781,6 +1946,7 @@ els.statusFilter?.addEventListener('click', (event) => {
 });
 
 els.btnHelp.addEventListener('click', () => navigate('help'));
+els.btnRestartGuide?.addEventListener('click', () => openOnboarding());
 els.btnAdd?.addEventListener('click', () => openMemberDialog());
 els.btnEmptyAdd?.addEventListener('click', () => openMemberDialog());
 els.btnRefreshLogs?.addEventListener('click', () => loadLogs());
@@ -1792,6 +1958,26 @@ document.querySelector('.logs-nav')?.addEventListener('click', (event) => {
 });
 els.btnAddUser?.addEventListener('click', () => openUserDialog());
 els.btnInstallExtension?.addEventListener('click', () => oneClickInstallExtension());
+els.btnCopyInstallCommand?.addEventListener('click', () => void copyInstallCommand());
+els.btnInstallCommandClose?.addEventListener('click', closeInstallCommandDialog);
+els.btnInstallCommandCloseBottom?.addEventListener('click', closeInstallCommandDialog);
+els.btnGuidePrev?.addEventListener('click', () => {
+  onboardingStep -= 1;
+  renderOnboarding();
+});
+els.btnGuideNext?.addEventListener('click', async () => {
+  if (onboardingStep >= onboardingSteps().length - 1) {
+    await finishOnboarding();
+    return;
+  }
+  onboardingStep += 1;
+  renderOnboarding();
+});
+els.btnSkipGuide?.addEventListener('click', () => void finishOnboarding());
+els.onboardingContent?.addEventListener('click', (event) => {
+  const action = event.target.closest('[data-guide-action]')?.dataset.guideAction;
+  if (action === 'install') void oneClickInstallExtension();
+});
 els.btnUserDialogClose?.addEventListener('click', closeUserDialog);
 els.btnUserDialogCancel?.addEventListener('click', closeUserDialog);
 els.btnSaveUser?.addEventListener('click', async () => {
@@ -2023,6 +2209,7 @@ els.btnForceChangePassword?.addEventListener('click', async () => {
     forcePasswordRequired = false;
     if (els.forcePasswordDialog?.open) els.forcePasswordDialog.close();
     toast('密码已更新，可继续使用');
+    maybeStartOnboarding();
   } catch (e) {
     if (els.forcePasswordError) {
       els.forcePasswordError.textContent = e.message || String(e);
@@ -2308,5 +2495,8 @@ els.list.addEventListener('click', async (event) => {
 
 applySettingsToForm();
 ensurePasswordPolicy()
-  .then(() => load())
+  .then(async () => {
+    await load();
+    maybeStartOnboarding();
+  })
   .catch((e) => toast(e.message || String(e)));

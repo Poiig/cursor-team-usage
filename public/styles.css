@@ -304,6 +304,21 @@ h3 {
   font-size: 15px;
 }
 
+.section-count {
+  display: inline-flex;
+  min-width: 1.7em;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--btn-bg);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: 1px;
+}
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -1594,6 +1609,108 @@ a.user-slot-link:hover .user-slot-name {
 
 .help-steps strong {
   color: var(--text);
+}
+
+.onboarding-sheet {
+  width: min(760px, calc(100vw - 2rem));
+}
+
+.onboarding-kicker {
+  margin: 0 0 2px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.onboarding-count {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.onboarding-progress {
+  display: grid;
+  grid-template-columns: repeat(var(--guide-steps), minmax(0, 1fr));
+  gap: 6px;
+}
+
+.onboarding-progress span {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.onboarding-progress span.active {
+  background: var(--accent);
+}
+
+.onboarding-content {
+  display: grid;
+  gap: 12px;
+  min-height: 280px;
+}
+
+.onboarding-copy {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.onboarding-note {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.onboarding-note-danger {
+  border-color: color-mix(in srgb, var(--red) 65%, var(--border));
+  background: color-mix(in srgb, var(--red) 10%, var(--panel));
+  color: var(--red);
+  font-weight: 650;
+}
+
+.onboarding-image {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #161616;
+}
+
+.onboarding-footer {
+  align-items: center;
+}
+
+@media (max-width: 560px) {
+  .onboarding-sheet {
+    width: min(100vw - 1rem, 760px);
+  }
+
+  .onboarding-content {
+    min-height: 0;
+  }
+
+  .onboarding-image {
+    max-height: 240px;
+  }
+
+  .onboarding-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .onboarding-footer .sheet-footer-right {
+    width: 100%;
+    justify-content: space-between;
+  }
 }
 
 code {

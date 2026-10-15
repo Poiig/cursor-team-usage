@@ -245,13 +245,24 @@ if (-not (Test-Path -LiteralPath $vsix) -or (Get-Item -LiteralPath $vsix).Length
   throw "Download failed: $vsix"
 }
 $cli = Get-Command cursor -ErrorAction SilentlyContinue
-if (-not $cli) { throw 'cursor CLI not found. Install Cursor and ensure cursor is on PATH.' }
-Write-Host "Install: $($cli.Source)"
-& $cli.Source --install-extension $vsix --force
+if ($cli) {
+  $cliPath = $cli.Source
+} else {
+  $candidates = @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\\cursor\\resources\\app\\bin\\cursor.cmd'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\\Cursor\\resources\\app\\bin\\cursor.cmd')
+  )
+  $cliPath = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
+if (-not $cliPath) {
+  throw '未找到 Cursor 命令。请在 Cursor 命令面板执行「Shell Command: Install "cursor" command in PATH」后重试。'
+}
+Write-Host "Install: $cliPath"
+& $cliPath --install-extension $vsix --force
 if ($LASTEXITCODE -ne 0) { throw "Install failed ($LASTEXITCODE)" }
 $exe = Join-Path $env:LOCALAPPDATA 'Programs\cursor\Cursor.exe'
 if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe }
-elseif ($cli.Source -like '*.exe') { Start-Process -FilePath $cli.Source }
+elseif ($cliPath -like '*.exe') { Start-Process -FilePath $cliPath }
 Write-Host 'Done. Developer: Reload Window if Cursor was already open.'
 `;
 }
@@ -262,7 +273,7 @@ Write-Host 'Done. Developer: Reload Window if Cursor was already open.'
  */
 export function renderInstallSh(opts) {
   const url = opts.downloadUrl.replace(/'/g, "'\\''");
-  return `curl -fL '${url}' -o "\${TMPDIR:-/tmp}/cursor-team-usage-reporter.vsix" && cursor --install-extension "\${TMPDIR:-/tmp}/cursor-team-usage-reporter.vsix" --force && open -a Cursor`;
+  return `set -e; vsix="\${TMPDIR:-/tmp}/cursor-team-usage-reporter.vsix"; curl -fL '${url}' -o "$vsix"; cli="\${CURSOR_CLI:-$(command -v cursor || true)}"; if [ -z "$cli" ]; then for candidate in "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" "$HOME/Applications/Cursor.app/Contents/Resources/app/bin/cursor"; do if [ -x "$candidate" ]; then cli="$candidate"; break; fi; done; fi; if [ -z "$cli" ]; then echo '未找到 Cursor 命令。请在 Cursor 命令面板执行 Shell Command: Install "cursor" command in PATH 后重试。' >&2; exit 1; fi; "$cli" --install-extension "$vsix" --force; open -a Cursor`;
 }
 
 /**

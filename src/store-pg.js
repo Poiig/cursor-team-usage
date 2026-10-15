@@ -234,7 +234,8 @@ export async function init() {
       must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
       disabled BOOLEAN NOT NULL DEFAULT FALSE,
       pending BOOLEAN NOT NULL DEFAULT FALSE,
-      alias TEXT NOT NULL DEFAULT ''
+      alias TEXT NOT NULL DEFAULT '',
+      guide_completed BOOLEAN NOT NULL DEFAULT FALSE
     )
   `);
   await db().query(`
@@ -244,6 +245,10 @@ export async function init() {
   await db().query(`
     ALTER TABLE console_users
       ADD COLUMN IF NOT EXISTS alias TEXT NOT NULL DEFAULT ''
+  `);
+  await db().query(`
+    ALTER TABLE console_users
+      ADD COLUMN IF NOT EXISTS guide_completed BOOLEAN NOT NULL DEFAULT FALSE
   `);
   await db().query(`
     CREATE TABLE IF NOT EXISTS account_switch_logs (
@@ -944,6 +949,7 @@ export async function setPrevCycleSummary(id, summary) {
  *   disabled: boolean,
  *   pending: boolean,
  *   alias: string,
+ *   guideCompleted: boolean,
  * }} ConsoleUserRow
  */
 
@@ -963,6 +969,7 @@ function rowToConsoleUser(row) {
     disabled: Boolean(row.disabled),
     pending: Boolean(row.pending),
     alias: String(row.alias || ''),
+    guideCompleted: Boolean(row.guide_completed),
   };
 }
 
@@ -986,8 +993,8 @@ export async function createConsoleUser(user) {
   if (existing) throw new Error('用户名已存在');
   await db().query(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias, guide_completed)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
     [
       user.username,
       user.passwordHash,
@@ -998,6 +1005,7 @@ export async function createConsoleUser(user) {
       Boolean(user.disabled),
       Boolean(user.pending),
       String(user.alias || ''),
+      Boolean(user.guideCompleted),
     ],
   );
   if (user.username === 'admin') await saveConsoleAdminMirror(user);
@@ -1007,8 +1015,8 @@ export async function createConsoleUser(user) {
 export async function saveConsoleUser(user) {
   await db().query(
     `INSERT INTO console_users
-      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      (username, password_hash, salt, role, created_at, must_change_password, disabled, pending, alias, guide_completed)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      ON CONFLICT (username) DO UPDATE SET
        password_hash = EXCLUDED.password_hash,
        salt = EXCLUDED.salt,
@@ -1017,7 +1025,8 @@ export async function saveConsoleUser(user) {
        must_change_password = EXCLUDED.must_change_password,
        disabled = EXCLUDED.disabled,
        pending = EXCLUDED.pending,
-       alias = EXCLUDED.alias`,
+       alias = EXCLUDED.alias,
+       guide_completed = EXCLUDED.guide_completed`,
     [
       user.username,
       user.passwordHash,
@@ -1028,6 +1037,7 @@ export async function saveConsoleUser(user) {
       Boolean(user.disabled),
       Boolean(user.pending),
       String(user.alias || ''),
+      Boolean(user.guideCompleted),
     ],
   );
   if (user.username === 'admin') await saveConsoleAdminMirror(user);

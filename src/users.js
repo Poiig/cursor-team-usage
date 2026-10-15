@@ -23,6 +23,7 @@ import {
  *   disabled: boolean,
  *   pending: boolean,
  *   alias: string,
+ *   guideCompleted: boolean,
  * }} ConsoleUser
  */
 
@@ -42,6 +43,7 @@ export function toPublicUser(user) {
     disabled: Boolean(user.disabled),
     pending: Boolean(user.pending),
     alias: String(user.alias || '').trim(),
+    guideCompleted: Boolean(user.guideCompleted),
   };
 }
 
@@ -86,6 +88,8 @@ function createDefaultAdmin() {
     mustChangePassword: true,
     disabled: false,
     pending: false,
+    alias: '',
+    guideCompleted: false,
   };
 }
 
@@ -186,6 +190,7 @@ export async function registerUser(input) {
     disabled: false,
     pending: true,
     alias: '',
+    guideCompleted: false,
   };
   await createConsoleUser(user);
   return toPublicUser(user);
@@ -244,6 +249,7 @@ export async function createUser(input) {
     disabled: false,
     pending: false,
     alias: '',
+    guideCompleted: false,
   };
   await createConsoleUser(user);
   return toPublicUser(user);
@@ -262,6 +268,19 @@ export async function changeOwnPassword(username, password) {
   user.salt = newSalt();
   user.passwordHash = hashPassword(next, user.salt);
   user.mustChangePassword = false;
+  await saveConsoleUser(user);
+  return toPublicUser(user);
+}
+
+/**
+ * 只允许本人把引导标为已完成，避免前端本地状态在换设备后重复打扰。
+ * @param {string} username
+ */
+export async function completeGuideFor(username) {
+  const name = normalizeUsername(username);
+  const user = await getConsoleUser(name);
+  if (!user) throw new Error('用户不存在');
+  user.guideCompleted = true;
   await saveConsoleUser(user);
   return toPublicUser(user);
 }
