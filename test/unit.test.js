@@ -544,6 +544,64 @@ test('切换报表汇总与 Total usage 快照', async () => {
   assert.equal(report[1].memberCount, 1);
 });
 
+test('人员详情：别名匹配相关号池账号', async () => {
+  const { relatedPoolMembersForPerson } = await import('../src/people.js');
+  const related = relatedPoolMembersForPerson(
+    { alias: '王路峰' },
+    [
+      { id: 'a', displayName: '王路峰', email: 'a@x.com', hostname: 'PC-A' },
+      { id: 'b', displayName: '宋文杰', email: 'b@x.com' },
+    ],
+  );
+  assert.equal(related.length, 1);
+  assert.equal(related[0].id, 'a');
+  assert.deepEqual(relatedPoolMembersForPerson({ alias: '' }, [{ id: 'a', displayName: '王路峰' }]), []);
+});
+
+test('人员详情：无痕迹时 404；有上报则返回聚合', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-people-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 't.sqlite');
+  try {
+    await loadAppConfig();
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    const store = await import('../src/store.js');
+    await store.initStore();
+    const { initUsers } = await import('../src/users.js');
+    await initUsers();
+    const { recordReportEvent } = await import('../src/report-log.js');
+    const { getPersonDetail } = await import('../src/people.js');
+
+    await assert.rejects(() => getPersonDetail('nobody_here'), /不存在/);
+
+    await recordReportEvent({
+      operatorUsername: 'alice',
+      memberId: 'm1',
+      memberDisplayName: '甲',
+      hostname: 'PC-A',
+      ok: true,
+    });
+    const detail = await getPersonDetail('alice');
+    assert.equal(detail.username, 'alice');
+    assert.equal(detail.reports.length, 1);
+    assert.equal(detail.reports[0].memberDisplayName, '甲');
+  } finally {
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    if (prevDriver === undefined) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite === undefined) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('使用人席位：别名优先，老插件回退主机中文备注', async () => {
   const { displayPresenceLabel } = await import('../src/account-presence.js');
   const aliasByUsername = new Map([['lukezhang', '陆克']]);
@@ -575,6 +633,75 @@ test('使用人席位：别名优先，老插件回退主机中文备注', async
   );
 });
 
+test('使用人席位：上报粘性占有，不因断报清空；可手动移除', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-presence-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 't.sqlite');
+  const presence = await import('../src/account-presence.js');
+  try {
+    await loadAppConfig();
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    const store = await import('../src/store.js');
+    await store.initStore();
+    presence.resetPresenceCacheForTests();
+
+    const member = { id: 'm1', planName: 'Pro', displayName: '甲' };
+    await presence.recordAccountPresence({
+      memberId: 'm1',
+      memberDisplayName: '甲',
+      hostname: 'PC-A',
+      username: 'alice',
+    });
+    // 伪造「过夜」：把 lastSeenAt 改到 10 小时前，席位仍应保留
+    const map = await store.loadAccountPresenceMap();
+    map['pc-a'].lastSeenAt = new Date(Date.now() - 10 * 3600 * 1000).toISOString();
+    await store.saveAccountPresenceMap(map);
+    presence.resetPresenceCacheForTests();
+
+    const cap = await presence.getMemberCapacity(member);
+    assert.equal(cap.activeUserCount, 1);
+    assert.equal(cap.activeUsers[0].hostname, 'PC-A');
+    assert.equal(cap.maxUsers, 3);
+
+    // 上报切到另一账号时，旧号席位让出
+    await presence.recordAccountPresence({
+      memberId: 'm2',
+      memberDisplayName: '乙',
+      hostname: 'PC-A',
+      username: 'alice',
+    });
+    presence.resetPresenceCacheForTests();
+    assert.equal((await presence.getMemberCapacity(member)).activeUserCount, 0);
+    assert.equal(
+      (await presence.getMemberCapacity({ id: 'm2', planName: 'Pro' })).activeUserCount,
+      1,
+    );
+
+    const removed = await presence.removeMemberPresence('m2', 'PC-A');
+    assert.equal(removed, true);
+    assert.equal(
+      (await presence.getMemberCapacity({ id: 'm2', planName: 'Pro' })).activeUserCount,
+      0,
+    );
+    assert.equal(await presence.removeMemberPresence('m2', 'PC-A'), false);
+  } finally {
+    presence.resetPresenceCacheForTests();
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    if (prevDriver === undefined) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite === undefined) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('插件使用人签名与版本展示', async () => {
   const { loadAppConfig } = await import('../src/config.js');
   await loadAppConfig();
@@ -588,8 +715,11 @@ test('插件使用人签名与版本展示', async () => {
   await initStore();
   const {
     pluginClientView,
+    isPluginOnline,
+    PLUGIN_ONLINE_MS,
     recordPluginInstall,
     recordPluginReport,
+    recordPluginHeartbeat,
     forgetPluginClient,
     listPluginClientViews,
   } = await import('../src/plugin-clients.js');
@@ -613,12 +743,35 @@ test('插件使用人签名与版本展示', async () => {
     }).build,
     'run',
   );
+  const now = Date.parse('2026-10-15T12:00:00.000Z');
+  assert.equal(isPluginOnline(new Date(now - PLUGIN_ONLINE_MS + 1000).toISOString(), now), true);
+  assert.equal(isPluginOnline(new Date(now - PLUGIN_ONLINE_MS - 1000).toISOString(), now), false);
+  assert.equal(isPluginOnline(null, now), false);
+  assert.equal(
+    pluginClientView({
+      version: '0.2.8',
+      installedAt: '2026-10-15T11:00:00.000Z',
+      reportedAt: '2026-10-15T11:50:00.000Z',
+    }).online,
+    false,
+  );
+  assert.equal(
+    pluginClientView({
+      version: '0.2.8',
+      heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    }).online,
+    true,
+  );
 
   const name = '__plugin_client_test__';
   await forgetPluginClient(name);
   const installed = await recordPluginInstall(name, { version: '0.2.8', build: 'abc' });
   assert.equal(installed.state, 'installed');
   assert.equal(installed.version, '0.2.8');
+  assert.equal(installed.online, false);
+  const beat = await recordPluginHeartbeat(name, { version: '0.2.8', hostname: 'PC-HB' });
+  assert.equal(beat?.online, true);
+  assert.equal(beat?.hostname, 'PC-HB');
   const reported = await recordPluginReport(name, {
     version: '0.2.8',
     build: 'def',
@@ -626,6 +779,8 @@ test('插件使用人签名与版本展示', async () => {
   });
   assert.equal(reported.state, 'reported');
   assert.equal(reported.hostname, 'PC-1');
+  assert.equal(reported.online, true);
+  assert.ok(reported.heartbeatAt);
   await recordPluginReport(name, { version: '<bad>', build: 'def' });
   const views = await listPluginClientViews();
   assert.equal(views[name].version, '0.2.8');

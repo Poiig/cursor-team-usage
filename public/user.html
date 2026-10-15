@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>人员详情 · Cursor Team Usage</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.png" type="image/png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="standalone">
+    <div class="app">
+      <header class="header">
+        <div class="header-top">
+          <div class="brand">
+            <div class="brand-title">
+              <img class="brand-mark" src="/favicon.svg" width="28" height="28" alt="" />
+              <h1>Cursor Team Usage</h1>
+            </div>
+            <p class="footer-links">
+              <a href="/">← 返回账号列表</a>
+            </p>
+          </div>
+        </div>
+      </header>
+
+      <section class="panel detail-panel person-panel" id="personRoot">
+        <div class="panel-head">
+          <div class="detail-head">
+            <div>
+              <h2 id="personTitle">人员详情</h2>
+              <p id="personSub" class="muted"></p>
+              <div id="personMeta" class="badges detail-meta"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="personFacts" class="person-facts"></div>
+
+        <div class="person-sections">
+          <article class="chart-card">
+            <h3>当前使用账号</h3>
+            <p class="muted person-hint">席位来自上报/切换；管理员可移出（只改看板，不回收 Cursor 授权）。</p>
+            <div id="personAccounts" class="person-block"></div>
+          </article>
+          <article class="chart-card">
+            <h3>相关号池账号</h3>
+            <p class="muted person-hint">别名与号池显示名相同的账号。人已在用别人号时，可从号池删掉多余账号。</p>
+            <div id="personPoolMembers" class="person-block"></div>
+          </article>
+          <article class="chart-card">
+            <h3>切换记录</h3>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>账号</th>
+                    <th>主机</th>
+                    <th>结果</th>
+                  </tr>
+                </thead>
+                <tbody id="personSwitchBody"></tbody>
+              </table>
+            </div>
+          </article>
+          <article class="chart-card">
+            <h3>上报记录</h3>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>账号</th>
+                    <th>主机</th>
+                    <th>插件</th>
+                    <th>结果</th>
+                  </tr>
+                </thead>
+                <tbody id="personReportBody"></tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script type="module" src="/user.js"></script>
+  </body>
+</html>

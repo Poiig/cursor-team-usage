@@ -21,10 +21,15 @@ import {
   readReporterConfig,
   reportSession,
   reportSwitchResult,
+  sendHeartbeat,
 } from './reporter';
+
+/** 与服务端 PLUGIN_ONLINE_MS=5min 对齐：约 2.5 个周期内无 ping 判离线。 */
+const HEARTBEAT_MS = 2 * 60_000;
 
 let statusBar: vscode.StatusBarItem | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
+let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let bridgeServer: Server | undefined;
 let lastMessage = '尚未上报';
 /** 避免同一 URI / 票据被并发处理两次。 */
@@ -208,6 +213,23 @@ function setupAutoReport(context: vscode.ExtensionContext) {
   }, ms);
 }
 
+/**
+ * IDE 打开即周期心跳，看板用此判在线；失败静默，避免打扰。
+ */
+function setupHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
+  }
+  const tick = () => {
+    void sendHeartbeat(readReporterConfig()).catch(() => {
+      /* 网络/签名失败不弹窗；状态栏仍以上报结果为主 */
+    });
+  };
+  tick();
+  heartbeatTimer = setInterval(tick, HEARTBEAT_MS);
+}
+
 async function setupLocalBridge(context: vscode.ExtensionContext) {
   if (bridgeServer) {
     bridgeServer.close();
@@ -358,6 +380,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   setupAutoReport(context);
+  setupHeartbeat();
   void setupLocalBridge(context);
   // 启动后稍后自动报一次，避开扩展激活尖峰。
   setTimeout(() => void doReport(context, true), 8000);
@@ -366,6 +389,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
   if (timer) clearInterval(timer);
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (bridgeServer) {
     bridgeServer.close();
     bridgeServer = undefined;

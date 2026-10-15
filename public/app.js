@@ -21,6 +21,9 @@ import {
   money,
   formatOperatorLabel,
   planBadgeClass,
+  renderBarChart,
+  renderHorizontalBars,
+  renderLineChart,
   resolveSpendRow,
   saveSettings,
   setBusy,
@@ -51,8 +54,8 @@ const els = {
   forceNewPassword2: document.getElementById('forceNewPassword2'),
   forcePasswordError: document.getElementById('forcePasswordError'),
   tabAccounts: document.getElementById('tabAccounts'),
-  tabSwitches: document.getElementById('tabSwitches'),
   tabReports: document.getElementById('tabReports'),
+  tabLogs: document.getElementById('tabLogs'),
   tabUsers: document.getElementById('tabUsers'),
   tabHelp: document.getElementById('tabHelp'),
   btnAdd: document.getElementById('btnAdd'),
@@ -74,14 +77,16 @@ const els = {
   btnTodayRankClose: document.getElementById('btnTodayRankClose'),
   btnTodayRankCancel: document.getElementById('btnTodayRankCancel'),
   switchLogBody: document.getElementById('switchLogBody'),
-  btnRefreshSwitchLogs: document.getElementById('btnRefreshSwitchLogs'),
-  reportOperatorBody: document.getElementById('reportOperatorBody'),
-  reportRecentBody: document.getElementById('reportRecentBody'),
   reportLogBody: document.getElementById('reportLogBody'),
+  loginLogBody: document.getElementById('loginLogBody'),
+  btnRefreshLogs: document.getElementById('btnRefreshLogs'),
   btnRefreshReports: document.getElementById('btnRefreshReports'),
+  chartTeamUsage: document.getElementById('chartTeamUsage'),
+  chartSwitchDaily: document.getElementById('chartSwitchDaily'),
+  chartAccountUsage: document.getElementById('chartAccountUsage'),
+  chartSwitchByUser: document.getElementById('chartSwitchByUser'),
   statusFilter: document.getElementById('statusFilter'),
   userTableBody: document.getElementById('userTableBody'),
-  loginLogBody: document.getElementById('loginLogBody'),
   userDialog: document.getElementById('userDialog'),
   userDialogTitle: document.getElementById('userDialogTitle'),
   fieldUsername: document.getElementById('fieldUsername'),
@@ -111,6 +116,8 @@ let currentUser = null;
 let switchLogsCache = [];
 /** @type {object[]} */
 let usersCache = [];
+/** @type {'switches' | 'reports' | 'logins'} */
+let activeLogKind = 'switches';
 let recommendedSwitchId = null;
 let currentCursorMemberId = null;
 let currentCursorChecked = false;
@@ -127,9 +134,23 @@ function isAdmin() {
   return currentUser?.role === 'admin';
 }
 
-/** 有 lastError 的账号视为异常，不可切换。 */
+/** Free 套餐：归入异常，便于从可用池里清出去。 */
+function isFreePlanMember(member) {
+  const plan = String(
+    member?.planName ||
+      member?.membershipType ||
+      member?.lastSnapshot?.plan?.planName ||
+      member?.lastSnapshot?.plan?.membershipType ||
+      '',
+  )
+    .trim()
+    .toLowerCase();
+  return plan === 'free' || /\bfree\b/.test(plan);
+}
+
+/** 同步失败或 Free 视为异常，不可切换。 */
 function isAbnormalMember(member) {
-  return Boolean(member?.lastError);
+  return Boolean(member?.lastError) || isFreePlanMember(member);
 }
 
 /**
@@ -144,6 +165,7 @@ function isExpiringMember(member) {
 
 function switchBlockReason(member) {
   if (!member) return '账号不存在';
+  if (isFreePlanMember(member)) return 'Free 套餐不可用，请换号';
   if (isAbnormalMember(member)) return '同步异常，请先更新 Token';
   const used = usedPercent(member);
   if (used == null) return '尚无额度数据，请先刷新';
@@ -262,8 +284,8 @@ function todayDollarsOf(member) {
 }
 
 function memberStatus(member) {
-  // 有 lastError 一律视为异常（含仍有旧快照的情况），避免卡片仍显示「充足」
-  if (member.lastError) return 'error';
+  // 有 lastError / Free 一律视为异常（含仍有旧快照的情况），避免卡片仍显示「充足」
+  if (member.lastError || isFreePlanMember(member)) return 'error';
   if (!member.lastSnapshot) return 'pending';
   const pace = computeUsagePace(member);
   if (pace) return pace.status;
@@ -275,7 +297,12 @@ function memberStatus(member) {
 function statusBadgeHtml(member) {
   const status = memberStatus(member);
   if (status === 'error') {
-    return `<span class="badge danger" title="${escapeHtml(member.lastError || '')}">异常</span>`;
+    const tip = member.lastError
+      ? member.lastError
+      : isFreePlanMember(member)
+        ? 'Free 套餐，请更换可用账号'
+        : '';
+    return `<span class="badge danger" title="${escapeHtml(tip)}">异常</span>`;
   }
   const expiring =
     isExpiringMember(member)
@@ -363,11 +390,19 @@ function metaChips(member) {
   return `${remainChip}${resetChip}${tokenChip}${sourceChip}${syncedChip}`;
 }
 
+function personDetailHref(username) {
+  const name = String(username || '').trim();
+  return name ? `/user.html?u=${encodeURIComponent(name)}` : '';
+}
+
 function renderActiveUserSlots(member) {
   const max = Number(member.maxUsers);
   if (!Number.isFinite(max) || max <= 0) return '';
-  const users = Array.isArray(member.activeUsers) ? member.activeUsers.slice(0, max) : [];
-  const slots = Array.from({ length: max }, (_, index) => {
+  // 席位上限仍用于满员判断；展示以实际上报为准，可超过上限（如 4/3）
+  const users = Array.isArray(member.activeUsers) ? member.activeUsers : [];
+  const slotCount = Math.max(max, users.length);
+  const admin = isAdmin();
+  const slots = Array.from({ length: slotCount }, (_, index) => {
     const user = users[index];
     if (!user) {
       return '<div class="user-slot user-slot--empty"><span class="user-avatar">+</span><span class="user-slot-name">空闲</span></div>';
@@ -376,17 +411,30 @@ function renderActiveUserSlots(member) {
     const initial = Array.from(label.trim())[0] || '?';
     const hostNote =
       user.hostname && user.hostname !== label ? ` · ${user.hostname}` : '';
-    return `<div class="user-slot" title="${escapeHtml(`${label}${hostNote}`)}">
-      <span class="user-avatar">${escapeHtml(initial.toUpperCase())}</span>
-      <span class="user-slot-name">${escapeHtml(label)}</span>
+    const userHref = personDetailHref(user.username);
+    const titleParts = [`${label}${hostNote}`];
+    if (userHref) titleParts.push('点击查看人员详情');
+    if (admin) titleParts.push('× 移出席位（不回收授权）');
+    const removeBtn =
+      admin && user.hostname
+        ? `<button type="button" class="user-slot-remove" data-action="remove-user" data-hostname="${escapeHtml(user.hostname)}" title="移出席位（仅看板，不回收 Cursor 授权）">×</button>`
+        : '';
+    const nameInner = `<span class="user-avatar">${escapeHtml(initial.toUpperCase())}</span><span class="user-slot-name">${escapeHtml(label)}</span>`;
+    const body = userHref
+      ? `<a class="user-slot-link" href="${userHref}" data-action="open-user">${nameInner}</a>`
+      : `<div class="user-slot-link user-slot-link--static">${nameInner}</div>`;
+    return `<div class="user-slot${admin ? ' user-slot--removable' : ''}${users.length > max ? ' user-slot--over' : ''}" title="${escapeHtml(titleParts.join(' · '))}">
+      ${body}
+      ${removeBtn}
     </div>`;
   }).join('');
+  const countCls = users.length > max ? ' account-users-count--over' : '';
   return `<div class="account-users ${member.capacityFull ? 'account-users--full' : ''}">
     <div class="account-users-head">
       <strong>使用人</strong>
-      <span>${users.length}/${max}</span>
+      <span class="${countCls.trim()}">${users.length}/${max}</span>
     </div>
-    <div class="user-slots" style="--user-slot-count:${max}">${slots}</div>
+    <div class="user-slots" style="--user-slot-count:${slotCount}">${slots}</div>
   </div>`;
 }
 
@@ -532,27 +580,29 @@ function renderSummary(summary) {
     syncedOk: 0,
     syncedError: 0,
   };
+  const okCount = membersCache.filter(isOkMember).length;
+  const expiringCount = membersCache.filter(isExpiringMember).length;
+  const badCount = membersCache.filter(isAbnormalMember).length;
   els.summary.innerHTML = `
     <article class="stat"><p class="label">账号</p><p class="value">${s.memberCount}</p><p class="note">${money(s.todayBilledDollars)} 今日</p></article>
     <button type="button" class="stat stat-click" id="btnTodayUsage" title="查看今日用量排行（按 tokens）">
       <p class="label">今日用量</p>
       <p class="value">${s.todayRequests ?? 0}<span class="unit">次</span></p>
-      <p class="note">${formatTokens(s.todayTokens)} tokens · 点击排行</p>
+      <p class="note">${formatTokens(s.todayTokens)} tokens</p>
     </button>
     <button type="button" class="stat stat-click" id="btnFilterOk" title="只看正常账号">
       <p class="label">正常</p>
-      <p class="value">${membersCache.filter(isOkMember).length}</p>
-      <p class="note">点击筛选</p>
+      <p class="value">${okCount}</p>
     </button>
     <button type="button" class="stat stat-click" id="btnFilterExpiring" title="只看十天内额度周期重置的账号">
       <p class="label">临期</p>
-      <p class="value ${membersCache.some(isExpiringMember) ? 'warn' : ''}">${membersCache.filter(isExpiringMember).length}</p>
-      <p class="note">额度重置 ≤${EXPIRING_WITHIN_DAYS} 天 · 点击筛选</p>
+      <p class="value ${expiringCount > 0 ? 'warn' : ''}">${expiringCount}</p>
+      <p class="note">额度重置 ≤${EXPIRING_WITHIN_DAYS} 天</p>
     </button>
-    <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号">
+    <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号（同步失败或 Free）">
       <p class="label">异常</p>
-      <p class="value ${(s.syncedError || 0) > 0 ? 'danger' : ''}">${s.syncedError ?? 0}</p>
-      <p class="note">需更新 Token · 点击筛选</p>
+      <p class="value ${badCount > 0 ? 'danger' : ''}">${badCount}</p>
+      <p class="note">token / Free</p>
     </button>
   `;
   document.getElementById('btnTodayUsage')?.addEventListener('click', openTodayRank);
@@ -703,15 +753,15 @@ function renderList() {
 }
 
 function showView(view) {
-  const allowed = new Set(['accounts', 'switches', 'help']);
+  const allowed = new Set(['accounts', 'logs', 'help']);
   if (isAdmin()) {
     allowed.add('users');
     allowed.add('reports');
   }
   const next = allowed.has(view) ? view : 'accounts';
   els.tabAccounts?.classList.toggle('hidden', next !== 'accounts');
-  els.tabSwitches?.classList.toggle('hidden', next !== 'switches');
   els.tabReports?.classList.toggle('hidden', next !== 'reports');
+  els.tabLogs?.classList.toggle('hidden', next !== 'logs');
   els.tabUsers?.classList.toggle('hidden', next !== 'users');
   els.tabHelp?.classList.toggle('hidden', next !== 'help');
   // 仅账号列表需要顶部汇总条。
@@ -720,9 +770,26 @@ function showView(view) {
     b.classList.toggle('active', b.dataset.tab === next);
   });
   syncNotifyFab(next);
-  if (next === 'switches') void loadSwitchLogs();
+  if (next === 'logs') void loadLogs();
   if (next === 'reports' && isAdmin()) void loadReports();
   if (next === 'users' && isAdmin()) void loadUsers();
+}
+
+/** @param {'switches' | 'reports' | 'logins'} kind */
+function setLogKind(kind) {
+  const next =
+    kind === 'reports' || kind === 'logins'
+      ? isAdmin()
+        ? kind
+        : 'switches'
+      : 'switches';
+  activeLogKind = next;
+  document.querySelectorAll('.logs-nav-item').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.log === next);
+  });
+  document.querySelectorAll('[data-log-pane]').forEach((pane) => {
+    pane.classList.toggle('hidden', pane.getAttribute('data-log-pane') !== next);
+  });
 }
 
 async function load() {
@@ -781,21 +848,18 @@ async function ensurePasswordPolicy() {
   }
 }
 
-async function loadSwitchLogs() {
+function renderSwitchLogRows(logs) {
   if (!els.switchLogBody) return;
-  try {
-    const data = await api('/api/switch-logs?limit=100');
-    switchLogsCache = data.logs || [];
-    if (!switchLogsCache.length) {
-      els.switchLogBody.innerHTML = `<tr><td colspan="8" class="muted">暂无切换记录</td></tr>`;
-      return;
-    }
-    els.switchLogBody.innerHTML = switchLogsCache
-      .map((log) => {
-        const account =
-          log.memberDisplayName || log.memberEmail || log.memberUserId || log.memberId || '—';
-        const when = formatDateTimeDot(log.createdAt) || log.createdAt || '—';
-        return `
+  if (!logs.length) {
+    els.switchLogBody.innerHTML = `<tr><td colspan="8" class="muted">暂无切换记录</td></tr>`;
+    return;
+  }
+  els.switchLogBody.innerHTML = logs
+    .map((log) => {
+      const account =
+        log.memberDisplayName || log.memberEmail || log.memberUserId || log.memberId || '—';
+      const when = formatDateTimeDot(log.createdAt) || log.createdAt || '—';
+      return `
           <tr>
             <td>${escapeHtml(when)}</td>
             <td>${escapeHtml(
@@ -819,70 +883,24 @@ async function loadSwitchLogs() {
             <td class="muted">${escapeHtml(log.error || '—')}</td>
           </tr>
         `;
-      })
-      .join('');
-  } catch (e) {
-    toast(e.message || String(e));
-  }
+    })
+    .join('');
 }
 
-/** 管理员报表：操作者汇总 + 最近明细。 */
-async function loadReports() {
-  if (!els.reportOperatorBody || !isAdmin()) return;
+/** 日志页：侧栏切换类型，表格固定高度便于浏览。 */
+async function loadLogs() {
+  setLogKind(activeLogKind);
   try {
-    const [data, reportData] = await Promise.all([
-      api('/api/reports/switches?limit=500'),
-      api('/api/report-logs?limit=200'),
-    ]);
-    const operators = data.operators || [];
-    const recent = data.recent || [];
-    els.reportOperatorBody.innerHTML = operators.length
-      ? operators
-          .map(
-            (row) => `
-          <tr>
-            <td>${escapeHtml(
-              row.operatorLabel || formatOperatorLabel(row.username, row.alias),
-            )}</td>
-            <td class="rank-metric">${row.switchCount ?? 0}</td>
-            <td class="rank-metric">${row.successCount ?? 0}</td>
-            <td class="rank-metric">${row.memberCount ?? 0}</td>
-            <td>${escapeHtml((row.ips || []).join(', ') || '—')}</td>
-            <td>${escapeHtml((row.hostnames || []).join(', ') || '—')}</td>
-          </tr>
-        `,
-          )
-          .join('')
-      : `<tr><td colspan="6" class="muted">暂无切换数据</td></tr>`;
-    if (els.reportRecentBody) {
-      els.reportRecentBody.innerHTML = recent.length
-        ? recent
-            .map((log) => {
-              const account =
-                log.memberDisplayName || log.memberEmail || log.memberUserId || log.memberId || '—';
-              const when = formatDateTimeDot(log.createdAt) || log.createdAt || '—';
-              return `
-              <tr>
-                <td>${escapeHtml(when)}</td>
-                <td>${escapeHtml(
-                  log.operatorLabel ||
-                    formatOperatorLabel(log.operatorUsername, log.operatorAlias),
-                )}</td>
-                <td>${escapeHtml(account)}</td>
-                <td class="rank-metric">${escapeHtml(formatUsageTotal(log.usageTotalPercent))}</td>
-                <td>${escapeHtml(log.hostname || '—')}</td>
-                <td>${escapeHtml(log.clientIp || '—')}</td>
-                <td><span class="badge ${switchStatusClass(log.status)}">${escapeHtml(
-                  switchStatusLabel(log.status),
-                )}</span></td>
-              </tr>
-            `;
-            })
-            .join('')
-        : `<tr><td colspan="7" class="muted">暂无切换记录</td></tr>`;
+    const tasks = [api('/api/switch-logs?limit=200')];
+    if (isAdmin()) {
+      tasks.push(api('/api/report-logs?limit=200'), api('/api/login-logs?limit=100'));
     }
-    if (els.reportLogBody) {
-      const logs = reportData.logs || [];
+    const [switchData, reportData, loginData] = await Promise.all(tasks);
+    switchLogsCache = switchData.logs || [];
+    renderSwitchLogRows(switchLogsCache);
+
+    if (isAdmin() && els.reportLogBody) {
+      const logs = reportData?.logs || [];
       els.reportLogBody.innerHTML = logs.length
         ? logs
             .map(
@@ -905,6 +923,111 @@ async function loadReports() {
             .join('')
         : '<tr><td colspan="6" class="muted">暂无自动上报记录</td></tr>';
     }
+
+    if (isAdmin() && els.loginLogBody) {
+      const logs = loginData?.logs || [];
+      els.loginLogBody.innerHTML = logs.length
+        ? logs
+            .map(
+              (log) => `
+          <tr>
+            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
+            <td>${escapeHtml(log.username || '—')}</td>
+            <td><span class="badge ${log.ok ? 'ok' : 'danger'}">${
+              log.ok ? '成功' : '失败'
+            }</span></td>
+            <td>${escapeHtml(log.ip || '—')}</td>
+            <td class="muted">${escapeHtml(log.userAgent || '—')}</td>
+          </tr>`,
+            )
+            .join('')
+        : '<tr><td colspan="5" class="muted">暂无登录记录</td></tr>';
+    }
+  } catch (e) {
+    toast(e.message || String(e));
+  }
+}
+
+/** 报表页：图表（用量趋势、切换量），不含明细日志。 */
+async function loadReports() {
+  if (!isAdmin()) return;
+  try {
+    if (!membersCache.length) {
+      const mem = await api('/api/members');
+      membersCache = mem.members || [];
+    }
+    const [data, switchData] = await Promise.all([
+      api('/api/reports/switches?limit=500'),
+      api('/api/switch-logs?limit=500'),
+    ]);
+    const operators = data.operators || [];
+    const recent = switchData.logs || data.recent || [];
+
+    // 团队日均用量：各账号 usagePercentHistory 按日平均
+    /** @type {Map<string, { sum: number, n: number }>} */
+    const byDate = new Map();
+    for (const m of membersCache) {
+      for (const row of m.usagePercentHistory || []) {
+        if (row?.total == null || !row.date) continue;
+        const cur = byDate.get(row.date) || { sum: 0, n: 0 };
+        cur.sum += Number(row.total) || 0;
+        cur.n += 1;
+        byDate.set(row.date, cur);
+      }
+    }
+    const teamSeries = [...byDate.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .slice(-30)
+      .map(([date, v]) => ({
+        label: date,
+        value: v.n ? Math.round((v.sum / v.n) * 10) / 10 : 0,
+      }));
+    renderLineChart(els.chartTeamUsage, teamSeries, '#4daafc', (v) => `${v}%`);
+
+    // 近 14 日切换量
+    const dayKeys = [];
+    const now = new Date();
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      dayKeys.push(key);
+    }
+    /** @type {Map<string, number>} */
+    const switchByDay = new Map(dayKeys.map((k) => [k, 0]));
+    for (const log of recent) {
+      const day = String(log.createdAt || '').slice(0, 10);
+      if (switchByDay.has(day)) switchByDay.set(day, (switchByDay.get(day) || 0) + 1);
+    }
+    renderBarChart(
+      els.chartSwitchDaily,
+      dayKeys.map((k) => ({ label: k, value: switchByDay.get(k) || 0 })),
+      '#38d6c7',
+      (v) => String(Math.round(v)),
+    );
+
+    // 各账号当前用量
+    const accountUsage = [...membersCache]
+      .map((m) => {
+        const used =
+          Number(m.lastSnapshot?.meters?.totalPercentUsed) ||
+          Number(m.totalPercentUsed) ||
+          0;
+        const name = (m.displayName || m.email || m.id || '—').trim();
+        return { label: name, value: used };
+      })
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 12);
+    renderHorizontalBars(els.chartAccountUsage, accountUsage, '#8aa2ff', (v) => `${v.toFixed(1)}%`);
+
+    // 按人切换量
+    const byUser = operators
+      .map((row) => ({
+        label: row.operatorLabel || formatOperatorLabel(row.username, row.alias) || row.username,
+        value: Number(row.switchCount) || 0,
+      }))
+      .filter((r) => r.value > 0)
+      .slice(0, 12);
+    renderHorizontalBars(els.chartSwitchByUser, byUser, '#ffb86b', (v) => String(Math.round(v)));
   } catch (e) {
     toast(e.message || String(e));
   }
@@ -915,16 +1038,18 @@ function pluginCell(plugin) {
   const ver = [plugin.version, plugin.build].filter(Boolean).join(' · ');
   const when = formatDateTimeDot(plugin.reportedAt || plugin.installedAt);
   const how = plugin.state === 'reported' ? '已上报' : '已安装';
-  return `${escapeHtml(ver)}<div class="muted">${escapeHtml(how)}${when ? ` ${escapeHtml(when)}` : ''}</div>`;
+  // online 由服务端按最近上报窗口计算；从未上报也算离线
+  const online = plugin.online === true;
+  const presence = online
+    ? '<span class="plugin-presence online">在线</span>'
+    : '<span class="plugin-presence offline">离线</span>';
+  return `${presence} ${escapeHtml(ver)}<div class="muted">${escapeHtml(how)}${when ? ` ${escapeHtml(when)}` : ''}</div>`;
 }
 
 async function loadUsers() {
   if (!els.userTableBody || !isAdmin()) return;
   try {
-    const [data, loginData] = await Promise.all([
-      api('/api/users'),
-      api('/api/login-logs?limit=100'),
-    ]);
+    const data = await api('/api/users');
     usersCache = data.users || [];
     els.userTableBody.innerHTML = usersCache
       .map((u) => {
@@ -959,10 +1084,15 @@ async function loadUsers() {
               <button type="button" class="btn sm danger" data-user-action="delete">删除</button>`
                   : ''
               }`;
+        const userHref = personDetailHref(u.username);
         return `
           <tr data-username="${escapeHtml(u.username)}" class="${u.pending ? 'user-row-pending' : ''}">
-            <td>${escapeHtml(u.username)}</td>
-            <td>${escapeHtml(u.alias || '—')}</td>
+            <td><a class="person-link" href="${userHref}">${escapeHtml(u.username)}</a></td>
+            <td>${
+              u.alias
+                ? `<a class="person-link" href="${userHref}">${escapeHtml(u.alias)}</a>`
+                : '—'
+            }</td>
             <td>${escapeHtml(roleLabel)}</td>
             <td>${
               u.pending ? `<span class="badge warn">${escapeHtml(status)}</span>` : escapeHtml(status)
@@ -975,25 +1105,6 @@ async function loadUsers() {
         `;
       })
       .join('');
-    if (els.loginLogBody) {
-      const logs = loginData.logs || [];
-      els.loginLogBody.innerHTML = logs.length
-        ? logs
-            .map(
-              (log) => `
-          <tr>
-            <td>${escapeHtml(formatDateTimeDot(log.createdAt) || log.createdAt || '—')}</td>
-            <td>${escapeHtml(log.username || '—')}</td>
-            <td><span class="badge ${log.ok ? 'ok' : 'danger'}">${
-              log.ok ? '成功' : '失败'
-            }</span></td>
-            <td>${escapeHtml(log.ip || '—')}</td>
-            <td class="muted">${escapeHtml(log.userAgent || '—')}</td>
-          </tr>`,
-            )
-            .join('')
-        : '<tr><td colspan="5" class="muted">暂无登录记录</td></tr>';
-    }
   } catch (e) {
     toast(e.message || String(e));
   }
@@ -1260,7 +1371,7 @@ async function switchMember(id, btn) {
     const bridge = await notifyLocalBridge(ticketId);
     if (bridge.ok) {
       toast(`已通知本机 Cursor（桥 :${bridge.port}）切换到「${label}」，请在弹窗中确认`);
-      void loadSwitchLogs();
+      void loadLogs();
       return;
     }
 
@@ -1282,7 +1393,7 @@ async function switchMember(id, btn) {
     } catch {
       /* 无剪贴板权限时忽略 */
     }
-    void loadSwitchLogs();
+    void loadLogs();
   } catch (e) {
     toast(e.message || String(e));
   } finally {
@@ -1373,8 +1484,15 @@ els.statusFilter?.addEventListener('click', (event) => {
 els.btnHelp.addEventListener('click', () => showView('help'));
 els.btnAdd?.addEventListener('click', () => openMemberDialog());
 els.btnEmptyAdd?.addEventListener('click', () => openMemberDialog());
-els.btnRefreshSwitchLogs?.addEventListener('click', () => loadSwitchLogs());
+els.btnRefreshLogs?.addEventListener('click', () => loadLogs());
 els.btnRefreshReports?.addEventListener('click', () => loadReports());
+document.querySelector('.logs-nav')?.addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-log]');
+  if (!btn) return;
+  const kind = /** @type {'switches' | 'reports' | 'logins'} */ (btn.dataset.log || 'switches');
+  setLogKind(kind);
+  void loadLogs();
+});
 els.btnAddUser?.addEventListener('click', () => openUserDialog());
 els.btnInstallExtension?.addEventListener('click', () => oneClickInstallExtension());
 els.btnUserDialogClose?.addEventListener('click', closeUserDialog);
@@ -1742,9 +1860,13 @@ els.btnSwitchRecommended?.addEventListener('click', () => switchRecommendedMembe
 els.list.addEventListener('click', async (event) => {
   const btn = event.target.closest('button[data-action]');
   const bill = event.target.closest('[data-action="bill"]');
+  const personLink = event.target.closest('a.user-slot-link');
   const card = event.target.closest('.account');
   const id = card?.dataset.id;
   if (!id) return;
+
+  // 人员详情链接自行跳转，勿进账号详情
+  if (personLink) return;
 
   // 点账单行进详情日用量%图，避免整卡跳转丢锚点。
   if (bill) {
@@ -1784,6 +1906,34 @@ els.list.addEventListener('click', async (event) => {
     if (action === 'edit') {
       if (!isAdmin()) return toast('需要管理员权限');
       openMemberDialog({ id, displayName: member?.displayName || '' });
+      return;
+    }
+
+    if (action === 'remove-user') {
+      if (!isAdmin()) return toast('需要管理员权限');
+      const hostname = String(btn.dataset.hostname || '').trim();
+      if (!hostname) return;
+      const seat = (member?.activeUsers || []).find(
+        (u) => String(u.hostname || '').toLowerCase() === hostname.toLowerCase(),
+      );
+      const who = seat?.label || hostname;
+      if (
+        !confirm(
+          `确定从该账号移出使用人「${who}」？\n仅改看板席位，不会回收 Cursor 登录或插件授权。`,
+        )
+      ) {
+        return;
+      }
+      try {
+        await api(
+          `/api/members/${encodeURIComponent(id)}/presence?hostname=${encodeURIComponent(hostname)}`,
+          { method: 'DELETE' },
+        );
+        toast('已移出使用人');
+        await load();
+      } catch (e) {
+        toast(e.message || String(e));
+      }
       return;
     }
 

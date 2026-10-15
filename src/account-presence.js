@@ -1,6 +1,7 @@
 /**
- * 账号当前使用人：Reporter 定时上报 hostname，按主机保留最近所在账号。
- * 90 分钟内有上报/切换记录视为活跃；数据落存储驱动（sqlite/pg），多实例共享。
+ * 账号使用人席位：以数据库为准。
+ * 写入路径：插件上报 / 切换成功 / 管理员移除；展示只读库，不因断报清空。
+ * 启动时可用审计日志把缺失或过期归属纠正写回库。
  */
 
 import { readFile, rename } from 'node:fs/promises';
@@ -9,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { getAccountUserLimits } from './config.js';
 import {
   listAppLogsForHydrate,
+  listStoredReportEvents,
+  listSwitchLogs,
   loadAccountPresenceMap,
   prunePresenceBefore,
   saveAccountPresenceMap,
@@ -19,7 +22,8 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** 升级前本地 JSON；首次读库为空时导入一次后改名，避免反复覆盖库。 */
 const LEGACY_FILE = path.join(ROOT, 'data', 'account-presence.json');
 const LOG_DIR = path.join(ROOT, 'data', 'log');
-const ACTIVE_MS = 90 * 60 * 1000;
+/** 仅用于启动时从日志回填，与席位展示无关。 */
+const HYDRATE_MS = PRESENCE_KEEP_MS;
 const KEEP_MS = PRESENCE_KEEP_MS;
 /** 多实例共享库时短缓存，避免长期脏读。 */
 const CACHE_TTL_MS = 5000;
@@ -140,7 +144,7 @@ export function resolvePresenceIdentity(input) {
 }
 
 /**
- * 同一主机每次只属于一个账号；切换或上报会覆盖它的当前位置。
+ * 同一主机每次只属于一个账号；切换或上报会覆盖它的当前位置（以本次 session 为准）。
  * @param {{ memberId: string, memberDisplayName?: string|null, hostname?: string|null, username?: string|null, label?: string|null }} input
  */
 export async function recordAccountPresence(input) {
@@ -167,34 +171,58 @@ export async function recordAccountPresence(input) {
   await persist();
 }
 
-/** @param {any} member @param {number} [now] */
-export async function getMemberCapacity(member, now = Date.now()) {
+/**
+ * 管理员从某账号席位移除一台主机；仅清看板席位，不回收 Cursor/插件授权。
+ * @param {string} memberId
+ * @param {string} hostname
+ * @returns {Promise<boolean>} 是否删到了行
+ */
+export async function removeMemberPresence(memberId, hostname) {
+  const id = String(memberId || '').trim();
+  const key = String(hostname || '')
+    .trim()
+    .toLowerCase();
+  if (!id || !key) return false;
+  const rows = await load();
+  const row = rows[key];
+  if (!row || row.memberId !== id) return false;
+  delete rows[key];
+  await persist();
+  return true;
+}
+
+/**
+ * 删号池账号时一并清掉挂在该账号上的席位，避免幽灵使用人。
+ * @param {string} memberId
+ * @returns {Promise<number>} 删除行数
+ */
+export async function clearPresenceForMember(memberId) {
+  const id = String(memberId || '').trim();
+  if (!id) return 0;
+  const rows = await load();
+  let n = 0;
+  for (const [key, row] of Object.entries(rows)) {
+    if (row.memberId === id) {
+      delete rows[key];
+      n += 1;
+    }
+  }
+  if (n) await persist();
+  return n;
+}
+
+/** 席位按上报/切换粘性占有，不因断报消失。 @param {any} member */
+export async function getMemberCapacity(member) {
   const rows = await load();
   const activeUsers = Object.values(rows)
-    .filter(
-      (row) =>
-        row.memberId === member?.id &&
-        Number.isFinite(Date.parse(row.lastSeenAt)) &&
-        Date.parse(row.lastSeenAt) >= now - ACTIVE_MS,
-    )
+    .filter((row) => row.memberId === member?.id)
     .map((row) => ({
       hostname: row.hostname,
       username: row.username || null,
       label: row.label || row.hostname,
       lastSeenAt: row.lastSeenAt,
-    }));
-
-  // 旧插件没有绑定看板用户；仅在完全没有近期上报时，用账号保存的备注主机占一格。
-  // 一旦新旧插件产生真实 presence，就不再叠加这个兜底，避免重复计算。
-  const legacyHostname = String(member?.hostname || '').trim();
-  const legacyRemark = String(member?.displayName || legacyHostname).trim();
-  if (!activeUsers.length && legacyRemark) {
-    activeUsers.push({
-      hostname: legacyHostname || legacyRemark,
-      label: legacyRemark,
-      lastSeenAt: null,
-    });
-  }
+    }))
+    .sort((a, b) => String(b.lastSeenAt || '').localeCompare(String(a.lastSeenAt || '')));
 
   const maxUsers = maxUsersForMember(member);
   return {
@@ -216,6 +244,81 @@ export async function enrichMembersWithPresence(members) {
 }
 
 /**
+ * 用最近成功的切换/上报纠正席位并写回库（缺席或归属不一致时）。
+ * 不抬新 lastSeenAt 到「现在」，沿用事件时间，避免伪造活跃。
+ * @returns {Promise<number>} 写库条数
+ */
+export async function reconcilePresenceFromActivity() {
+  const [switches, reports, rows] = await Promise.all([
+    listSwitchLogs({ limit: 500 }),
+    listStoredReportEvents(500),
+    load(),
+  ]);
+
+  /** @type {Map<string, { memberId: string, memberDisplayName?: string|null, hostname: string, username?: string|null, label: string, at: string }>} */
+  const latest = new Map();
+
+  /** @param {any} ev */
+  function consider(ev) {
+    const hostname = String(ev.hostname || '').trim();
+    const memberId = String(ev.memberId || '').trim();
+    const at = String(ev.createdAt || ev.finishedAt || '').trim();
+    if (!hostname || !memberId || !at) return;
+    const key = hostname.toLowerCase();
+    const prev = latest.get(key);
+    if (prev && String(prev.at) >= at) return;
+    const username = String(ev.operatorUsername || ev.username || '').trim() || null;
+    latest.set(key, {
+      memberId,
+      memberDisplayName: ev.memberDisplayName || null,
+      hostname,
+      username,
+      label: username || hostname,
+      at,
+    });
+  }
+
+  for (const log of switches || []) {
+    if (log.status !== 'success') continue;
+    consider(log);
+  }
+  for (const log of reports || []) {
+    if (log.ok === false) continue;
+    consider(log);
+  }
+
+  let wrote = 0;
+  for (const [key, ev] of latest) {
+    const cur = rows[key];
+    const curSeen = Date.parse(cur?.lastSeenAt || '') || 0;
+    const evAt = Date.parse(ev.at) || 0;
+    // 已有更新的上报/切换席位则不动；否则按审计纠正归属并写库
+    if (cur && curSeen > evAt) continue;
+    if (
+      cur &&
+      cur.memberId === ev.memberId &&
+      String(cur.username || '') === String(ev.username || '')
+    ) {
+      continue;
+    }
+    rows[key] = {
+      memberId: ev.memberId,
+      memberDisplayName: ev.memberDisplayName,
+      hostname: ev.hostname,
+      username: ev.username,
+      label: ev.label,
+      lastSeenAt: new Date(evAt || Date.now()).toISOString(),
+    };
+    wrote += 1;
+  }
+  if (wrote) {
+    cache = rows;
+    await persist();
+  }
+  return wrote;
+}
+
+/**
  * 从应用日志（优先库内 app_logs，回退按日文本）回填升级前的上报记录。
  * @param {number} [now]
  */
@@ -226,7 +329,7 @@ export async function hydratePresenceFromAppLog(now = Date.now()) {
   /** @param {string} line @param {number} seenMs */
   function applyLine(line, seenMs) {
     if (!line.includes('[上报]')) return;
-    if (!Number.isFinite(seenMs) || seenMs < now - ACTIVE_MS) return;
+    if (!Number.isFinite(seenMs) || seenMs < now - HYDRATE_MS) return;
     const memberId = line.match(/\bid=([^\s]+)/)?.[1] || '';
     const hostname = line.match(/主机名=([^\s]+)/)?.[1] || '';
     if (!memberId || !hostname) return;
@@ -248,7 +351,7 @@ export async function hydratePresenceFromAppLog(now = Date.now()) {
   }
 
   try {
-    const sinceIso = new Date(now - ACTIVE_MS).toISOString();
+    const sinceIso = new Date(now - HYDRATE_MS).toISOString();
     const dbLogs = await listAppLogsForHydrate(sinceIso, 2000);
     for (const entry of dbLogs) {
       applyLine(entry.line, Date.parse(entry.createdAt));
@@ -291,18 +394,12 @@ export async function pruneStalePresence(now = Date.now()) {
   cacheAt = 0;
 }
 
-/** 用户名 → 当前正在使用的账号，供用户管理列表展示。 */
-export async function listPresenceByUsername(now = Date.now()) {
+/** 用户名 → 当前所在账号（粘性席位），供用户管理列表展示。 */
+export async function listPresenceByUsername() {
   const rows = await load();
   const out = {};
   for (const row of Object.values(rows)) {
-    if (
-      !row.username ||
-      !Number.isFinite(Date.parse(row.lastSeenAt)) ||
-      Date.parse(row.lastSeenAt) < now - ACTIVE_MS
-    ) {
-      continue;
-    }
+    if (!row.username) continue;
     if (!out[row.username]) out[row.username] = [];
     out[row.username].push({
       memberId: row.memberId,

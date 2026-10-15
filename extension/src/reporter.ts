@@ -36,6 +36,35 @@ function assertReporterConfig(config: ReporterConfig) {
 }
 
 /**
+ * IDE 存活心跳：只证明插件进程在跑，不上传会话。
+ */
+export async function sendHeartbeat(config: ReporterConfig): Promise<void> {
+  assertReporterConfig(config);
+  if (!config.operatorUsername || !config.operatorProof) {
+    throw new Error('未绑定看板用户（请用个性化安装包重装）');
+  }
+  const own = vscode.extensions.getExtension('poiig.cursor-team-usage-reporter');
+  const res = await fetch(`${config.apiBaseUrl}/api/agent/heartbeat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Access-Key': config.accessKey,
+    },
+    body: JSON.stringify({
+      hostname: os.hostname(),
+      operatorUsername: config.operatorUsername,
+      operatorProof: config.operatorProof,
+      pluginVersion: String(own?.packageJSON?.version || ''),
+      pluginBuild: String(own?.packageJSON?.ctuBuild || ''),
+    }),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error || `心跳失败 HTTP ${res.status}`);
+  }
+}
+
+/**
  * 调用看板 /api/agent/report，Header 带 Access Key。
  */
 export async function reportSession(

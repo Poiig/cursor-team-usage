@@ -16,7 +16,7 @@ export const LOGIN_EVENTS_MAX = 2000;
 export const REPORT_EVENTS_MAX = 3000;
 export const APPLICATIONS_MAX = 500;
 export const SWITCH_LOGS_MAX = 5000;
-/** presence 超过该时长视为过期，上报/切换时清理。 */
+/** presence 超长保留；席位展示不按断报清空，仅库表防膨胀时清理。 */
 export const PRESENCE_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
@@ -58,9 +58,17 @@ function createSqliteApi(ctx) {
         report_version TEXT,
         report_build TEXT,
         reported_at TEXT,
+        heartbeat_at TEXT,
         hostname TEXT
       )
     `);
+    // 旧库补心跳列：在线状态靠插件周期 ping，与完整上报分开
+    const pluginCols = new Set(
+      getAll('PRAGMA table_info(plugin_clients)').map((c) => String(c.name)),
+    );
+    if (!pluginCols.has('heartbeat_at')) {
+      run('ALTER TABLE plugin_clients ADD COLUMN heartbeat_at TEXT');
+    }
     run(`
       CREATE TABLE IF NOT EXISTS login_events (
         id TEXT PRIMARY KEY,
@@ -143,8 +151,8 @@ function createSqliteApi(ctx) {
   async function upsertPluginClientRow(username, row) {
     run(
       `INSERT INTO plugin_clients
-        (username, version, build, installed_at, report_version, report_build, reported_at, hostname)
-       VALUES (?,?,?,?,?,?,?,?)
+        (username, version, build, installed_at, report_version, report_build, reported_at, heartbeat_at, hostname)
+       VALUES (?,?,?,?,?,?,?,?,?)
        ON CONFLICT(username) DO UPDATE SET
          version=excluded.version,
          build=excluded.build,
@@ -152,6 +160,7 @@ function createSqliteApi(ctx) {
          report_version=excluded.report_version,
          report_build=excluded.report_build,
          reported_at=excluded.reported_at,
+         heartbeat_at=excluded.heartbeat_at,
          hostname=excluded.hostname`,
       [
         username,
@@ -161,6 +170,7 @@ function createSqliteApi(ctx) {
         row.reportVersion ?? null,
         row.reportBuild ?? null,
         row.reportedAt ?? null,
+        row.heartbeatAt ?? null,
         row.hostname ?? null,
       ],
     );
@@ -407,9 +417,11 @@ function createPgApi(ctx) {
         report_version TEXT,
         report_build TEXT,
         reported_at TIMESTAMPTZ,
+        heartbeat_at TIMESTAMPTZ,
         hostname TEXT
       )
     `);
+    await query(`ALTER TABLE plugin_clients ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`);
     await query(`
       CREATE TABLE IF NOT EXISTS login_events (
         id UUID PRIMARY KEY,
@@ -495,8 +507,8 @@ function createPgApi(ctx) {
   async function upsertPluginClientRow(username, row) {
     await query(
       `INSERT INTO plugin_clients
-        (username, version, build, installed_at, report_version, report_build, reported_at, hostname)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        (username, version, build, installed_at, report_version, report_build, reported_at, heartbeat_at, hostname)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT(username) DO UPDATE SET
          version=EXCLUDED.version,
          build=EXCLUDED.build,
@@ -504,6 +516,7 @@ function createPgApi(ctx) {
          report_version=EXCLUDED.report_version,
          report_build=EXCLUDED.report_build,
          reported_at=EXCLUDED.reported_at,
+         heartbeat_at=EXCLUDED.heartbeat_at,
          hostname=EXCLUDED.hostname`,
       [
         username,
@@ -513,6 +526,7 @@ function createPgApi(ctx) {
         row.reportVersion ?? null,
         row.reportBuild ?? null,
         row.reportedAt ?? null,
+        row.heartbeatAt ?? null,
         row.hostname ?? null,
       ],
     );
@@ -998,6 +1012,7 @@ function pluginRowFromDb(row) {
     reportVersion: row.report_version ?? null,
     reportBuild: row.report_build ?? null,
     reportedAt: toIso(row.reported_at),
+    heartbeatAt: toIso(row.heartbeat_at),
     hostname: row.hostname ?? null,
   };
 }

@@ -68,6 +68,9 @@ import {
   listPresenceByUsername,
   pruneStalePresence,
   recordAccountPresence,
+  reconcilePresenceFromActivity,
+  removeMemberPresence,
+  clearPresenceForMember,
 } from './account-presence.js';
 import { listLoginEvents, recordLoginEvent } from './login-log.js';
 import { createApplication, lookupApplication, markApplication } from './applications.js';
@@ -75,11 +78,13 @@ import { verifyOperatorUsername } from './operator-proof.js';
 import {
   forgetPluginClient,
   listPluginClientViews,
+  recordPluginHeartbeat,
   recordPluginInstall,
   recordPluginReport,
 } from './plugin-clients.js';
 import { listReportEvents, recordReportEvent } from './report-log.js';
 import { runExpiringNotify, setupExpiringNotifySchedule } from './notify.js';
+import { getPersonDetail } from './people.js';
 import {
   approveUser,
   authenticateUser,
@@ -558,8 +563,22 @@ function requiresConsoleAuth(pathname, method) {
   if (pathname === '/api/extension/reporter.vsix' && method === 'GET') return false;
   if (pathname === '/api/extension/install.ps1' && method === 'GET') return false;
   if (pathname.startsWith('/api/')) return true;
-  if (pathname === '/' || pathname === '/index.html' || pathname === '/detail.html') return true;
-  if (pathname === '/app.js' || pathname === '/detail.js' || pathname === '/shared.js') return true;
+  if (
+    pathname === '/' ||
+    pathname === '/index.html' ||
+    pathname === '/detail.html' ||
+    pathname === '/user.html'
+  ) {
+    return true;
+  }
+  if (
+    pathname === '/app.js' ||
+    pathname === '/detail.js' ||
+    pathname === '/user.js' ||
+    pathname === '/shared.js'
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -578,6 +597,8 @@ function requiresAdmin(pathname, method) {
   if (pathname === '/api/report-logs') return true;
   const memberWrite = pathname.match(/^\/api\/members\/[^/]+$/);
   if (memberWrite && (method === 'PUT' || method === 'DELETE')) return true;
+  // 管理员手动移除账号使用人席位
+  if (pathname.match(/^\/api\/members\/[^/]+\/presence$/) && method === 'DELETE') return true;
   return false;
 }
 
@@ -882,6 +903,14 @@ const server = http.createServer(async (req, res) => {
       );
     }
 
+    // 人员详情：全员可读（勿挂在 /api/users 下，避免被管理员写接口规则挡住）
+    const peopleMatch = pathname.match(/^\/api\/people\/([^/]+)$/);
+    if (method === 'GET' && peopleMatch) {
+      const personUsername = decodeURIComponent(peopleMatch[1]);
+      const detail = await getPersonDetail(personUsername);
+      return sendJson(res, 200, detail);
+    }
+
     if (method === 'GET' && pathname === '/api/login-logs') {
       await assertAdmin(req);
       const limit = Number(url.searchParams.get('limit') || 200);
@@ -1025,6 +1054,25 @@ const server = http.createServer(async (req, res) => {
           };
         }),
       });
+    }
+
+    // 轻量在线心跳：IDE 开着即可，不读会话、不写上报日志
+    if (method === 'POST' && pathname === '/api/agent/heartbeat') {
+      assertAccessKey(req);
+      const body = await readBody(req);
+      const operatorUsername = await trustedOperatorName(body?.operatorUsername, body?.operatorProof);
+      if (!operatorUsername) {
+        return sendJson(res, 401, { error: '插件使用人签名无效', code: 'OPERATOR_PROOF' });
+      }
+      const view = await recordPluginHeartbeat(operatorUsername, {
+        version: body?.pluginVersion,
+        build: body?.pluginBuild,
+        hostname: body?.hostname,
+      });
+      if (!view) {
+        return sendJson(res, 404, { error: '尚未安装个性化插件', code: 'PLUGIN_NOT_INSTALLED' });
+      }
+      return sendJson(res, 200, { ok: true, online: true, heartbeatAt: view.heartbeatAt });
     }
 
     if (method === 'POST' && pathname === '/api/agent/report') {
@@ -1299,11 +1347,29 @@ const server = http.createServer(async (req, res) => {
     }
 
     const memberMatch = pathname.match(
-      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/switch)?$/,
+      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/switch|\/presence)?$/,
     );
     if (memberMatch) {
       const id = decodeURIComponent(memberMatch[1]);
       const suffix = memberMatch[2] || '';
+
+      if (method === 'DELETE' && suffix === '/presence') {
+        await assertAdmin(req);
+        const hostname = String(url.searchParams.get('hostname') || '').trim();
+        if (!hostname) throw new Error('缺少 hostname');
+        const removed = await removeMemberPresence(id, hostname);
+        if (!removed) {
+          const err = new Error('该使用人不在此账号席位上');
+          err.status = 404;
+          throw err;
+        }
+        await writeAppLog('移除使用人', {
+          操作者: req.consoleUser,
+          账号: id,
+          主机名: hostname,
+        });
+        return sendJson(res, 200, { ok: true });
+      }
 
       if (method === 'GET' && !suffix) {
         const member = await getMemberInternal(id);
@@ -1358,8 +1424,15 @@ const server = http.createServer(async (req, res) => {
       }
       if (method === 'DELETE' && !suffix) {
         await assertAdmin(req);
+        // 只从号池摘掉；席位一并清，不碰 Cursor/插件本机授权
+        const cleared = await clearPresenceForMember(id);
         await deleteMember(id);
-        return sendJson(res, 200, { ok: true });
+        await writeAppLog('删除账号', {
+          操作者: req.consoleUser,
+          账号: id,
+          清席位: cleared || undefined,
+        });
+        return sendJson(res, 200, { ok: true, clearedPresence: cleared });
       }
     }
 
@@ -1407,6 +1480,14 @@ await initStore();
 await initAppLog();
 await initUsers();
 await hydratePresenceFromAppLog();
+// 席位以库为准：启动时用切换/上报审计把归属纠正写回，之后靠插件上报与人工维护
+const presenceReconciled = await reconcilePresenceFromActivity().catch((e) => {
+  console.warn('[presence] 纠正写库失败:', e?.message || e);
+  return 0;
+});
+if (presenceReconciled) {
+  console.log(`[presence] 已纠正写库 ${presenceReconciled} 条席位`);
+}
 setupServerAutoRefresh();
 setupLogPruneSchedule();
 setupUsagePercentArchiveSchedule();

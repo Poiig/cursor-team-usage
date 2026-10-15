@@ -31,8 +31,8 @@
           </div>
           <nav class="app-nav" aria-label="Main">
             <button type="button" class="nav-item active" data-tab="accounts">账号</button>
-            <button type="button" class="nav-item" data-tab="switches">切换日志</button>
             <button type="button" class="nav-item admin-only hidden" data-tab="reports">报表</button>
+            <button type="button" class="nav-item" data-tab="logs">日志</button>
             <button type="button" class="nav-item admin-only hidden" data-tab="users">用户</button>
             <button type="button" class="nav-item" data-tab="help">说明</button>
             <span class="nav-session">
@@ -93,88 +93,100 @@
         </div>
       </section>
 
-      <section class="panel switches-panel hidden" id="tabSwitches">
-        <div class="panel-head">
-          <h2>切换日志</h2>
-          <div class="toolbar">
-            <button type="button" class="btn" id="btnRefreshSwitchLogs">刷新</button>
-          </div>
-        </div>
-        <p class="hint">记录谁把本机 Cursor 切到了哪个看板账号；切换时会快照 Total usage。所有登录用户可见。</p>
-        <div class="rank-table-wrap">
-          <table class="rank-table" id="switchLogTable">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>操作者</th>
-                <th>目标账号</th>
-                <th>Total usage</th>
-                <th>主机</th>
-                <th>IP</th>
-                <th>状态</th>
-                <th>说明</th>
-              </tr>
-            </thead>
-            <tbody id="switchLogBody"></tbody>
-          </table>
-        </div>
-      </section>
-
       <section class="panel reports-panel hidden" id="tabReports">
         <div class="panel-head">
-          <h2>报表中心</h2>
+          <h2>报表</h2>
           <div class="toolbar">
             <button type="button" class="btn" id="btnRefreshReports">刷新</button>
           </div>
         </div>
-        <p class="hint">按操作者汇总切换次数、用过几个号、点击切换时的 IP，以及本机扩展回报的主机名。仅管理员可见。</p>
-        <div class="rank-table-wrap">
-          <table class="rank-table" id="reportOperatorTable">
-            <thead>
-              <tr>
-                <th>用户</th>
-                <th>切换次数</th>
-                <th>成功</th>
-                <th>用过账号数</th>
-                <th>IP</th>
-                <th>主机名</th>
-              </tr>
-            </thead>
-            <tbody id="reportOperatorBody"></tbody>
-          </table>
+        <div class="charts report-charts">
+          <article class="chart-card">
+            <h3>团队日均用量 %</h3>
+            <div id="chartTeamUsage" class="chart-box"></div>
+          </article>
+          <article class="chart-card">
+            <h3>近 14 日切换量</h3>
+            <div id="chartSwitchDaily" class="chart-box"></div>
+          </article>
+          <article class="chart-card">
+            <h3>各账号当前用量 %</h3>
+            <div id="chartAccountUsage" class="chart-box chart-box--scroll"></div>
+          </article>
+          <article class="chart-card">
+            <h3>按人切换量</h3>
+            <div id="chartSwitchByUser" class="chart-box chart-box--scroll"></div>
+          </article>
         </div>
-        <h3 class="report-subhead">最近切换明细</h3>
-        <div class="rank-table-wrap">
-          <table class="rank-table" id="reportRecentTable">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>操作者</th>
-                <th>目标账号</th>
-                <th>Total usage</th>
-                <th>主机</th>
-                <th>IP</th>
-                <th>状态</th>
-              </tr>
-            </thead>
-            <tbody id="reportRecentBody"></tbody>
-          </table>
+      </section>
+
+      <section class="panel logs-panel hidden" id="tabLogs">
+        <div class="panel-head">
+          <h2>日志</h2>
+          <div class="toolbar">
+            <button type="button" class="btn" id="btnRefreshLogs">刷新</button>
+          </div>
         </div>
-        <h3 class="report-subhead">最近自动上报</h3>
-        <div class="rank-table-wrap">
-          <table class="rank-table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>使用人</th>
-                <th>Cursor 账号</th>
-                <th>主机 / 备注</th>
-                <th>插件</th>
-                <th>结果</th>
-              </tr>
-            </thead>
-            <tbody id="reportLogBody"></tbody>
-          </table>
+        <div class="logs-layout">
+          <nav class="logs-nav" aria-label="日志类型">
+            <button type="button" class="logs-nav-item active" data-log="switches">切换</button>
+            <button type="button" class="logs-nav-item admin-only hidden" data-log="reports">上报</button>
+            <button type="button" class="logs-nav-item admin-only hidden" data-log="logins">登录</button>
+          </nav>
+          <div class="logs-main">
+            <div class="logs-pane" data-log-pane="switches">
+              <div class="rank-table-wrap logs-table-wrap">
+                <table class="rank-table" id="switchLogTable">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>操作者</th>
+                      <th>目标账号</th>
+                      <th>Total usage</th>
+                      <th>主机</th>
+                      <th>IP</th>
+                      <th>状态</th>
+                      <th>说明</th>
+                    </tr>
+                  </thead>
+                  <tbody id="switchLogBody"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="logs-pane hidden" data-log-pane="reports">
+              <div class="rank-table-wrap logs-table-wrap">
+                <table class="rank-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>使用人</th>
+                      <th>Cursor 账号</th>
+                      <th>主机 / 备注</th>
+                      <th>插件</th>
+                      <th>结果</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reportLogBody"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="logs-pane hidden" data-log-pane="logins">
+              <div class="rank-table-wrap logs-table-wrap">
+                <table class="rank-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>用户</th>
+                      <th>结果</th>
+                      <th>IP</th>
+                      <th>客户端</th>
+                    </tr>
+                  </thead>
+                  <tbody id="loginLogBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -185,7 +197,7 @@
             <button type="button" class="btn primary" id="btnAddUser">+ 添加用户</button>
           </div>
         </div>
-        <p class="hint">别名会显示在账号席位上。老插件没有绑定用户时，席位用该主机对应账号的中文备注。插件列在安装或上报后更新。</p>
+        <p class="hint">别名会显示在账号席位上。老插件没有绑定用户时，席位用该主机对应账号的中文备注。插件列：绿色在线 / 红色离线（IDE 开着时插件每 2 分钟心跳，约 5 分钟无心跳为离线；需 0.2.9+）。登录日志见「日志」页。</p>
         <div class="rank-table-wrap">
           <table class="rank-table" id="userTable">
             <thead>
@@ -203,21 +215,6 @@
             <tbody id="userTableBody"></tbody>
           </table>
         </div>
-        <h3 class="report-subhead">最近登录日志</h3>
-        <div class="rank-table-wrap">
-          <table class="rank-table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>用户</th>
-                <th>结果</th>
-                <th>IP</th>
-                <th>客户端</th>
-              </tr>
-            </thead>
-            <tbody id="loginLogBody"></tbody>
-          </table>
-        </div>
       </section>
 
       <section class="panel help-panel hidden" id="tabHelp">
@@ -230,7 +227,7 @@
             <strong>登录</strong>：在登录页进入，或申请注册，管理员在「用户」页同意后即可登录。禁用后立即失去访问。
           </li>
           <li>
-            <strong>权限</strong>：普通用户可看全部用量、刷新、一键切换；添加 / 删除账号、导出、用户管理、报表中心仅管理员。异常账号（同步失败）不可切换。
+            <strong>权限</strong>：普通用户可看全部用量、刷新、一键切换与切换日志；添加 / 删除账号、导出、用户管理、报表图表、上报/登录日志仅管理员。异常账号（同步失败或 Free）不可切换。
           </li>
           <li>
             <strong>一键切换</strong>：账号卡片点「切换」→ 优先通知本机扩展桥 <code>127.0.0.1:3781</code>（Agent 模式可用）→ Cursor 弹窗确认后<strong>先备份当前本机登录态</strong>，再写入目标账号并重启。可用列表「恢复上次账号」或命令面板「恢复上次账号」从备份区还原。桥不可用时回退 <code>cursor://</code>，或「粘贴切换票据」。

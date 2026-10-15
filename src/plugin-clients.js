@@ -1,4 +1,4 @@
-/** 每个看板用户最近一次安装 / 上报的插件版本。落存储驱动。 */
+/** 每个看板用户最近一次安装 / 上报 / 心跳的插件状态。落存储驱动。 */
 
 import {
   deletePluginClient,
@@ -6,11 +6,35 @@ import {
   savePluginClient,
 } from './store.js';
 
+/** 插件每 2 分钟心跳；5 分钟无心跳视为离线（约 2.5 个周期，容忍偶发丢包）。 */
+export const PLUGIN_ONLINE_MS = 5 * 60 * 1000;
+
 /** @param {unknown} value @param {number} max */
 function cleanToken(value, max) {
   const text = String(value || '').trim();
   if (!text || text.length > max) return '';
   return /^[\w.+-]+$/.test(text) ? text : '';
+}
+
+/**
+ * 清洗主机名，避免日志/库被换行污染。
+ * @param {unknown} value
+ */
+function cleanHostname(value) {
+  return String(value || '')
+    .replace(/[\r\n]/g, '')
+    .trim()
+    .slice(0, 80);
+}
+
+/**
+ * 最近心跳（或顺带写心跳的上报）是否仍在在线窗口内。
+ * @param {string | null | undefined} heartbeatAt
+ * @param {number} [now]
+ */
+export function isPluginOnline(heartbeatAt, now = Date.now()) {
+  const at = Date.parse(String(heartbeatAt || ''));
+  return Number.isFinite(at) && now - at <= PLUGIN_ONLINE_MS;
 }
 
 /**
@@ -24,13 +48,17 @@ export function pluginClientView(row) {
   const version = reportNewer ? row.reportVersion || row.version : row.version || row.reportVersion;
   const build = reportNewer ? row.reportBuild || row.build : row.build || row.reportBuild;
   if (!version) return null;
+  const reportedAt = row.reportedAt || null;
+  const heartbeatAt = row.heartbeatAt || null;
   return {
     version,
     build: build || null,
     installedAt: row.installedAt || null,
-    reportedAt: row.reportedAt || null,
+    reportedAt,
+    heartbeatAt,
     hostname: row.hostname || null,
-    state: row.reportedAt ? 'reported' : 'installed',
+    state: reportedAt ? 'reported' : 'installed',
+    online: isPluginOnline(heartbeatAt),
   };
 }
 
@@ -56,7 +84,7 @@ export async function recordPluginInstall(username, info) {
 }
 
 /**
- * 签名通过的上报（含首次注册账号）更新正在使用的版本。
+ * 签名通过的上报（含首次注册账号）更新正在使用的版本，并顺带刷新心跳。
  * @param {string} username
  * @param {{ version?: string, build?: string, hostname?: string }} info
  */
@@ -67,16 +95,37 @@ export async function recordPluginReport(username, info) {
   const prev = rows[name] || {};
   const version = cleanToken(info?.version, 40) || prev.reportVersion || prev.version || '';
   if (!version) return null;
-  const hostname = String(info?.hostname || '')
-    .replace(/[\r\n]/g, '')
-    .trim()
-    .slice(0, 80);
+  const now = new Date().toISOString();
   const next = {
     ...prev,
     reportVersion: version,
     reportBuild: cleanToken(info?.build, 64) || prev.reportBuild || null,
-    reportedAt: new Date().toISOString(),
-    hostname: hostname || prev.hostname || null,
+    reportedAt: now,
+    heartbeatAt: now,
+    hostname: cleanHostname(info?.hostname) || prev.hostname || null,
+  };
+  await savePluginClient(name, next);
+  return pluginClientView(next);
+}
+
+/**
+ * IDE 开着时的轻量心跳：不读会话、不入上报日志，只刷新在线时间。
+ * @param {string} username
+ * @param {{ version?: string, build?: string, hostname?: string }} info
+ */
+export async function recordPluginHeartbeat(username, info) {
+  const name = String(username || '').trim();
+  if (!name) return null;
+  const rows = await loadPluginClientsMap();
+  const prev = rows[name] || {};
+  const version =
+    cleanToken(info?.version, 40) || prev.reportVersion || prev.version || '';
+  if (!version) return null;
+  const next = {
+    ...prev,
+    version: prev.version || version,
+    heartbeatAt: new Date().toISOString(),
+    hostname: cleanHostname(info?.hostname) || prev.hostname || null,
   };
   await savePluginClient(name, next);
   return pluginClientView(next);

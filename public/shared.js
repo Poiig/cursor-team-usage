@@ -447,3 +447,168 @@ export function downloadText(filename, content, mime = 'application/json') {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * 简易柱状图（报表用）。
+ * @param {HTMLElement | null} el
+ * @param {Array<{ label: string, value: number }>} points
+ * @param {string} color
+ * @param {(v: number) => string} [formatValue]
+ */
+export function renderBarChart(el, points, color, formatValue = (v) => String(v)) {
+  if (!el) return;
+  if (!points.length) {
+    el.innerHTML = `<div class="chart-empty">暂无数据</div>`;
+    return;
+  }
+  const w = 640;
+  const h = 180;
+  const padL = 44;
+  const padR = 12;
+  const padT = 14;
+  const padB = 28;
+  const max = Math.max(...points.map((p) => Number(p.value) || 0), 1);
+  const plotH = h - padT - padB;
+  const plotW = w - padL - padR;
+  const bw = plotW / points.length;
+  const fmt = (v) => formatValue(Number(v) || 0);
+  const yTicks = [0, 0.5, 1]
+    .map((t) => {
+      const val = max * t;
+      const y = padT + plotH * (1 - t);
+      return `
+      <line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="currentColor" opacity="0.08" />
+      <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(fmt(val))}</text>`;
+    })
+    .join('');
+  const bars = points
+    .map((p, i) => {
+      const value = Number(p.value) || 0;
+      const bh = Math.max(1, (value / max) * plotH);
+      const x = padL + i * bw + bw * 0.15;
+      const y = padT + plotH - bh;
+      return `<rect class="chart-bar" x="${x}" y="${y}" width="${bw * 0.7}" height="${bh}" fill="${color}" rx="2" data-tip="${escapeHtml(`${p.label} · ${fmt(value)}`)}"></rect>`;
+    })
+    .join('');
+  const labels = points
+    .map((p, i) => {
+      if (points.length > 14 && i % Math.ceil(points.length / 7) !== 0 && i !== points.length - 1) {
+        return '';
+      }
+      const x = padL + i * bw + bw / 2;
+      const label = String(p.label || '').length > 10 ? String(p.label).slice(-5) : String(p.label || '');
+      return `<text x="${x}" y="${h - 8}" text-anchor="middle" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(label)}</text>`;
+    })
+    .join('');
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${yTicks}${bars}${labels}</svg><div class="chart-tooltip" hidden></div>`;
+  bindChartTips(el);
+}
+
+/**
+ * 简易折线图（日均用量等）。
+ * @param {HTMLElement | null} el
+ * @param {Array<{ label: string, value: number }>} points
+ * @param {string} color
+ * @param {(v: number) => string} [formatValue]
+ */
+export function renderLineChart(el, points, color, formatValue = (v) => String(v)) {
+  if (!el) return;
+  if (!points.length) {
+    el.innerHTML = `<div class="chart-empty">暂无数据</div>`;
+    return;
+  }
+  const w = 640;
+  const h = 180;
+  const padL = 44;
+  const padR = 12;
+  const padT = 14;
+  const padB = 28;
+  const max = Math.max(...points.map((p) => Number(p.value) || 0), 1);
+  const plotH = h - padT - padB;
+  const plotW = w - padL - padR;
+  const step = points.length > 1 ? plotW / (points.length - 1) : 0;
+  const fmt = (v) => formatValue(Number(v) || 0);
+  const coords = points.map((p, i) => {
+    const x = padL + i * step;
+    const y = padT + plotH * (1 - (Number(p.value) || 0) / max);
+    return { x, y, p };
+  });
+  const poly = coords.map((c) => `${c.x},${c.y}`).join(' ');
+  const dots = coords
+    .map(
+      (c) =>
+        `<circle class="chart-dot" cx="${c.x}" cy="${c.y}" r="3.5" fill="${color}" data-tip="${escapeHtml(`${c.p.label} · ${fmt(c.p.value)}`)}"></circle>`,
+    )
+    .join('');
+  const yTicks = [0, 0.5, 1]
+    .map((t) => {
+      const val = max * t;
+      const y = padT + plotH * (1 - t);
+      return `
+      <line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="currentColor" opacity="0.08" />
+      <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(fmt(val))}</text>`;
+    })
+    .join('');
+  const labels = coords
+    .map((c, i) => {
+      if (points.length > 14 && i % Math.ceil(points.length / 7) !== 0 && i !== points.length - 1) {
+        return '';
+      }
+      const label =
+        String(c.p.label || '').length > 10 ? String(c.p.label).slice(-5) : String(c.p.label || '');
+      return `<text x="${c.x}" y="${h - 8}" text-anchor="middle" fill="currentColor" font-size="10" opacity="0.65">${escapeHtml(label)}</text>`;
+    })
+    .join('');
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img">${yTicks}<polyline fill="none" stroke="${color}" stroke-width="2.2" points="${poly}" />${dots}${labels}</svg><div class="chart-tooltip" hidden></div>`;
+  bindChartTips(el);
+}
+
+/**
+ * 横向条形图。
+ * @param {HTMLElement | null} el
+ * @param {Array<{ label: string, value: number }>} items
+ * @param {string} color
+ * @param {(v: number) => string} [formatValue]
+ */
+export function renderHorizontalBars(el, items, color, formatValue = (v) => String(v)) {
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = `<div class="chart-empty">暂无数据</div>`;
+    return;
+  }
+  const max = Math.max(...items.map((i) => Number(i.value) || 0), 1);
+  el.innerHTML = `<div class="h-bars">${items
+    .slice(0, 12)
+    .map((item) => {
+      const value = Number(item.value) || 0;
+      const pct = Math.max(2, (value / max) * 100);
+      return `<div class="h-bar-row" title="${escapeHtml(`${item.label} · ${formatValue(value)}`)}">
+        <span class="h-bar-label">${escapeHtml(item.label)}</span>
+        <span class="h-bar-track"><span class="h-bar-fill" style="width:${pct}%;background:${color}"></span></span>
+        <span class="h-bar-value">${escapeHtml(formatValue(value))}</span>
+      </div>`;
+    })
+    .join('')}</div>`;
+}
+
+/** @param {HTMLElement} el */
+function bindChartTips(el) {
+  const tipEl = el.querySelector('.chart-tooltip');
+  if (!tipEl) return;
+  const placeTip = (ev) => {
+    const box = el.getBoundingClientRect();
+    tipEl.style.left = `${ev.clientX - box.left + 12}px`;
+    tipEl.style.top = `${ev.clientY - box.top - 8}px`;
+  };
+  el.querySelectorAll('[data-tip]').forEach((node) => {
+    node.addEventListener('pointerenter', (ev) => {
+      tipEl.hidden = false;
+      tipEl.textContent = node.getAttribute('data-tip') || '';
+      placeTip(ev);
+    });
+    node.addEventListener('pointermove', placeTip);
+    node.addEventListener('pointerleave', () => {
+      tipEl.hidden = true;
+    });
+  });
+}
