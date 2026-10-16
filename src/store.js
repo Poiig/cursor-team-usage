@@ -72,7 +72,7 @@ export async function getAllMembersInternal() {
 
 /**
  * @param {string} id
- * @param {{ snapshot?: object | null, error?: string | null }} result
+ * @param {{ snapshot?: object | null, error?: string | null, transient?: boolean }} result
  */
 export async function saveSyncResult(id, result) {
   return api().saveSyncResult(id, result);

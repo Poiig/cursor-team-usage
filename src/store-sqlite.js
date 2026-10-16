@@ -1017,7 +1017,7 @@ export async function getAllMembersInternal() {
 
 /**
  * @param {string} id
- * @param {{ snapshot?: object | null, error?: string | null }} result
+ * @param {{ snapshot?: object | null, error?: string | null, transient?: boolean }} result
  */
 export async function saveSyncResult(id, result) {
   const member = await getMemberInternal(id);
@@ -1065,6 +1065,9 @@ export async function saveSyncResult(id, result) {
         id,
       ],
     );
+  } else if (result.transient && member.lastSnapshot) {
+    // 短暂网络失败：保留上次成功数据，不写红条；last_synced_at 不动以便扫描再刷
+    run(`UPDATE members SET last_error=NULL, updated_at=? WHERE id=?`, [now, id]);
   } else {
     // 尚无成功快照时不推进 last_synced_at，便于按到期逻辑尽快重试。
     run(

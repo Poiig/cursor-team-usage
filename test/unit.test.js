@@ -27,6 +27,7 @@ import {
   eventTotalTokens,
   fetchMe,
   fetchUserRules,
+  isTransientCursorError,
 } from '../src/cursor-api.js';
 import {
   archiveYesterdayPercents,
@@ -360,6 +361,72 @@ test('请求失败时错误信息带上接口地址与真实原因', async () =>
     await assert.rejects(fetchMe(session), { message: `fetch failed (ECONNRESET): ${url}` });
   } finally {
     globalThis.fetch = realFetch;
+  }
+});
+
+test('isTransientCursorError 识别连接超时，排除会话失效', () => {
+  assert.equal(
+    isTransientCursorError({
+      message: 'fetch failed (UND_ERR_CONNECT_TIMEOUT): https://cursor.com/api/auth/me',
+    }),
+    true,
+  );
+  assert.equal(isTransientCursorError({ message: '请求超时: https://cursor.com/api/auth/me', retryable: true }), true);
+  assert.equal(isTransientCursorError({ status: 503 }), true);
+  assert.equal(
+    isTransientCursorError({ message: 'not_authenticated (HTTP 401): https://cursor.com/api/auth/me', status: 401 }),
+    false,
+  );
+});
+
+test('短暂同步失败有旧快照时不写 lastError，会话错误仍落红条', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-sync-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 't.sqlite');
+  try {
+    await loadAppConfig();
+    const store = await import('../src/store-sqlite.js');
+    await store.close().catch(() => {});
+    await store.init();
+    const jwt =
+      'eyJhbGciOiJub25lIn0.' +
+      Buffer.from(JSON.stringify({ sub: 'auth0|user_sync' })).toString('base64url') +
+      '.x';
+    const added = await store.addMember({
+      displayName: '补偿测',
+      sessionToken: buildCookieValue('user_sync', jwt),
+    });
+    const syncedAt = '2026-10-16T00:00:00.000Z';
+    await store.saveSyncResult(added.id, {
+      snapshot: { email: 'a@x.com', syncedAt, meters: { totalPercentUsed: 10 } },
+    });
+    const kept = await store.saveSyncResult(added.id, {
+      error: 'fetch failed (UND_ERR_CONNECT_TIMEOUT): https://cursor.com/api/auth/me',
+      transient: true,
+    });
+    assert.equal(kept.lastError, null);
+    const inner = await store.getMemberInternal(added.id);
+    assert.equal(inner.lastSyncedAt, syncedAt);
+    assert.equal(inner.lastSnapshot.email, 'a@x.com');
+
+    const hard = await store.saveSyncResult(added.id, {
+      error: 'not_authenticated (HTTP 401): https://cursor.com/api/auth/me',
+    });
+    assert.match(hard.lastError, /401/);
+    await store.close();
+  } finally {
+    const store = await import('../src/store-sqlite.js');
+    await store.close().catch(() => {});
+    if (prevDriver === undefined) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite === undefined) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

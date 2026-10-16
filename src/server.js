@@ -17,7 +17,11 @@ import {
   loadAppConfig,
 } from './config.js';
 import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
-import { fetchMemberSnapshot, fetchUserRules } from './cursor-api.js';
+import {
+  fetchMemberSnapshotWithRetry,
+  fetchUserRules,
+  isTransientCursorError,
+} from './cursor-api.js';
 import {
   ensureMemberUsageEventsSynced,
   loadPreviousCycle,
@@ -308,7 +312,7 @@ async function refreshOne(id, ctx = {}) {
     if (!member) throw new Error('成员不存在');
     const label = memberLogLabel(member);
     try {
-      const snapshot = await fetchMemberSnapshot(member.cookieValue);
+      const snapshot = await fetchMemberSnapshotWithRetry(member.cookieValue);
       // 先落事件再存快照，避免 _usageEvents 进 last_snapshot。
       try {
         await persistSnapshotUsageEvents(id, snapshot);
@@ -330,12 +334,13 @@ async function refreshOne(id, ctx = {}) {
       return result;
     } catch (e) {
       const msg = e?.message || String(e);
-      const result = await saveSyncResult(id, { error: msg });
+      const keepSnapshot = isTransientCursorError(e) && Boolean(member.lastSnapshot);
+      const result = await saveSyncResult(id, { error: msg, transient: keepSnapshot });
       await writeAppLog('刷新', {
         账号: label,
         来源: source,
         触发: trigger || undefined,
-        结果: '失败',
+        结果: keepSnapshot ? '网络抖动(保留上次)' : '失败',
         错误: msg,
       });
       return result;
@@ -352,6 +357,8 @@ async function refreshOne(id, ctx = {}) {
  * @param {number} nowMs
  */
 function isMemberDue(member, intervalSec, nowMs = Date.now()) {
+  // 已在看板上的超时红条尽快再刷，不必等满 AUTO_REFRESH_SEC
+  if (member.lastError && isTransientCursorError({ message: member.lastError })) return true;
   if (!member.lastSyncedAt) return true;
   const t = Date.parse(member.lastSyncedAt);
   if (!Number.isFinite(t)) return true;

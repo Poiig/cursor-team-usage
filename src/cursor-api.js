@@ -22,11 +22,36 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const TRANSIENT_ERROR_RE =
+  /UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|UND_ERR_SOCKET|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EAI_AGAIN|EPIPE|ENOTFOUND|fetch failed|请求超时|terminated|other side closed|socket hang up/i;
+
+/**
+ * 短暂网络/限流失败：可重试，且有旧快照时不要写成看板上的红条。
+ * 401/403 是会话问题，不算短暂。
+ */
+export function isTransientCursorError(error) {
+  if (!error) return false;
+  if (error.retryable === true) return true;
+  const status = Number(error.status);
+  if (status === 408 || status === 425 || status === 429 || status >= 500) return true;
+  const code = String(error.code || error.cause?.code || '');
+  const msg = String(error.message || error);
+  return TRANSIENT_ERROR_RE.test(code) || TRANSIENT_ERROR_RE.test(msg);
+}
+
 /** 网络抖动、限流和服务端错误可重试；401/403 没有刷新 Token 时重试无意义。 */
 function isRetryableError(error) {
-  if (error?.retryable === true) return true;
-  const status = Number(error?.status);
-  return status === 408 || status === 425 || status === 429 || status >= 500;
+  return isTransientCursorError(error);
+}
+
+/** 连接超时要多等一会儿，250ms 时对端往往还没恢复。 */
+function retryDelayMs(error, attempt) {
+  if (error?.retryAfterMs) return error.retryAfterMs;
+  const slow = /TIMEOUT|ETIMEDOUT|ENETUNREACH|UND_ERR_CONNECT/i.test(
+    String(error?.code || error?.cause?.code || error?.message || ''),
+  );
+  if (attempt === 0) return slow ? 1000 : 250;
+  return slow ? 3000 : 750;
 }
 
 /**
@@ -98,8 +123,7 @@ async function fetchJson(url, options, timeoutMs = 20000) {
       return await fetchJsonOnce(url, options, timeoutMs);
     } catch (error) {
       if (attempt >= maxRetries || !isRetryableError(error)) throw error;
-      const delay = error?.retryAfterMs || (attempt === 0 ? 250 : 750);
-      await sleep(delay);
+      await sleep(retryDelayMs(error, attempt));
     }
   }
 }
@@ -1017,6 +1041,20 @@ export async function fetchMemberUsageEvents(cookieValue, opts = {}) {
     hasNext: Boolean(hasNext && batch.length > 0),
     events,
   };
+}
+
+/**
+ * 整次快照再补一轮：单接口已重试仍可能整组 Promise.all 一起失败。
+ * @param {string} cookieValue
+ */
+export async function fetchMemberSnapshotWithRetry(cookieValue) {
+  try {
+    return await fetchMemberSnapshot(cookieValue);
+  } catch (e) {
+    if (!isTransientCursorError(e)) throw e;
+    await sleep(2000);
+    return await fetchMemberSnapshot(cookieValue);
+  }
 }
 
 /**

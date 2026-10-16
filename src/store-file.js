@@ -389,7 +389,7 @@ export async function getAllMembersInternal() {
 
 /**
  * @param {string} id
- * @param {{ snapshot?: object | null, error?: string | null }} result
+ * @param {{ snapshot?: object | null, error?: string | null, transient?: boolean }} result
  */
 export async function saveSyncResult(id, result) {
   const store = await readStore();
@@ -417,6 +417,9 @@ export async function saveSyncResult(id, result) {
     member.tokenExpiresAt = tokenExpiresAtFromCookie(member.cookieValue);
     member.lastError = null;
     member.lastSyncedAt = result.snapshot.syncedAt || now;
+  } else if (result.transient && member.lastSnapshot) {
+    // 短暂网络失败：保留上次成功数据，不写红条；lastSyncedAt 不动以便扫描再刷
+    member.lastError = null;
   } else {
     member.lastError = result.error ?? '同步失败';
     // 尚无成功快照时不推进 lastSyncedAt，便于按到期逻辑尽快重试。
