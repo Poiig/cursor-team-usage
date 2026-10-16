@@ -106,21 +106,20 @@ export async function scheduleCursorRestart(): Promise<void> {
       '}',
       'Start-Sleep -Seconds 1',
       'if (-not $exe) { exit 1 }',
-      // cmd start 再开一层，避免 Start-Process 挂在已退出会话上
+      // 勿用 cmd start "" "带空格路径"：PowerShell 会吞掉空标题，路径被当成窗口标题，弹出一堆空 cmd
       'for ($i = 0; $i -lt 5; $i++) {',
-      '  cmd.exe /c start "" "$exe"',
+      '  Start-Process -FilePath $exe',
       '  Start-Sleep -Seconds 1',
       '  if (Get-Process -Name Cursor -ErrorAction SilentlyContinue) { break }',
       '}',
     ].join('\r\n');
     await writeFile(ps1, '\uFEFF' + script, 'utf8');
-    // start 空标题 + /min：跳出 Job，且不弹乱码控制台
+    // start /min 且下一参数不带引号：跳出 Job，不弹乱码控制台（不要写空标题 ""）
     spawn(
       'cmd.exe',
       [
         '/c',
         'start',
-        '',
         '/min',
         'powershell.exe',
         '-NoProfile',
