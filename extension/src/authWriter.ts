@@ -73,38 +73,66 @@ function cursorExePath(): string | null {
 
 /**
  * 后台拉起重启后退出当前 Cursor。
- * Windows 用 wscript 隐藏启动，避免 cmd/cursor.cmd 占住终端且中文乱码。
- * 必须等旧进程全部退出再启动：旧实例还在时新 Cursor 会把自己交给它然后退出，表现为重启后没打开。
+ * Windows 必须用 cmd start 跳出 Cursor 的 Job：wscript 子进程会在 IDE 退出时被带走，表现为 quit 成功但不唤起。
+ * 必须等旧进程全部退出再启动：旧实例还在时新 Cursor 会把自己交给它然后退出。
  */
 export async function scheduleCursorRestart(): Promise<void> {
   const delaySec = 2;
-  const waitExitSec = 15;
+  const waitExitSec = 20;
   if (process.platform === 'win32') {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'ctu-restart-'));
     const ps1 = path.join(dir, 'restart.ps1');
-    const vbs = path.join(dir, 'restart.vbs');
     const exe = (cursorExePath() || '').replace(/'/g, "''");
     const script = [
       '$ErrorActionPreference = "SilentlyContinue"',
+      `$exe = '${exe}'`,
+      "if (-not $exe -or -not (Test-Path -LiteralPath $exe)) {",
+      "  $candidates = @(",
+      "    (Join-Path $env:LOCALAPPDATA 'Programs\\cursor\\Cursor.exe'),",
+      "    (Join-Path $env:LOCALAPPDATA 'Programs\\Cursor\\Cursor.exe'),",
+      "    (Join-Path $env:ProgramW6432 'cursor\\Cursor.exe'),",
+      "    (Join-Path $env:ProgramFiles 'cursor\\Cursor.exe')",
+      "  )",
+      "  $exe = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1",
+      '}',
       `Start-Sleep -Seconds ${delaySec}`,
-      'Get-Process -Name Cursor -ErrorAction SilentlyContinue | Stop-Process -Force',
+      // 先等软退出（扩展已发 quit）；用户点确认或卡对话框时再强杀，避免新实例撞上单实例锁
       `$deadline = (Get-Date).AddSeconds(${waitExitSec})`,
       'while ((Get-Process -Name Cursor -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }',
-      'Start-Sleep -Milliseconds 500',
-      exe
-        ? `Start-Process -FilePath '${exe}'`
-        : "Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'Programs\\cursor\\Cursor.exe')",
+      'if (Get-Process -Name Cursor -ErrorAction SilentlyContinue) {',
+      '  Get-Process -Name Cursor -ErrorAction SilentlyContinue | Stop-Process -Force',
+      `  $deadline = (Get-Date).AddSeconds(${waitExitSec})`,
+      '  while ((Get-Process -Name Cursor -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }',
+      '}',
+      'Start-Sleep -Seconds 1',
+      'if (-not $exe) { exit 1 }',
+      // cmd start 再开一层，避免 Start-Process 挂在已退出会话上
+      'for ($i = 0; $i -lt 5; $i++) {',
+      '  cmd.exe /c start "" "$exe"',
+      '  Start-Sleep -Seconds 1',
+      '  if (Get-Process -Name Cursor -ErrorAction SilentlyContinue) { break }',
+      '}',
     ].join('\r\n');
     await writeFile(ps1, '\uFEFF' + script, 'utf8');
-    const ps1Quoted = ps1.replace(/"/g, '""');
-    const vbsBody = `CreateObject("Wscript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${ps1Quoted}""", 0, False\r\n`;
-    await writeFile(vbs, vbsBody, 'utf8');
-    // wscript //B 无窗口，且 Run 脱离 Cursor 的 Job，退出 IDE 不会杀掉重启脚本
-    spawn('wscript.exe', ['//B', '//Nologo', vbs], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    }).unref();
+    // start 空标题 + /min：跳出 Job，且不弹乱码控制台
+    spawn(
+      'cmd.exe',
+      [
+        '/c',
+        'start',
+        '',
+        '/min',
+        'powershell.exe',
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-File',
+        ps1,
+      ],
+      { detached: true, stdio: 'ignore', windowsHide: true },
+    ).unref();
     for (const term of vscode.window.terminals) {
       if (/cmd\.exe/i.test(term.name)) term.dispose();
     }
@@ -118,7 +146,7 @@ export async function scheduleCursorRestart(): Promise<void> {
     spawn('/bin/bash', ['-lc', bash], { detached: true, stdio: 'ignore' }).unref();
   }
 
-  // 给 detached 进程一点时间落地，再退出 IDE
-  await new Promise((r) => setTimeout(r, 400));
+  // 等 cmd start 把 PowerShell 拉起来，再退出 IDE，避免脚本还在 Job 里被带走
+  await new Promise((r) => setTimeout(r, 800));
   await vscode.commands.executeCommand('workbench.action.quit');
 }
