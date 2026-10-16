@@ -2,9 +2,9 @@
  * 把看板下发的会话写入本机 Cursor state.vscdb，并安排重启以加载新登录态。
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
@@ -56,8 +56,10 @@ export async function writeLocalCursorAuth(
   return { dbPath, written };
 }
 
-/** Windows 上 cursor 命令多是 cursor.cmd，直接找可执行文件才能在退出 IDE 后可靠重启。 */
+/** 当前正在跑的 Cursor.exe，比猜安装目录更准。 */
 function cursorExePath(): string | null {
+  const fromAppRoot = path.join(vscode.env.appRoot, '..', '..', 'Cursor.exe');
+  if (existsSync(fromAppRoot)) return path.normalize(fromAppRoot);
   const local = process.env.LOCALAPPDATA || '';
   const programFiles = [process.env.ProgramW6432, process.env.ProgramFiles].filter(Boolean) as string[];
   const candidates = [
@@ -71,81 +73,284 @@ function cursorExePath(): string | null {
   return candidates.find((p) => existsSync(p)) || null;
 }
 
+/** 固定 System32，避免 32 位进程 PATH 指到 WOW64 的 powershell。 */
+function winPowerShellExe(): string {
+  return path.join(
+    process.env.SystemRoot || 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+}
+
+/** PowerShell 单引号字符串把 ' 写成 ''。 */
+function psSingleQuote(s: string): string {
+  return s.replace(/'/g, "''");
+}
+
+/** 扩展与重启脚本共用这一份日志，避免各写各的对不上。 */
+function restartLogPath(): string {
+  return path.join(os.tmpdir(), 'ctu-restart.log');
+}
+
+/** 扩展进程侧也写日志，用来区分「没安排上」和「安排了但子进程没跑」。 */
+async function appendRestartLog(line: string): Promise<void> {
+  await writeFile(restartLogPath(), `${new Date().toISOString()} ${line}\n`, {
+    encoding: 'utf8',
+    flag: 'a',
+  });
+}
+
+/** 创建成功不代表脚本真在跑（Windows 的 -File、Mac 的 launchd 都有空成功）。 */
+async function waitRestartChildLog(runId: string, ms: number): Promise<boolean> {
+  const needle = `child-run=${runId}`;
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    try {
+      const text = await readFile(restartLogPath(), 'utf8');
+      if (text.includes(needle)) return true;
+    } catch {
+      /* 日志尚未创建 */
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return false;
+}
+
+/**
+ * 经 WMI 创建进程（父进程是 WmiPrvSE，不在 Cursor Job 里）。
+ * Node spawn 的 creationFlags 根本不会传给 CreateProcess；子进程会被 Quit 一起杀掉。
+ * powershell -File 在无控制台时会静默退出，必须用 -Command "& 'script.ps1'"。
+ */
+function winSpawnOutsideJob(commandLine: string): void {
+  const psExe = winPowerShellExe();
+  const wmi = [
+    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${psSingleQuote(commandLine)}' }`,
+    'if ($r.ReturnValue -ne 0) { throw "Win32_Process.Create $($r.ReturnValue)" }',
+  ].join('; ');
+  execFileSync(psExe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', wmi], {
+    timeout: 15000,
+    windowsHide: true,
+  });
+}
+
+/** plist 路径含 & 时不转义会直接坏掉。 */
+function xmlEscape(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** bash 单引号字符串：把 ' 写成 '\''。 */
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Contents/Resources/app 再上三级才是 Cursor.app。 */
+function macCursorAppPath(): string | null {
+  const fromAppRoot = path.normalize(path.join(vscode.env.appRoot, '..', '..', '..'));
+  if (fromAppRoot.endsWith('.app') && existsSync(fromAppRoot)) return fromAppRoot;
+  const home = os.homedir();
+  return (
+    ['/Applications/Cursor.app', path.join(home, 'Applications', 'Cursor.app')].find((p) =>
+      existsSync(p),
+    ) || null
+  );
+}
+
+/**
+ * launchd 拉起的进程不属于 Cursor，Quit 不会带走。
+ * Node detached spawn 在部分 Electron/macOS 上仍会随父进程退出。
+ */
+function macSpawnViaLaunchd(plistPath: string, uid: number): void {
+  const domain = `gui/${uid}`;
+  try {
+    execFileSync('launchctl', ['bootout', domain, plistPath], { timeout: 5000, stdio: 'ignore' });
+  } catch {
+    /* 首次没有旧任务 */
+  }
+  execFileSync('launchctl', ['bootstrap', domain, plistPath], { timeout: 10000 });
+}
+
+/** launchd 不可用时再赌 nohup+setsid 能活过 Quit。 */
+function macSpawnDetached(scriptPath: string): void {
+  spawn('/usr/bin/nohup', ['/bin/bash', scriptPath], { detached: true, stdio: 'ignore' }).unref();
+}
+
+/**
+ * 与 Windows 同一套约定：进程外脚本等 Cursor 退干净再 open；用户点取消则放弃。
+ */
+async function scheduleMacRestart(delaySec: number, waitExitSec: number): Promise<void> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ctu-restart-'));
+  const scriptPath = path.join(dir, 'restart.sh');
+  const plistPath = path.join(dir, 'restart.plist');
+  const log = restartLogPath();
+  const app = macCursorAppPath() || '';
+  const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const label = `com.poiig.ctu.restart.${runId}`;
+  const uid = os.userInfo().uid;
+  const script = [
+    '#!/bin/bash',
+    `LOG=${shSingleQuote(log)}`,
+    'W() { printf "%s %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$*" >> "$LOG"; }',
+    `W "restart script pid=$$ child-run=${runId}"`,
+    `sleep ${delaySec}`,
+    'n=0',
+    'while /usr/bin/pgrep -x Cursor >/dev/null 2>&1; do',
+    '  n=$((n+1))',
+    `  if [ "$n" -ge ${waitExitSec} ]; then`,
+    '    W "cursor still running, skip launch"',
+    '    exit 0',
+    '  fi',
+    '  sleep 1',
+    'done',
+    'sleep 1',
+    `APP=${shSingleQuote(app)}`,
+    'if [ -n "$APP" ] && [ -d "$APP" ]; then',
+    '  W "launch $APP"',
+    '  /usr/bin/open "$APP"',
+    'else',
+    '  W "launch open -a Cursor"',
+    '  /usr/bin/open -a Cursor',
+    'fi',
+    `/bin/launchctl bootout "gui/$(/usr/bin/id -u)/${label}" >/dev/null 2>&1 || true`,
+  ].join('\n');
+  await writeFile(scriptPath, script, 'utf8');
+  const plist = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '<key>Label</key><string>' + xmlEscape(label) + '</string>',
+    '<key>ProgramArguments</key><array>',
+    '<string>/bin/bash</string>',
+    '<string>' + xmlEscape(scriptPath) + '</string>',
+    '</array>',
+    '<key>RunAtLoad</key><true/>',
+    '<key>LaunchOnlyOnce</key><true/>',
+    '<key>AbandonProcessGroup</key><true/>',
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n');
+  await writeFile(plistPath, plist, 'utf8');
+  await appendRestartLog(`schedule run=${runId} sh=${scriptPath} app=${app || '(empty)'}`);
+  let launched = false;
+  try {
+    macSpawnViaLaunchd(plistPath, uid);
+    await appendRestartLog(`launchd ok run=${runId}`);
+    launched = await waitRestartChildLog(runId, 2500);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await appendRestartLog(`launchd fail ${msg}; try nohup`);
+  }
+  if (!launched) {
+    macSpawnDetached(scriptPath);
+    await appendRestartLog(`nohup spawned run=${runId}`);
+    launched = await waitRestartChildLog(runId, 2500);
+  }
+  if (!launched) {
+    throw new Error('重启脚本未能启动，请查看 $TMPDIR/ctu-restart.log');
+  }
+}
+
+/** WMI 不可用时由任务计划程序拉起，同样不在 Cursor Job 里。 */
+function winSpawnViaSchtasks(cmdPath: string): void {
+  const tn = `CTU-Restart-${Date.now()}`;
+  execFileSync(
+    'schtasks.exe',
+    ['/Create', '/F', '/TN', tn, '/SC', 'ONCE', '/ST', '23:59', '/IT', '/TR', cmdPath],
+    { timeout: 15000, windowsHide: true },
+  );
+  try {
+    execFileSync('schtasks.exe', ['/Run', '/TN', tn], { timeout: 15000, windowsHide: true });
+  } finally {
+    try {
+      execFileSync('schtasks.exe', ['/Delete', '/F', '/TN', tn], { timeout: 10000, windowsHide: true });
+    } catch {
+      /* 下次同名 /F 覆盖 */
+    }
+  }
+}
+
 /**
  * 后台拉起重启后退出当前 Cursor。
- * Windows 必须用 cmd start 跳出 Cursor 的 Job：wscript 子进程会在 IDE 退出时被带走，表现为 quit 成功但不唤起。
- * 必须等旧进程全部退出再启动：旧实例还在时新 Cursor 会把自己交给它然后退出。
+ * Windows 走 WMI，Mac 走 launchd；都要等旧进程退干净再启动，否则新实例会把自己交给旧进程然后退出。
  */
 export async function scheduleCursorRestart(): Promise<void> {
   const delaySec = 2;
-  const waitExitSec = 20;
+  const waitExitSec = 60;
   if (process.platform === 'win32') {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'ctu-restart-'));
-    const ps1 = path.join(dir, 'restart.ps1');
-    const exe = (cursorExePath() || '').replace(/'/g, "''");
-    const script = [
-      '$ErrorActionPreference = "SilentlyContinue"',
-      `$exe = '${exe}'`,
-      "if (-not $exe -or -not (Test-Path -LiteralPath $exe)) {",
-      "  $candidates = @(",
-      "    (Join-Path $env:LOCALAPPDATA 'Programs\\cursor\\Cursor.exe'),",
-      "    (Join-Path $env:LOCALAPPDATA 'Programs\\Cursor\\Cursor.exe'),",
-      "    (Join-Path $env:ProgramW6432 'cursor\\Cursor.exe'),",
-      "    (Join-Path $env:ProgramFiles 'cursor\\Cursor.exe')",
-      "  )",
-      "  $exe = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1",
-      '}',
-      `Start-Sleep -Seconds ${delaySec}`,
-      // 先等软退出（扩展已发 quit）；用户点确认或卡对话框时再强杀，避免新实例撞上单实例锁
-      `$deadline = (Get-Date).AddSeconds(${waitExitSec})`,
-      'while ((Get-Process -Name Cursor -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }',
-      'if (Get-Process -Name Cursor -ErrorAction SilentlyContinue) {',
-      '  Get-Process -Name Cursor -ErrorAction SilentlyContinue | Stop-Process -Force',
-      `  $deadline = (Get-Date).AddSeconds(${waitExitSec})`,
-      '  while ((Get-Process -Name Cursor -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }',
-      '}',
-      'Start-Sleep -Seconds 1',
-      'if (-not $exe) { exit 1 }',
-      // 勿用 cmd start "" "带空格路径"：PowerShell 会吞掉空标题，路径被当成窗口标题，弹出一堆空 cmd
-      'for ($i = 0; $i -lt 5; $i++) {',
-      '  Start-Process -FilePath $exe',
-      '  Start-Sleep -Seconds 1',
-      '  if (Get-Process -Name Cursor -ErrorAction SilentlyContinue) { break }',
-      '}',
+    const cmdPath = path.join(dir, 'restart.cmd');
+    const log = restartLogPath();
+    const exe = cursorExePath() || '';
+    const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    // powershell -File 无控制台会静默退出；cmd + WMI 才能活过 Quit
+    const cmd = [
+      '@echo off',
+      'setlocal',
+      `set "LOG=${log}"`,
+      `echo restart script child-run=${runId}>>"%LOG%"`,
+      `timeout /t ${delaySec} /nobreak >nul`,
+      'set WAITED=0',
+      ':wait',
+      'tasklist /FI "IMAGENAME eq Cursor.exe" | find /I "Cursor.exe" >nul',
+      'if errorlevel 1 goto launch',
+      'timeout /t 1 /nobreak >nul',
+      'set /a WAITED+=1',
+      `if %WAITED% LSS ${waitExitSec} goto wait`,
+      'echo cursor still running, skip launch>>"%LOG%"',
+      'goto :eof',
+      ':launch',
+      'timeout /t 1 /nobreak >nul',
+      ...(exe
+        ? [
+            `if not exist "${exe}" (`,
+            'echo no exe>>"%LOG%"',
+            'goto :eof',
+            ')',
+            'echo launch>>"%LOG%"',
+            `start "" "${exe}"`,
+          ]
+        : ['echo no exe>>"%LOG%"']),
     ].join('\r\n');
-    await writeFile(ps1, '\uFEFF' + script, 'utf8');
-    // start /min 且下一参数不带引号：跳出 Job，不弹乱码控制台（不要写空标题 ""）
-    spawn(
-      'cmd.exe',
-      [
-        '/c',
-        'start',
-        '/min',
-        'powershell.exe',
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-WindowStyle',
-        'Hidden',
-        '-File',
-        ps1,
-      ],
-      { detached: true, stdio: 'ignore', windowsHide: true },
-    ).unref();
-    for (const term of vscode.window.terminals) {
-      if (/cmd\.exe/i.test(term.name)) term.dispose();
+    await writeFile(cmdPath, cmd, 'ascii');
+    // 隐藏窗口；CommandLine 里的单引号由 winSpawnOutsideJob 再转义给 CIM
+    const commandLine =
+      `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command ` +
+      `"Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','${psSingleQuote(cmdPath)}' -WindowStyle Hidden"`;
+    await appendRestartLog(`schedule run=${runId} cmd=${cmdPath} exe=${exe || '(empty)'}`);
+    let launched = false;
+    try {
+      winSpawnOutsideJob(commandLine);
+      await appendRestartLog(`wmi create ok run=${runId}`);
+      launched = await waitRestartChildLog(runId, 2500);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await appendRestartLog(`wmi fail ${msg}; try schtasks`);
+    }
+    if (!launched) {
+      try {
+        winSpawnViaSchtasks(cmdPath);
+        await appendRestartLog(`schtasks run ok run=${runId}`);
+        launched = await waitRestartChildLog(runId, 2500);
+      } catch (e2) {
+        const msg2 = e2 instanceof Error ? e2.message : String(e2);
+        await appendRestartLog(`schtasks fail ${msg2}`);
+        throw new Error(`无法安排重启：${msg2}`);
+      }
+    }
+    if (!launched) {
+      throw new Error('重启脚本未能启动，请查看 %TEMP%\\ctu-restart.log');
     }
   } else if (process.platform === 'darwin') {
-    const waitExit = `for i in $(seq ${waitExitSec * 2}); do pgrep -x Cursor >/dev/null || break; sleep 0.5; done`;
-    const bash = `sleep ${delaySec}; osascript -e 'quit app "Cursor"' >/dev/null 2>&1; ${waitExit}; open -a Cursor`;
-    spawn('/bin/bash', ['-lc', bash], { detached: true, stdio: 'ignore' }).unref();
+    await scheduleMacRestart(delaySec, waitExitSec);
   } else {
     const waitExit = `for i in $(seq ${waitExitSec * 2}); do pgrep -x cursor >/dev/null || pgrep -x Cursor >/dev/null || break; sleep 0.5; done`;
     const bash = `sleep ${delaySec}; pkill -x cursor || pkill -x Cursor || true; ${waitExit}; (command -v cursor >/dev/null && cursor) || true`;
     spawn('/bin/bash', ['-lc', bash], { detached: true, stdio: 'ignore' }).unref();
   }
 
-  // 等 cmd start 把 PowerShell 拉起来，再退出 IDE，避免脚本还在 Job 里被带走
-  await new Promise((r) => setTimeout(r, 800));
+  // 脚本已在 Job 外跑着；Quit 会出系统确认框，点 Cancel 则脚本超时后放弃拉起
   await vscode.commands.executeCommand('workbench.action.quit');
 }
