@@ -2,7 +2,7 @@
   "name": "cursor-team-usage-reporter",
   "displayName": "Cursor Team Usage Reporter",
   "description": "上报本机 Cursor 会话到看板，并支持从看板一键切换本机登录账号",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "publisher": "poiig",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -83,7 +83,7 @@
       },
       {
         "command": "cursorTeamUsage.restoreLastAccount",
-        "title": "Cursor Team Usage: 恢复上次账号"
+        "title": "Cursor Team Usage: 恢复本机账号"
       },
       {
         "command": "cursorTeamUsage.checkUpdate",

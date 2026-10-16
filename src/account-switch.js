@@ -8,6 +8,7 @@ import { decodeJwtPayload, jwtFromCookie, sessionFromCookie } from './auth.js';
 import { getMemberCapacity } from './account-presence.js';
 import { getPublicUser } from './users.js';
 import {
+  getAllMembersInternal,
   getMemberInternal,
   getSwitchLog,
   insertSwitchLog,
@@ -119,6 +120,47 @@ export function buildLocalAuthPayload(cookieValue, extra = {}) {
     stripeMembershipAuthId: sub,
     cachedSignUpType: provider || null,
     userId: session.userId,
+  };
+}
+
+/**
+ * 按成员表首次上报写入的 hostname 认本机原账号；同机多条时取最早创建。
+ * hostname 只在入库时写一次、续报不改，适合作为「本机号」锚点。
+ * @param {Array<{ hostname?: string | null, createdAt?: string | null }>} members
+ * @param {string} hostname
+ */
+export function pickHomeMemberByHostname(members, hostname) {
+  const host = String(hostname || '')
+    .trim()
+    .toLowerCase();
+  if (!host) return null;
+  const matches = (members || []).filter(
+    (m) =>
+      String(m?.hostname || '')
+        .trim()
+        .toLowerCase() === host,
+  );
+  if (!matches.length) return null;
+  matches.sort((a, b) =>
+    String(a.createdAt || '').localeCompare(String(b.createdAt || '')),
+  );
+  return matches[0];
+}
+
+/**
+ * 无本地 home 备份时：用主机名在号池里找回本机原注册账号的可写入会话。
+ * @param {string} hostname
+ * @returns {Promise<null | { memberId: string, displayName: string, email: string | null, auth: ReturnType<typeof buildLocalAuthPayload> }>}
+ */
+export async function resolveHomeAccountForHostname(hostname) {
+  const member = pickHomeMemberByHostname(await getAllMembersInternal(), hostname);
+  if (!member?.cookieValue) return null;
+  const auth = buildLocalAuthPayload(member.cookieValue, { email: member.email });
+  return {
+    memberId: member.id,
+    displayName: member.displayName || member.email || member.id,
+    email: member.email || null,
+    auth,
   };
 }
 

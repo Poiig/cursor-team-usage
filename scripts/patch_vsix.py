@@ -53,6 +53,7 @@ def main() -> int:
             "version": args.version,
             "build": args.build,
             "apiBaseUrl": args.api_base_url.rstrip("/"),
+            "accessKey": args.access_key,
             "operatorUsername": args.operator_username,
             "operatorProof": args.operator_proof,
         },

@@ -112,7 +112,7 @@ export function startLocalBridge(
       return;
     }
 
-    // 备份区摘要：看板「恢复上次」按钮用
+    // 本机账号备份摘要：看板「恢复本机账号」按钮用
     if (req.method === 'GET' && url.pathname === '/backup') {
       try {
         const info = onBackupInfo ? await onBackupInfo() : { exists: false };

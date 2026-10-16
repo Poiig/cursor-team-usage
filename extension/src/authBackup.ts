@@ -1,6 +1,7 @@
 /**
- * 本机 Cursor 登录态备份区：切换前落盘，支持「恢复上次账号」。
- * 只备份 cursorAuth/*，不碰聊天记录与整目录（与 cursor-switch 全量 zip 不同）。
+ * 本机 Cursor 登录态备份区：记下「本机账号」，之后只还原它，不被多次切换覆盖。
+ * 优先来源：本地 home.json → 看板号池（成员首次上报 hostname）→ 当前本机登录态。
+ * 只备份 cursorAuth/*，不碰聊天记录与整目录。
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -13,48 +14,84 @@ export type AuthBackupRecord = {
   hostname: string;
   email?: string | null;
   userId?: string | null;
-  /** 切换目标账号标签（可选，便于辨认备份来源） */
+  /** 备份来源说明，便于辨认 */
   note?: string | null;
   auth: LocalAuthPayload;
 };
 
-const LAST_FILE = 'last.json';
+/** 本机账号快照：只写一次，恢复也不覆盖。 */
+const HOME_FILE = 'home.json';
 
 /** 扩展 globalStorage 下的备份目录。 */
 export function authBackupDir(storageRoot: string): string {
   return path.join(storageRoot, 'auth-backups');
 }
 
+function homePath(storageRoot: string): string {
+  return path.join(authBackupDir(storageRoot), HOME_FILE);
+}
+
 /**
- * 把当前本机登录态写入 last.json（覆盖上一份「上次」）。
- * 无有效 Token 时跳过，不抛错（首次未登录仍允许切到看板账号）。
+ * 把已解析的本机账号写入 home.json（已存在则不改，返回现有）。
  */
-export async function backupCurrentLocalAuth(
+export async function writeHomeAuthBackup(
+  storageRoot: string,
+  record: AuthBackupRecord,
+): Promise<AuthBackupRecord> {
+  const existing = await loadHomeAuthBackup(storageRoot);
+  if (existing) return existing;
+
+  const dir = authBackupDir(storageRoot);
+  await mkdir(dir, { recursive: true });
+  try {
+    await writeFile(homePath(storageRoot), JSON.stringify(record, null, 2), {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    return record;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err?.code === 'EEXIST') {
+      const again = await loadHomeAuthBackup(storageRoot);
+      if (again) return again;
+    }
+    throw e;
+  }
+}
+
+/**
+ * 若尚无本机账号备份：可选用看板解析结果，否则抓当前登录态。
+ * @param boardHome 看板按 hostname 找回的本机号；没有则传 null
+ */
+export async function ensureHomeAuthBackup(
   storageRoot: string,
   note?: string | null,
+  boardHome?: AuthBackupRecord | null,
 ): Promise<AuthBackupRecord | null> {
+  const existing = await loadHomeAuthBackup(storageRoot);
+  if (existing) return existing;
+
+  if (boardHome?.auth?.accessToken) {
+    return writeHomeAuthBackup(storageRoot, boardHome);
+  }
+
   const snap = await readLocalAuthSnapshot();
   if (!snap?.auth?.accessToken) return null;
 
-  const record: AuthBackupRecord = {
+  return writeHomeAuthBackup(storageRoot, {
     savedAt: new Date().toISOString(),
     hostname: os.hostname(),
     email: snap.auth.cachedEmail ?? null,
     userId: snap.auth.userId ?? null,
     note: note ?? null,
     auth: snap.auth,
-  };
-
-  const dir = authBackupDir(storageRoot);
-  await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, LAST_FILE), JSON.stringify(record, null, 2), 'utf8');
-  return record;
+  });
 }
 
-/** 读取备份区中的「上次」记录。 */
-export async function loadLastAuthBackup(storageRoot: string): Promise<AuthBackupRecord | null> {
+/** 读取本机账号备份。 */
+export async function loadHomeAuthBackup(storageRoot: string): Promise<AuthBackupRecord | null> {
   try {
-    const raw = await readFile(path.join(authBackupDir(storageRoot), LAST_FILE), 'utf8');
+    const raw = await readFile(homePath(storageRoot), 'utf8');
     const parsed = JSON.parse(raw) as AuthBackupRecord;
     if (!parsed?.auth?.accessToken) return null;
     return parsed;

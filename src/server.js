@@ -63,6 +63,7 @@ import {
   getSwitchReport,
   listAccountSwitchLogs,
   recommendSwitchMember,
+  resolveHomeAccountForHostname,
 } from './account-switch.js';
 import {
   applyPresenceDisplayNames,
@@ -1211,6 +1212,30 @@ const server = http.createServer(async (req, res) => {
         hostname: body?.hostname || null,
         operatorVerified: Boolean(operatorUsername),
         operatorError: operatorUsername ? null : operatorReason,
+      });
+    }
+
+    // 无本地 home 备份时：按成员表首次上报 hostname 找回本机原账号
+    if (method === 'GET' && pathname === '/api/agent/home-account') {
+      assertAccessKey(req);
+      const hostname = String(url.searchParams.get('hostname') || '').trim();
+      if (!hostname) {
+        const err = new Error('缺少 hostname');
+        err.status = 400;
+        throw err;
+      }
+      const home = await resolveHomeAccountForHostname(hostname);
+      if (!home) {
+        return sendJson(res, 200, { ok: true, found: false, hostname });
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        found: true,
+        hostname,
+        memberId: home.memberId,
+        displayName: home.displayName,
+        email: home.email,
+        auth: home.auth,
       });
     }
 

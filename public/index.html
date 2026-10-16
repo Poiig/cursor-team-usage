@@ -77,7 +77,7 @@
               <span class="switch-label">隐私模式</span>
             </label>
             <button type="button" class="btn primary" id="btnSwitchRecommended" title="切换到额度最早到期且仍有额度的账号">推荐切换</button>
-            <button type="button" class="btn" id="btnRestoreLocal" title="从本机备份区恢复切换前的 Cursor 账号">恢复上次账号</button>
+            <button type="button" class="btn" id="btnRestoreLocal" title="恢复首次切换前记下的本机 Cursor 账号">恢复本机账号</button>
             <button type="button" class="btn admin-only hidden" id="btnExport" title="导出账号列表 JSON">导出</button>
             <button type="button" class="btn" id="btnRefreshAll" title="从额度更新时间最早的账号开始逐个刷新">刷新用量</button>
             <button type="button" class="btn primary admin-only hidden" id="btnAdd">+ 添加账号</button>
@@ -261,7 +261,7 @@
             <strong>权限</strong>：普通用户可看全部用量、刷新、一键切换与切换日志；添加 / 删除账号、导出、用户管理、报表图表、上报/登录日志仅管理员。异常账号（同步失败或 Free）不可切换。
           </li>
           <li>
-            <strong>一键切换</strong>：账号卡片点「切换」→ 优先通知本机扩展桥 <code>127.0.0.1:3781</code>（Agent 模式可用）→ Cursor 弹窗确认后<strong>先备份当前本机登录态</strong>，再写入目标账号并重启。可用列表「恢复上次账号」或命令面板「恢复上次账号」从备份区还原。桥不可用时回退 <code>cursor://</code>，或「粘贴切换票据」。
+            <strong>一键切换</strong>：账号卡片点「切换」→ 优先通知本机扩展桥 <code>127.0.0.1:3781</code>（Agent 模式可用）→ Cursor 弹窗确认后，若尚无备份则<strong>记下当前本机账号</strong>，再写入目标账号并重启。可用列表「恢复本机账号」或命令面板「恢复本机账号」还原到这份本机备份（多次切换不会覆盖）。桥不可用时回退 <code>cursor://</code>，或「粘贴切换票据」。
           </li>
           <li>
             <strong>服务配置</strong>：改服务器上的 <code>.env</code>（模板

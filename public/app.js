@@ -1000,7 +1000,7 @@ function onboardingSteps() {
       title: '切换账号与查看帮助',
       text: isAdmin()
         ? '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。管理员还能添加账号、查看报表和管理用户。'
-        : '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。确认后会备份当前登录态、写入目标账号并重启 Cursor。',
+        : '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。首次切换会记下本机账号，之后可「恢复本机账号」。',
       warning: '切换账号前，必须先在 Cursor 打开 IDE 模式以激活插件；否则看板无法通知本机完成切换。',
       note: '以后可在「说明」页面点击「重新打开引导」，随时回看这些步骤。',
     },
@@ -1759,12 +1759,12 @@ async function notifyLocalBridge(ticketId) {
 }
 
 /**
- * 通过本机桥从备份区恢复切换前的 Cursor 账号。
+ * 通过本机桥恢复首次切换前记下的本机 Cursor 账号。
  */
 async function restoreLastLocalAccount() {
   const port = await findLocalBridgePort();
   if (port == null) {
-    toast('未连上本机桥 :3781。请确认已安装 Reporter 扩展（≥0.2.2）并已启动 Cursor，或在命令面板执行「恢复上次账号」。');
+    toast('未连上本机桥 :3781。请确认已安装 Reporter 扩展并已启动 Cursor，或在命令面板执行「恢复本机账号」。');
     return;
   }
   try {
@@ -1773,13 +1773,11 @@ async function restoreLastLocalAccount() {
       signal: AbortSignal.timeout(2000),
     });
     const info = await infoRes.json().catch(() => ({}));
-    if (!info.exists) {
-      toast('备份区没有上次账号。请先通过看板「切换」一次，才会生成备份。');
-      return;
-    }
-    const label = info.email || info.userId || '上次账号';
-    const when = info.savedAt ? formatDateTime(info.savedAt) : '未知时间';
-    if (!confirm(`将从本机备份区恢复「${label}」（备份于 ${when}）并重启 Cursor。\n请在 Cursor 弹窗中确认。继续？`)) {
+    const label = info.email || info.userId || '本机账号';
+    const detail = info.exists
+      ? `备份于 ${info.savedAt ? formatDateTime(info.savedAt) : '未知时间'}`
+      : '本机尚无备份，将按主机名从号池找回首次上报账号';
+    if (!confirm(`将恢复本机账号「${label}」（${detail}）并重启 Cursor。\n请在 Cursor 弹窗中确认。继续？`)) {
       return;
     }
     setBusy(els.btnRestoreLocal, true, '恢复中…');
@@ -1793,7 +1791,7 @@ async function restoreLastLocalAccount() {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `桥返回 ${res.status}`);
     }
-    toast(`已通知本机 Cursor 恢复「${label}」，请在弹窗中确认`);
+    toast(`已通知本机 Cursor 恢复本机账号「${label}」，请在弹窗中确认`);
   } catch (e) {
     toast(e.message || String(e));
   } finally {

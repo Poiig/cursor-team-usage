@@ -518,6 +518,19 @@ test('buildLocalAuthPayload 从 cookie 抽出本机写入字段', async () => {
   assert.equal(auth.userId, 'user_test123');
 });
 
+test('pickHomeMemberByHostname 按首次上报主机名取最早一条', async () => {
+  const { pickHomeMemberByHostname } = await import('../src/account-switch.js');
+  const members = [
+    { id: 'b', hostname: 'PC-A', createdAt: '2026-02-01T00:00:00.000Z' },
+    { id: 'a', hostname: 'PC-A', createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'c', hostname: 'PC-B', createdAt: '2026-01-02T00:00:00.000Z' },
+  ];
+  assert.equal(pickHomeMemberByHostname(members, 'pc-a')?.id, 'a');
+  assert.equal(pickHomeMemberByHostname(members, 'PC-B')?.id, 'c');
+  assert.equal(pickHomeMemberByHostname(members, 'missing'), null);
+  assert.equal(pickHomeMemberByHostname(members, ''), null);
+});
+
 test('用户名与密码校验', async () => {
   const { assertValidUsername, assertValidPassword, toPublicUser } = await import('../src/users.js');
   assert.equal(assertValidUsername('张三'), '张三');

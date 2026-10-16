@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { AuthBackupRecord } from './authBackup';
 import type { LocalSession } from './authReader';
 import type { LocalAuthPayload } from './authWriter';
 
@@ -16,18 +17,30 @@ export type ReporterConfig = {
 
 const EXTENSION_ID = 'poiig.cursor-team-usage-reporter';
 
-/** 个性化安装包随附的使用人绑定；用户 settings 里残留的旧值不能盖过它。 */
-function readPackagedOperator(): { username: string; proof: string } | null {
+/**
+ * 安装包内 build-info 为准：密钥/地址/使用人签名；settings 里旧默认值（如误装未注入包）不能盖过它。
+ */
+function readPackagedBuildInfo(): {
+  apiBaseUrl?: string;
+  accessKey?: string;
+  username?: string;
+  proof?: string;
+} | null {
   const dir = vscode.extensions.getExtension(EXTENSION_ID)?.extensionPath;
   if (!dir) return null;
   try {
     const j = JSON.parse(readFileSync(path.join(dir, 'build-info.json'), 'utf8')) as {
+      apiBaseUrl?: string;
+      accessKey?: string;
       operatorUsername?: string;
       operatorProof?: string;
     };
-    const username = String(j.operatorUsername || '').trim();
-    const proof = String(j.operatorProof || '').trim();
-    return username && proof ? { username, proof } : null;
+    return {
+      apiBaseUrl: String(j.apiBaseUrl || '').trim() || undefined,
+      accessKey: String(j.accessKey || '').trim() || undefined,
+      username: String(j.operatorUsername || '').trim() || undefined,
+      proof: String(j.operatorProof || '').trim() || undefined,
+    };
   } catch {
     return null;
   }
@@ -35,10 +48,13 @@ function readPackagedOperator(): { username: string; proof: string } | null {
 
 export function readReporterConfig(): ReporterConfig {
   const cfg = vscode.workspace.getConfiguration('cursorTeamUsage');
-  const packaged = readPackagedOperator();
+  const packaged = readPackagedBuildInfo();
   return {
-    apiBaseUrl: String(cfg.get('apiBaseUrl') || 'http://127.0.0.1:3780').replace(/\/+$/, ''),
-    accessKey: String(cfg.get('accessKey') || '').trim(),
+    apiBaseUrl: (
+      packaged?.apiBaseUrl ||
+      String(cfg.get('apiBaseUrl') || 'http://127.0.0.1:3780')
+    ).replace(/\/+$/, ''),
+    accessKey: packaged?.accessKey || String(cfg.get('accessKey') || '').trim(),
     operatorUsername: packaged?.username || String(cfg.get('operatorUsername') || '').trim(),
     operatorProof: packaged?.proof || String(cfg.get('operatorProof') || '').trim(),
     displayName: String(cfg.get('displayName') || '').trim(),
@@ -88,6 +104,40 @@ export async function sendHeartbeat(config: ReporterConfig): Promise<void> {
 
 /** 安装包里的使用人签名不被看板认可，只能重新从看板安装。 */
 export class OperatorProofError extends Error {}
+
+/**
+ * 无本地 home 时：向看板按本机 hostname 查成员表首次上报账号，落成备份记录。
+ */
+export async function fetchHomeAccountFromBoard(
+  config: ReporterConfig,
+): Promise<AuthBackupRecord | null> {
+  if (!config.apiBaseUrl || !config.accessKey) return null;
+  const hostname = os.hostname();
+  const url = `${config.apiBaseUrl}/api/agent/home-account?hostname=${encodeURIComponent(hostname)}`;
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(15_000),
+    headers: { 'X-Access-Key': config.accessKey },
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error || `查询本机账号失败 HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as {
+    found?: boolean;
+    email?: string | null;
+    displayName?: string | null;
+    auth?: LocalAuthPayload;
+  };
+  if (!data.found || !data.auth?.accessToken) return null;
+  return {
+    savedAt: new Date().toISOString(),
+    hostname,
+    email: data.email || data.auth.cachedEmail || null,
+    userId: data.auth.userId || null,
+    note: `看板号池（首次上报主机 ${hostname}）`,
+    auth: data.auth,
+  };
+}
 
 /**
  * 调用看板 /api/agent/report，Header 带 Access Key。

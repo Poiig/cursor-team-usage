@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import type { Server } from 'node:http';
 import {
-  backupCurrentLocalAuth,
-  loadLastAuthBackup,
+  ensureHomeAuthBackup,
+  loadHomeAuthBackup,
   summarizeBackup,
+  writeHomeAuthBackup,
+  type AuthBackupRecord,
 } from './authBackup';
 import { resolveLocalCursorSession } from './authReader';
 import { scheduleCursorRestart, writeLocalCursorAuth } from './authWriter';
@@ -18,6 +20,7 @@ import {
 import { readLocalBridgePort, startLocalBridge } from './localBridge';
 import {
   claimSwitchTicket,
+  fetchHomeAccountFromBoard,
   OperatorProofError,
   readReporterConfig,
   reportSession,
@@ -131,7 +134,7 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     const label = claimed.displayName || claimed.auth.cachedEmail || claimed.memberId;
     updateStatus(`等待确认切换到 ${label}…`);
     const confirm = await confirmNonModal(
-      `Cursor Team Usage：即将切换到「${label}」并重启 Cursor。切换前会备份当前登录态，可用「恢复上次账号」还原；未保存的编辑请先保存。`,
+      `Cursor Team Usage：即将切换到「${label}」并重启 Cursor。首次切换会记下当前本机账号，之后可用「恢复本机账号」还原；未保存的编辑请先保存。`,
       '继续切换',
     );
     if (confirm !== '继续切换') {
@@ -145,13 +148,13 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
       return;
     }
 
-    // 先备份当前本机账号，再写入目标；无当前登录态时跳过备份
-    const backup = await backupCurrentLocalAuth(
-      storageRoot(context),
-      `切换前备份 → ${label}`,
+    // 无本地备份时先按 hostname 查号池原注册账号，再退回抓当前登录态
+    const home = await resolveOrCaptureHomeAccount(
+      context,
+      `本机账号（首次切换 → ${label}）`,
     );
-    if (backup) {
-      updateStatus(`已备份 ${backup.email || backup.userId || '当前账号'}，正在写入…`);
+    if (home) {
+      updateStatus(`本机账号 ${home.email || home.userId || '已备份'}，正在写入…`);
     }
 
     await writeLocalCursorAuth(claimed.auth);
@@ -162,7 +165,7 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     ]);
     updateStatus(`已写入 ${label}，正在重启 Cursor…`);
     void vscode.window.showInformationMessage(
-      `Cursor Team Usage：已切换到 ${label}${backup ? '（当前账号已备份）' : ''}，即将重启 Cursor`,
+      `Cursor Team Usage：已切换到 ${label}${home ? '（本机账号已保留）' : ''}，即将重启 Cursor`,
     );
     await scheduleCursorRestart();
   } catch (e) {
@@ -182,42 +185,66 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
 }
 
 /**
- * 从备份区恢复「上次」本机账号：先备份当前，再写回 last.json，然后重启。
+ * 本地无 home 时向看板按 hostname 找回号池原账号并落盘。
  */
-async function handleRestoreLastAccount(context: vscode.ExtensionContext) {
+async function resolveOrCaptureHomeAccount(
+  context: vscode.ExtensionContext,
+  note?: string | null,
+): Promise<AuthBackupRecord | null> {
+  const existing = await loadHomeAuthBackup(storageRoot(context));
+  if (existing) return existing;
+  let boardHome: AuthBackupRecord | null = null;
+  try {
+    boardHome = await fetchHomeAccountFromBoard(readReporterConfig());
+  } catch (e) {
+    console.warn('[ctu] home-account from board:', e);
+  }
+  return ensureHomeAuthBackup(storageRoot(context), note, boardHome);
+}
+
+/**
+ * 写回本机账号；无本地备份时先按号池 hostname 找回。
+ */
+async function handleRestoreHomeAccount(context: vscode.ExtensionContext) {
   if (switching) {
     void vscode.window.showWarningMessage('Cursor Team Usage：已有切换正在进行');
     return;
   }
-  const last = await loadLastAuthBackup(storageRoot(context));
-  if (!last) {
+  let home = await loadHomeAuthBackup(storageRoot(context));
+  if (!home) {
+    try {
+      const fromBoard = await fetchHomeAccountFromBoard(readReporterConfig());
+      if (fromBoard) home = await writeHomeAuthBackup(storageRoot(context), fromBoard);
+    } catch (e) {
+      console.warn('[ctu] home-account from board:', e);
+    }
+  }
+  if (!home) {
     void vscode.window.showWarningMessage(
-      'Cursor Team Usage：备份区没有上次账号。请先通过看板「切换」一次，才会生成备份。',
+      'Cursor Team Usage：找不到本机账号。请确认号池里有本机首次上报的账号，或先在原账号下切换一次以生成备份。',
     );
     return;
   }
 
   switching = true;
   try {
-    const label = last.email || last.userId || '上次账号';
-    const when = last.savedAt
-      ? new Date(last.savedAt).toLocaleString('zh-CN')
+    const label = home.email || home.userId || '本机账号';
+    const when = home.savedAt
+      ? new Date(home.savedAt).toLocaleString('zh-CN')
       : '未知时间';
     const confirm = await confirmNonModal(
-      `Cursor Team Usage：即将从备份区恢复「${label}」（备份于 ${when}）并重启 Cursor。恢复前会先备份当前本机登录态。`,
-      '恢复上次账号',
+      `Cursor Team Usage：即将恢复本机账号「${label}」（备份于 ${when}）并重启 Cursor。`,
+      '恢复本机账号',
     );
-    if (confirm !== '恢复上次账号') {
+    if (confirm !== '恢复本机账号') {
       updateStatus(confirm === 'timeout' ? '恢复确认超时，已取消' : '已取消恢复');
       return;
     }
 
-    // 恢复前备份当前，便于再次「恢复」回到此刻
-    await backupCurrentLocalAuth(storageRoot(context), `恢复前备份 ← ${label}`);
-    await writeLocalCursorAuth(last.auth);
-    updateStatus(`已恢复 ${label}，正在重启 Cursor…`);
+    await writeLocalCursorAuth(home.auth);
+    updateStatus(`已恢复本机账号 ${label}，正在重启 Cursor…`);
     void vscode.window.showInformationMessage(
-      `Cursor Team Usage：已恢复 ${label}，即将重启 Cursor`,
+      `Cursor Team Usage：已恢复本机账号 ${label}，即将重启 Cursor`,
     );
     await scheduleCursorRestart();
   } catch (e) {
@@ -272,10 +299,10 @@ async function setupLocalBridge(context: vscode.ExtensionContext) {
       port,
       boardOrigin,
       (ticketId) => handleAccountSwitch(context, ticketId),
-      () => handleRestoreLastAccount(context),
+      () => handleRestoreHomeAccount(context),
       async () => {
-        const last = await loadLastAuthBackup(storageRoot(context));
-        return summarizeBackup(last);
+        const home = await loadHomeAuthBackup(storageRoot(context));
+        return summarizeBackup(home);
       },
       async () => {
         // 仅从已配置看板拉包，不能让网页指定任意 VSIX 来源。
@@ -349,7 +376,7 @@ export function activate(context: vscode.ExtensionContext) {
       await handleAccountSwitch(context, ticketId.trim());
     }),
     vscode.commands.registerCommand('cursorTeamUsage.restoreLastAccount', () =>
-      handleRestoreLastAccount(context),
+      handleRestoreHomeAccount(context),
     ),
     vscode.commands.registerCommand('cursorTeamUsage.checkUpdate', async () => {
       try {
