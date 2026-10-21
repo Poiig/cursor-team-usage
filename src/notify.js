@@ -3,6 +3,7 @@
  * 配置 NOTIFY_CHANNEL + NOTIFY_BOT_ID；定时推送临期且额度充足、可切换的账号。
  */
 
+import { computeUsagePace } from '../public/shared.js';
 import { enrichMembersWithPresence } from './account-presence.js';
 import { switchBlockReason, usageTotalPercentOf } from './account-switch.js';
 import { getNotifyConfig } from './config.js';
@@ -11,7 +12,7 @@ import { writeAppLog } from './app-log.js';
 
 /** 与看板「临期」筛选一致：重置日剩余天数 ≤ 此值。 */
 export const EXPIRING_WITHIN_DAYS = 10;
-/** 已用额度低于此比例视为「额度充足」（与卡片 warn 线对齐）。 */
+/** 没有账单窗口、算不出节奏时的兜底：已用超过此比例不算充足。 */
 export const SUFFICIENT_USED_MAX = 80;
 
 const WECOM_WEBHOOK_BASE = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send';
@@ -61,14 +62,21 @@ export function resolveWecomWebhookUrl(botId) {
 }
 
 /**
- * 临期 + 可切换 + 额度充足。
+ * 临期 + 可切换 + 看板「充足」。
+ * 按工作日节奏判断，不用固定已用 80%：临期号常常已用过八成，但剩余额度仍撑得到重置日。
  * @param {any} member
  * @param {number} [nowMs]
  */
 export function isExpiringSwitchableMember(member, nowMs = Date.now()) {
   if (!member || switchBlockReason(member)) return false;
   const used = usageTotalPercentOf(member);
-  if (used == null || used > SUFFICIENT_USED_MAX) return false;
+  if (used == null || used >= 100) return false;
+  const pace = computeUsagePace(member, nowMs);
+  if (pace) {
+    if (pace.status !== 'ok') return false;
+  } else if (used > SUFFICIENT_USED_MAX) {
+    return false;
+  }
   const days = daysUntilReset(member.lastSnapshot?.window?.resetIso, nowMs);
   return days != null && days <= EXPIRING_WITHIN_DAYS;
 }
@@ -120,6 +128,7 @@ export function buildExpiringNotifyText(input) {
   }
   lines.push('');
   lines.push(panelUrl ? `看板：${panelUrl}` : '看板：未配置 PUBLIC_BASE_URL');
+  lines.push('切换后按需使用额度和模型。');
   return { text: lines.join('\n'), count: candidates.length, members: candidates };
 }
 

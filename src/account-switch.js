@@ -182,12 +182,30 @@ export function usageTotalPercentOf(member) {
 }
 
 /**
- * 切换前的统一可用性检查。额度已用完、尚无额度数据或同步异常都不能切换。
+ * Free 没有可切换的套餐额度。已用 0% 会被误当成「剩余 100%」。
+ * @param {any} member
+ */
+export function isFreePlanMember(member) {
+  const plan = String(
+    member?.planName ||
+      member?.membershipType ||
+      member?.lastSnapshot?.plan?.planName ||
+      member?.lastSnapshot?.plan?.membershipType ||
+      '',
+  )
+    .trim()
+    .toLowerCase();
+  return plan === 'free' || /\bfree\b/.test(plan);
+}
+
+/**
+ * 切换前的统一可用性检查。额度已用完、尚无额度数据、同步异常或 Free 都不能切换。
  * @param {any} member
  * @returns {string | null}
  */
 export function switchBlockReason(member) {
   if (!member) return '成员不存在';
+  if (isFreePlanMember(member)) return 'Free 套餐不可用，请换号';
   if (member.lastError) return '该账号同步异常，请先更新 Token 后再切换';
   const used = usageTotalPercentOf(member);
   if (used == null) return '该账号尚无额度数据，请先刷新后再切换';

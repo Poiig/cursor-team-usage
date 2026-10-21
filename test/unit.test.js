@@ -677,6 +677,13 @@ test('切换报表汇总与 Total usage 快照', async () => {
     switchBlockReason({ lastSnapshot: { meters: { totalPercentUsed: 100 } } }),
     /额度已用完/,
   );
+  assert.match(
+    switchBlockReason({
+      planName: 'Free',
+      lastSnapshot: { plan: { membershipType: 'free' }, meters: { totalPercentUsed: 0 } },
+    }),
+    /Free/,
+  );
   const recommended = recommendSwitchMember([
     {
       id: 'empty',
@@ -1368,16 +1375,47 @@ test('wecom expiring notify: filter and body', async () => {
   assert.equal(isExpiringSwitchableMember(full, now), false);
   assert.equal(isExpiringSwitchableMember(far, now), false);
 
+  const free = {
+    id: 'free',
+    planName: 'Free',
+    membershipType: 'free',
+    totalPercentUsed: 0,
+    lastSnapshot: {
+      plan: { planName: 'Free', membershipType: 'free' },
+      window: { resetIso: new Date(now + 10 * 86400000).toISOString() },
+      meters: { totalPercentUsed: 0 },
+    },
+  };
+  assert.equal(isExpiringSwitchableMember(free, now), false);
+
+  // 已用 82% 但周期只剩两天，按工作日节奏仍是「充足」，应进入推荐
+  const heavyOkNow = Date.parse('2026-10-21T09:30:00+08:00');
+  const heavyOk = {
+    id: 'heavy-ok',
+    planName: 'Pro',
+    lastSnapshot: {
+      meters: { totalPercentUsed: 82.3 },
+      window: {
+        startIso: '2026-09-23T07:33:16.000Z',
+        endIso: '2026-10-23T07:33:16.000Z',
+        resetIso: '2026-10-23T07:33:16.000Z',
+      },
+    },
+  };
+  assert.equal(isExpiringSwitchableMember(heavyOk, heavyOkNow), true);
+
   const built = buildExpiringNotifyText({
-    members: [ok, full, far],
+    members: [ok, full, far, free],
     panelUrl: 'http://192.168.1.1:3780/',
     nowMs: now,
   });
   assert.equal(built.count, 1);
   assert.doesNotMatch(built.text, /expiring-ok/);
+  assert.doesNotMatch(built.text, /剩余 100%/);
   assert.match(built.text, /剩余 60%/);
   assert.match(built.text, /http:\/\/192\.168\.1\.1:3780/);
   assert.match(built.text, /Cursor Team Usage/);
+  assert.match(built.text, /切换后按需使用额度和模型。/);
 
   const delay = msUntilNextLocalTime(9, 30, Date.parse('2026-10-14T08:00:00'));
   assert.ok(delay > 0 && delay < 2 * 3600 * 1000);
