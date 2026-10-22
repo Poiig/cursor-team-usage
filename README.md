@@ -131,13 +131,13 @@ cd D:\AppData\wslc\cursor-team-usage
 
 ### Reporter 扩展
 
-插件在 **Docker 镜像构建时**打进 `assets/reporter-base.vsix`（`BUILD_NUMBER`=git sha），运行时按当前 `ACCESS_KEY` 与看板地址注入后再分发。
+插件在 **Docker 镜像构建时**打进 `assets/reporter-base.vsix`（版本号即 `extension/package.json` 的 `version`，不用 git sha），运行时按当前 `ACCESS_KEY` 与看板地址注入后再分发。
 
 1. 服务端 `.env` 设好 `ACCESS_KEY`；局域网访问时建议设 `PUBLIC_BASE_URL`（如 `http://192.168.1.10:3780`）。
 2. **管理员**登录看板 →「用户」→「一键安装插件」：
    - 若本机 Cursor 已开且桥 `:3781` 可用：直接下载并安装，提示重载窗口；
    - 否则按系统复制 PowerShell 或 macOS 终端命令，下载 VSIX、`cursor --install-extension` 并启动 Cursor。
-3. 已安装扩展会在启动时对照 `/api/extension/meta` 的构建号提示更新；也可命令面板「从看板安装/更新插件」。
+3. 已安装扩展会在启动时对照 `/api/extension/meta` 的版本号提示更新；也可命令面板「从看板安装/更新插件」。
 
 | 键 | 说明 |
 | --- | --- |

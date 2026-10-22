@@ -383,15 +383,15 @@ export function activate(context: vscode.ExtensionContext) {
         const config = readReporterConfig();
         const local = await readLocalBuildInfo(context.extensionPath);
         const remote = await fetchRemoteBuildMeta(config.apiBaseUrl);
-        if (!remote.build || remote.available === false) {
+        if (!remote.version || remote.available === false) {
           void vscode.window.showWarningMessage('看板未附带可安装的插件资产');
           return;
         }
-        const same = remote.version === local.version && remote.build === local.build;
+        const same = remote.version === local.version;
         const choice = await vscode.window.showInformationMessage(
           same
-            ? `已是最新构建 ${local.build}。仍要重装以刷新密钥/地址？`
-            : `发现新构建 ${remote.version} (${remote.build})，当前 ${local.build}`,
+            ? `已是最新版本 ${local.version}。仍要重装以刷新密钥/地址？`
+            : `发现新版本 ${remote.version}，当前 ${local.version}`,
           same ? '重装' : '立即更新',
           '取消',
         );

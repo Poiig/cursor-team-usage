@@ -16,11 +16,11 @@
 - 本机 Cursor 已开且本地桥 `:3781` 可用时，直接安装注入密钥后的 VSIX；
 - 否则按系统提示在 PowerShell 或 macOS 终端执行一行命令（下载 → `cursor --install-extension` → 启动 Cursor）。
 
-安装后执行 **Developer: Reload Window**。扩展启动会对照看板构建号提示更新；也可命令面板「从看板安装/更新插件」。
+安装后执行 **Developer: Reload Window**。扩展启动会对照看板版本号提示更新；也可命令面板「从看板安装/更新插件」。
 
 ## 开发者打包
 
-镜像构建会执行 `npm run ext:asset`（仓库根），产出 `assets/reporter-base.vsix` + 构建号；运行时再注入 secret。本地：
+镜像构建会执行 `npm run ext:asset`（仓库根），产出 `assets/reporter-base.vsix`（版本号来自 `package.json`）；运行时再注入 secret。本地：
 
 ```bash
 npm run ext:install

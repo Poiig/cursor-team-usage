@@ -1,11 +1,8 @@
 # 名册与密钥走 volume，不进镜像层。
-# 构建阶段打好 Reporter 基座 VSIX（含构建号）；运行时再按 ACCESS_KEY 注入。
+# 插件按 extension/package.json 的版本号打包，不注入 git sha。
 FROM node:20-alpine AS extension-build
 
 WORKDIR /app
-
-ARG BUILD_NUMBER=local
-ENV BUILD_NUMBER=$BUILD_NUMBER
 
 COPY scripts ./scripts
 COPY extension ./extension

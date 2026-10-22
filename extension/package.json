@@ -2,7 +2,7 @@
   "name": "cursor-team-usage-reporter",
   "displayName": "Cursor Team Usage Reporter",
   "description": "上报本机 Cursor 会话到看板，并支持从看板一键切换本机登录账号",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "publisher": "poiig",
   "license": "MIT",
   "icon": "media/icon.png",

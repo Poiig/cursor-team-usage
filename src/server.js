@@ -754,7 +754,7 @@ const server = http.createServer(async (req, res) => {
       await writeAppLog('签发插件安装链', {
         操作者: req.consoleUser,
         看板地址: apiBaseUrl,
-        构建号: meta.build,
+        版本: meta.version,
       });
       return sendJson(res, 200, {
         ok: true,

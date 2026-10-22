@@ -19,7 +19,7 @@ export type ExtensionBuildMeta = {
 };
 
 /**
- * 读扩展包内 build-info（部署构建号）；缺省则回退 package.json。
+ * 读扩展包内版本。更新判断只用 version，build 只是同号副本，避免每次构建都被当成新版本。
  */
 export async function readLocalBuildInfo(
   extensionPath: string,
@@ -136,7 +136,7 @@ export async function installFromBoardWithAccessKey(): Promise<ExtensionBuildMet
 }
 
 /**
- * 启动时比对构建号；有更新则提示一键安装。
+ * 启动时比对版本号；有更新则提示一键安装。
  */
 export async function maybePromptUpdate(extensionPath: string): Promise<void> {
   const config = readReporterConfig();
@@ -144,10 +144,10 @@ export async function maybePromptUpdate(extensionPath: string): Promise<void> {
   try {
     const local = await readLocalBuildInfo(extensionPath);
     const remote = await fetchRemoteBuildMeta(config.apiBaseUrl);
-    if (!remote.build || !remote.available) return;
-    if (remote.version === local.version && remote.build === local.build) return;
+    if (!remote.version || remote.available === false) return;
+    if (remote.version === local.version) return;
     const choice = await vscode.window.showInformationMessage(
-      `Cursor Team Usage 插件有更新：${remote.version} (${remote.build})，当前 ${local.build}`,
+      `Cursor Team Usage 插件有更新：${remote.version}，当前 ${local.version}`,
       '立即更新',
       '稍后',
     );
@@ -165,7 +165,7 @@ export async function installAndOfferReload(): Promise<void> {
   try {
     const meta = await installFromBoardWithAccessKey();
     const reload = await vscode.window.showInformationMessage(
-      `已安装 ${meta.version} (${meta.build})，需重载窗口后生效`,
+      `已安装 ${meta.version}，需重载窗口后生效`,
       '重载窗口',
     );
     if (reload === '重载窗口') {

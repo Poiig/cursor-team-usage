@@ -1,6 +1,8 @@
 /**
- * 构建随容器发布的 Reporter 基座 VSIX + build 元数据（不含 ACCESS_KEY，运行时再注入）。
- * 用法：BUILD_NUMBER=xxx node scripts/build-extension-asset.mjs
+ * 构建随容器发布的 Reporter 基座 VSIX + 元数据（不含 ACCESS_KEY，运行时再注入）。
+ * 版本只取 extension/package.json。每次镜像构建都可以重打，但不能另造构建号，
+ * 否则已安装端会把同版本当成新版本。
+ * 用法：node scripts/build-extension-asset.mjs
  */
 
 import { spawn } from 'node:child_process';
@@ -12,11 +14,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXT = path.join(ROOT, 'extension');
 const ASSET = path.join(ROOT, 'assets');
 
-const build =
-  String(process.env.BUILD_NUMBER || process.env.GITHUB_SHA || '')
-    .trim()
-    .slice(0, 12) || `local-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`;
-
+/** 把 npm / vsce 的失败直接变成构建失败，避免打出半成品 VSIX。 */
 function run(cmd, args, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' });
@@ -30,6 +28,7 @@ function run(cmd, args, cwd) {
 
 const pkg = JSON.parse(readFileSync(path.join(EXT, 'package.json'), 'utf8'));
 const version = String(pkg.version || '0.0.0');
+const build = version;
 
 mkdirSync(ASSET, { recursive: true });
 
@@ -41,7 +40,7 @@ if (!existsSync(path.join(EXT, 'node_modules'))) {
 console.log('extension: compile…');
 await run('npm', ['run', 'compile'], EXT);
 
-// 写入 build-info，打进 VSIX（勿被 vscodeignore）
+// 写入 build-info，打进 VSIX（勿被 vscodeignore）。build 与版本号相同，检测不看提交哈希。
 writeFileSync(
   path.join(EXT, 'build-info.json'),
   JSON.stringify({ version, build, builtAt: new Date().toISOString() }, null, 2) + '\n',
@@ -72,4 +71,4 @@ writeFileSync(
 );
 
 console.log(`asset ready: ${dest}`);
-console.log(`build: ${build} version: ${version}`);
+console.log(`version: ${version}`);

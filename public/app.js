@@ -1667,7 +1667,6 @@ async function loadExtensionInstallState() {
       extensionInstallMode = 'install';
     } else if (
       localExtensionInfo.version !== extensionMeta.version ||
-      localExtensionInfo.build !== extensionMeta.build ||
       localExtensionInfo.operatorUsername !== currentUser?.username
     ) {
       extensionInstallMode = 'update';
