@@ -1001,7 +1001,7 @@ function onboardingSteps() {
       text: isAdmin()
         ? '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。管理员还能添加账号、查看报表和管理用户。'
         : '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。首次切换会记下本机账号，之后可「恢复本机账号」。',
-      warning: '切换账号前，必须先在 Cursor 打开 IDE 模式以激活插件；否则看板无法通知本机完成切换。',
+      warning: 'IDE 未打开时，切换和恢复会用 cursor:// 拉起 IDE，请在 Cursor 弹窗里确认。需先装好 Reporter 插件。',
       note: '以后可在「说明」页面点击「重新打开引导」，随时回看这些步骤。',
     },
   ];
@@ -1758,12 +1758,34 @@ async function notifyLocalBridge(ticketId) {
 }
 
 /**
+ * 用用户点击打开 cursor://。页面不能直接起进程，交给系统协议才能拉起 IDE。
+ * @param {string} uri
+ */
+function openCursorProtocol(uri) {
+  const a = document.createElement('a');
+  a.href = uri;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/**
  * 通过本机桥恢复首次切换前记下的本机 Cursor 账号。
+ * 桥不在（IDE 没开）时改走 cursor://，由系统拉起 IDE 再恢复。
  */
 async function restoreLastLocalAccount() {
   const port = await findLocalBridgePort();
   if (port == null) {
-    toast('未连上本机桥 :3781。请确认已安装 Reporter 扩展并已启动 Cursor，或在命令面板执行「恢复本机账号」。');
+    if (
+      !confirm(
+        '本机 Cursor 未在运行。将拉起 Cursor IDE 并恢复本机账号。\n请在弹出的 Cursor 窗口中确认。继续？',
+      )
+    ) {
+      return;
+    }
+    openCursorProtocol('cursor://poiig.cursor-team-usage-reporter/restore');
+    toast('已尝试拉起 Cursor IDE。请在弹窗中确认恢复。若提示缺少 ticket，请先把 Reporter 更新到 0.2.22', 8000);
     return;
   }
   try {
@@ -1836,14 +1858,7 @@ async function switchMember(id, btn) {
     }
 
     // 回退：cursor:// UriHandler（经典 IDE 窗口通常可用；Agent/Glass 往往无效）
-    if (data.uri) {
-      const a = document.createElement('a');
-      a.href = data.uri;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }
+    if (data.uri) openCursorProtocol(data.uri);
     toast(
       `未连上本机桥 :3781。已尝试 cursor://。可在 Cursor 命令面板执行「粘贴切换票据」并粘贴：${ticketId}`,
       8000,

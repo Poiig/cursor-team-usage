@@ -404,7 +404,12 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.window.registerUriHandler({
       handleUri(uri: vscode.Uri) {
-        // cursor://poiig.cursor-team-usage-reporter/switch?ticket=...（IDE 模式）
+        // 浏览器打不开本机桥时，用 cursor:// 拉起 IDE。path 区分切换和恢复，恢复不需要票据。
+        const route = uri.path.replace(/^\/+|\/+$/g, '');
+        if (route === 'restore') {
+          void handleRestoreHomeAccount(context);
+          return;
+        }
         const ticket = new URLSearchParams(uri.query).get('ticket') || '';
         if (!ticket) {
           void vscode.window.showErrorMessage('Cursor Team Usage：切换链接缺少 ticket');
