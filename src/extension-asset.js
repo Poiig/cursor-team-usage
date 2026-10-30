@@ -22,6 +22,29 @@ const PATCH_PY = path.join(ROOT, 'scripts', 'patch_vsix.py');
 const installTokens = new Map();
 
 /**
+ * 远程版本是否比本机新。只比数字段，避免把构建号当成版本。
+ * @param {unknown} remote
+ * @param {unknown} local
+ */
+export function isNewerVersion(remote, local) {
+  const parse = (v) =>
+    String(v || '')
+      .split('.')
+      .map((n) => {
+        const x = parseInt(n, 10);
+        return Number.isFinite(x) ? x : 0;
+      });
+  const a = parse(remote);
+  const b = parse(local);
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
+/**
  * 读取镜像构建时写入的扩展元数据。
  * @returns {Promise<{ version: string, build: string, builtAt: string | null, available: boolean }>}
  */

@@ -135,29 +135,52 @@ export async function installFromBoardWithAccessKey(): Promise<ExtensionBuildMet
   return meta;
 }
 
+/** 只比数字段，与服务端 isNewerVersion 同一规则。 */
+export function isNewerVersion(remote: string, local: string): boolean {
+  const parse = (v: string) =>
+    String(v || '')
+      .split('.')
+      .map((n) => {
+        const x = parseInt(n, 10);
+        return Number.isFinite(x) ? x : 0;
+      });
+  const a = parse(remote);
+  const b = parse(local);
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
+let updateBusy = false;
+
 /**
- * 启动时比对版本号；有更新则提示一键安装。
+ * 看板版本更高时静默安装并重载窗口。心跳下发与启动检查共用，避免两路同时装。
  */
-export async function maybePromptUpdate(extensionPath: string): Promise<void> {
+export async function autoUpdateAndReload(extensionPath: string): Promise<void> {
+  if (updateBusy) return;
   const config = readReporterConfig();
-  if (!config.apiBaseUrl) return;
+  if (!config.apiBaseUrl || !config.accessKey) return;
+  updateBusy = true;
   try {
     const local = await readLocalBuildInfo(extensionPath);
     const remote = await fetchRemoteBuildMeta(config.apiBaseUrl);
-    if (!remote.version || remote.available === false) return;
-    if (remote.version === local.version) return;
-    const choice = await vscode.window.showInformationMessage(
-      `Cursor Team Usage 插件有更新：${remote.version}，当前 ${local.version}`,
-      '立即更新',
-      '稍后',
-    );
-    if (choice !== '立即更新') return;
+    if (!remote.version || remote.available === false || !isNewerVersion(remote.version, local.version)) {
+      updateBusy = false;
+      return;
+    }
+    await installFromBoardWithAccessKey();
+    await vscode.commands.executeCommand('workbench.action.reloadWindow');
   } catch (e) {
-    // 离线/看板不可达时静默，下次启动再查
-    console.warn('[ctu] update check skipped:', e);
-    return;
+    updateBusy = false;
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn('[ctu] auto update:', msg);
+    if (e instanceof OperatorProofError) {
+      await promptReinstallFromBoard(msg);
+    }
   }
-  await installAndOfferReload();
 }
 
 /** 用户已确认更新：失败要让人看见，签名失效时引导去看板重装。 */

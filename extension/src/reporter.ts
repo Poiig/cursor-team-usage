@@ -74,7 +74,9 @@ function assertReporterConfig(config: ReporterConfig) {
 /**
  * IDE 存活心跳：只证明插件进程在跑，不上传会话。
  */
-export async function sendHeartbeat(config: ReporterConfig): Promise<void> {
+export async function sendHeartbeat(
+  config: ReporterConfig,
+): Promise<{ update: boolean; version: string }> {
   assertReporterConfig(config);
   if (!config.operatorUsername || !config.operatorProof) {
     throw new Error('未绑定看板用户（请用个性化安装包重装）');
@@ -95,11 +97,17 @@ export async function sendHeartbeat(config: ReporterConfig): Promise<void> {
       pluginBuild: String(own?.packageJSON?.ctuBuild || ''),
     }),
   });
+  const data = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    code?: string;
+    update?: boolean;
+    version?: string;
+  };
   if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
     const msg = data.error || `心跳失败 HTTP ${res.status}`;
     throw data.code === 'OPERATOR_PROOF' ? new OperatorProofError(msg) : new Error(msg);
   }
+  return { update: Boolean(data.update), version: String(data.version || '') };
 }
 
 /** 安装包里的使用人签名不被看板认可，只能重新从看板安装。 */

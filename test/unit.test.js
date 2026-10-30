@@ -379,6 +379,77 @@ test('isTransientCursorError 识别连接超时，排除会话失效', () => {
   );
 });
 
+test('uselessReportReason 丢掉失效会话，网络未知放行', async () => {
+  const { uselessReportReason } = await import('../src/cursor-api.js');
+  assert.equal(
+    uselessReportReason({ hasExisting: true, sameCookie: true, knownDead: true, probe: null }),
+    'same-dead',
+  );
+  assert.equal(
+    uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: false }),
+    'unauth',
+  );
+  assert.equal(
+    uselessReportReason({ hasExisting: false, sameCookie: false, knownDead: false, probe: false }),
+    'unauth',
+  );
+  assert.equal(
+    uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: null }),
+    null,
+  );
+  assert.equal(
+    uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: true }),
+    null,
+  );
+});
+
+test('caughtHttpStatus 不把 Cursor 401 当成看板未登录', async () => {
+  const { caughtHttpStatus } = await import('../src/cursor-api.js');
+  const { isNewerVersion } = await import('../src/extension-asset.js');
+  assert.equal(
+    caughtHttpStatus({
+      status: 401,
+      message: 'not_authenticated (HTTP 401): https://cursor.com/api/dashboard/get-filtered-usage-events',
+    }),
+    400,
+  );
+  assert.equal(caughtHttpStatus({ status: 401, code: 'UNAUTHORIZED', message: '未登录' }), 401);
+  assert.equal(caughtHttpStatus({ status: 401, message: '用户名或密码错误' }), 401);
+  assert.equal(caughtHttpStatus({ message: '成员不存在' }), 404);
+  assert.equal(isNewerVersion('0.2.24', '0.2.22'), true);
+  assert.equal(isNewerVersion('0.2.22', '0.2.24'), false);
+  assert.equal(isNewerVersion('0.2.24', '0.2.24'), false);
+});
+
+test('isCursorAuthFailure / probeCursorSessionAuth 区分吊销与网络抖动', async () => {
+  const { isCursorAuthFailure, probeCursorSessionAuth } = await import('../src/cursor-api.js');
+  assert.equal(isCursorAuthFailure({ status: 401, message: 'x' }), true);
+  assert.equal(isCursorAuthFailure({ message: '会话鉴权失效：用量摘要返回未认证' }), true);
+  assert.equal(isCursorAuthFailure({ status: 500, message: 'boom' }), false);
+
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => {
+      const err = new Error('not_authenticated (HTTP 401): https://cursor.com/api/auth/me');
+      err.status = 401;
+      throw err;
+    };
+    assert.equal(
+      await probeCursorSessionAuth(buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s')),
+      false,
+    );
+    globalThis.fetch = async () => {
+      throw new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } });
+    };
+    assert.equal(
+      await probeCursorSessionAuth(buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s')),
+      null,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test('短暂同步失败有旧快照时不写 lastError，会话错误仍落红条', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

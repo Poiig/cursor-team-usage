@@ -33,12 +33,13 @@ export async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   });
-  if (res.status === 401 && !path.startsWith('/api/auth/login')) {
+  const data = await res.json().catch(() => ({}));
+  // 只认看板自己的未登录。Cursor 上游 401 没有这个 code，不能把人踢出详情页。
+  if (res.status === 401 && data.code === 'UNAUTHORIZED' && !path.startsWith('/api/auth/login')) {
     const next = `${location.pathname}${location.search}`;
     location.href = `/login.html${next === '/' ? '' : `?next=${encodeURIComponent(next)}`}${location.hash}`;
     throw new Error('未登录');
   }
-  const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
   return data;
 }

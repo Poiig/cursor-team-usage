@@ -834,6 +834,14 @@ export async function getMemberInternal(id) {
   return rows[0] ? rowToMember(rows[0]) : null;
 }
 
+/** @param {string} userId */
+export async function findMemberByUserId(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return null;
+  const { rows } = await db().query('SELECT * FROM members WHERE user_id = $1', [uid]);
+  return rows[0] ? rowToMember(rows[0]) : null;
+}
+
 export async function getAllMembersInternal() {
   const { rows } = await db().query('SELECT * FROM members ORDER BY created_at ASC');
   return rows.map(rowToMember);

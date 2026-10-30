@@ -39,6 +39,63 @@ export function isTransientCursorError(error) {
   return TRANSIENT_ERROR_RE.test(code) || TRANSIENT_ERROR_RE.test(msg);
 }
 
+/**
+ * 会话被 Cursor 拒绝（登出/吊销/假 Token）。本机 JWT 未过期仍可能如此。
+ * @param {any} error
+ */
+export function isCursorAuthFailure(error) {
+  if (!error) return false;
+  const status = Number(error.status);
+  if (status === 401 || status === 403) return true;
+  const msg = String(error.message || error);
+  return /not_authenticated|HTTP 40[13]|会话鉴权失效/i.test(msg);
+}
+
+/**
+ * 看板对外的 HTTP 状态。Cursor 上游 401 若原样返回，详情页会把人踢回登录页。
+ * @param {any} e
+ */
+export function caughtHttpStatus(e) {
+  const msg = String(e?.message || e || '');
+  const status = Number(e?.status) || (/不存在/.test(msg) ? 404 : 400);
+  if (status !== 401 && status !== 403) return status;
+  const code = e?.code;
+  if (code === 'UNAUTHORIZED' || code === 'OPERATOR_PROOF' || code === 'INSTALL_TOKEN') return status;
+  if (status === 403 && /管理员/.test(msg)) return status;
+  if (status === 401 && /用户名或密码错误|未登录/.test(msg)) return status;
+  if (/not_authenticated|cursor\.com|api2\.cursor|HTTP 40[13]|会话鉴权/.test(msg)) return 400;
+  return status;
+}
+
+/**
+ * 这次上报该不该直接丢掉。同一份已失效 Token 反复报、或换上来的 Token 被 Cursor 拒绝，都不要写号池。
+ * probe 为 null 表示网络未知，放行，避免把真续期挡在外面。
+ * @param {{ hasExisting: boolean, sameCookie: boolean, knownDead: boolean, probe: boolean | null }} input
+ * @returns {'same-dead' | 'unauth' | null}
+ */
+export function uselessReportReason({ hasExisting, sameCookie, knownDead, probe }) {
+  if (hasExisting && sameCookie && knownDead) return 'same-dead';
+  if (probe === false && (!hasExisting || !sameCookie)) return 'unauth';
+  return null;
+}
+
+/**
+ * 上报前轻探：true=可用，false=未认证，null=网络等未知（勿因此挡掉续 Token）。
+ * @param {string} cookieValue
+ * @returns {Promise<boolean | null>}
+ */
+export async function probeCursorSessionAuth(cookieValue) {
+  const session = sessionFromCookie(cookieValue);
+  if (!session) return false;
+  try {
+    await fetchMe(session);
+    return true;
+  } catch (error) {
+    if (isCursorAuthFailure(error)) return false;
+    return null;
+  }
+}
+
 /** 网络抖动、限流和服务端错误可重试；401/403 没有刷新 Token 时重试无意义。 */
 function isRetryableError(error) {
   return isTransientCursorError(error);

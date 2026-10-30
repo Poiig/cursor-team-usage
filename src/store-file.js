@@ -382,6 +382,14 @@ export async function getMemberInternal(id) {
   return store.members.find((m) => m.id === id) ?? null;
 }
 
+/** @param {string} userId */
+export async function findMemberByUserId(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return null;
+  const store = await readStore();
+  return store.members.find((m) => m.userId === uid) ?? null;
+}
+
 export async function getAllMembersInternal() {
   const store = await readStore();
   return store.members;

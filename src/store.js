@@ -66,6 +66,11 @@ export async function getMemberInternal(id) {
   return api().getMemberInternal(id);
 }
 
+/** @param {string} userId */
+export async function findMemberByUserId(userId) {
+  return api().findMemberByUserId(userId);
+}
+
 export async function getAllMembersInternal() {
   return api().getAllMembersInternal();
 }

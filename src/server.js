@@ -18,15 +18,20 @@ import {
 } from './config.js';
 import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
 import {
+  caughtHttpStatus,
   fetchMemberSnapshotWithRetry,
   fetchUserRules,
+  isCursorAuthFailure,
   isTransientCursorError,
+  probeCursorSessionAuth,
+  uselessReportReason,
 } from './cursor-api.js';
 import {
   ensureMemberUsageEventsSynced,
   loadPreviousCycle,
   persistSnapshotUsageEvents,
 } from './usage-events-sync.js';
+import { sessionFromCookie } from './auth.js';
 import { probeLocalCursorSession, resolveLocalCursorSession } from './local-session.js';
 import {
   initAppLog,
@@ -44,6 +49,7 @@ import {
 import {
   addMember,
   deleteMember,
+  findMemberByUserId,
   getAllMembersInternal,
   getMemberInternal,
   initStore,
@@ -115,6 +121,7 @@ import {
   bufferEtag,
   consumeInstallToken,
   getExtensionBuildMeta,
+  isNewerVersion,
   getConfiguredPublicBaseUrl,
   getInstallToken,
   issueInstallToken,
@@ -1137,7 +1144,17 @@ const server = http.createServer(async (req, res) => {
       if (!view) {
         return sendJson(res, 404, { error: '尚未安装个性化插件', code: 'PLUGIN_NOT_INSTALLED' });
       }
-      return sendJson(res, 200, { ok: true, online: true, heartbeatAt: view.heartbeatAt });
+      const meta = await getExtensionBuildMeta();
+      const update = Boolean(
+        meta.available && isNewerVersion(meta.version, body?.pluginVersion),
+      );
+      return sendJson(res, 200, {
+        ok: true,
+        online: true,
+        heartbeatAt: view.heartbeatAt,
+        update,
+        version: meta.version,
+      });
     }
 
     if (method === 'POST' && pathname === '/api/agent/report') {
@@ -1145,6 +1162,8 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const sessionToken = String(body?.sessionToken || '').trim();
       if (!sessionToken) throw new Error('缺少 sessionToken');
+      const parsedSession = sessionFromCookie(sessionToken);
+      if (!parsedSession) throw new Error('会话 Token 无效');
       const { username: operatorUsername, reason: operatorReason } = await checkOperator(
         body?.operatorUsername,
         body?.operatorProof,
@@ -1153,6 +1172,43 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 401, {
           error: `插件使用人校验失败（${operatorReason}），请在看板重新安装插件`,
           code: 'OPERATOR_PROOF',
+        });
+      }
+      // 失效会话不许进号池：不盖 Token、不刷新、不占席位。网络探活失败则放行。
+      const existingByUser = await findMemberByUserId(parsedSession.userId);
+      const sameCookie = Boolean(
+        existingByUser?.cookieValue && existingByUser.cookieValue === parsedSession.cookieValue,
+      );
+      const knownDead = Boolean(
+        sameCookie &&
+          existingByUser?.lastError &&
+          isCursorAuthFailure({ message: existingByUser.lastError }),
+      );
+      const probe =
+        existingByUser && sameCookie
+          ? null
+          : await probeCursorSessionAuth(parsedSession.cookieValue);
+      const useless = uselessReportReason({
+        hasExisting: Boolean(existingByUser),
+        sameCookie,
+        knownDead,
+        probe,
+      });
+      if (useless) {
+        if (useless === 'unauth') {
+          await writeAppLog('上报', {
+            账号: existingByUser ? memberLogLabel(existingByUser) : parsedSession.userId,
+            操作: '拒绝无效Token',
+            使用人: operatorUsername || undefined,
+            主机名: body?.hostname || undefined,
+            邮箱: body?.email || undefined,
+            插件版本: body?.pluginVersion || undefined,
+          });
+        }
+        return sendJson(res, 409, {
+          ok: false,
+          error: '本机会话已失效，已拒绝上报',
+          code: 'TOKEN_REJECTED',
         });
       }
       // upsert：新建=上报来源；已有账号续 Token，不覆盖人工显示名/主机名
@@ -1487,16 +1543,16 @@ const server = http.createServer(async (req, res) => {
         const model = String(url.searchParams.get('model') || '').trim();
         const forceSync =
           url.searchParams.get('sync') === '1' || url.searchParams.get('sync') === 'true';
+        let syncError = null;
         try {
           await ensureMemberUsageEventsSynced(id, member.cookieValue, { force: forceSync });
         } catch (syncErr) {
-          // 有本地缓存时仍可读库；完全无数据则把错误抛给前端。
+          // 上游 401 不能抛出去，否则详情页会把看板登录态清掉。
           console.warn('[usage-events] sync 失败', id, syncErr?.message || syncErr);
-          const listed = await listUsageEvents(id, { days, model, page, pageSize });
-          if (!listed.total && page === 1) throw syncErr;
+          syncError = syncErr?.message || String(syncErr);
         }
         const data = await listUsageEvents(id, { days, model, page, pageSize });
-        return sendJson(res, 200, { ...data, fromCache: true });
+        return sendJson(res, 200, { ...data, fromCache: true, syncError });
       }
 
       if (method === 'GET' && suffix === '/previous-cycle') {
@@ -1595,8 +1651,7 @@ const server = http.createServer(async (req, res) => {
 
     sendJson(res, 405, { error: 'Method not allowed' });
   } catch (e) {
-    const status = e?.status || (/不存在/.test(e?.message || '') ? 404 : 400);
-    sendJson(res, status, { error: e?.message || String(e) });
+    sendJson(res, caughtHttpStatus(e), { error: e?.message || String(e), code: e?.code });
   }
 });
 

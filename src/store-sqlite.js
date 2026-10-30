@@ -1011,6 +1011,14 @@ export async function getMemberInternal(id) {
   return row ? rowToMember(row) : null;
 }
 
+/** @param {string} userId */
+export async function findMemberByUserId(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return null;
+  const row = getOne('SELECT * FROM members WHERE user_id = ?', [uid]);
+  return row ? rowToMember(row) : null;
+}
+
 export async function getAllMembersInternal() {
   return getAll('SELECT * FROM members ORDER BY created_at ASC').map(rowToMember);
 }

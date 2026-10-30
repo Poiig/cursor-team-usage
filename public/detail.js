@@ -493,6 +493,7 @@ async function loadEvents({ reset = true, forceSync = false } = {}) {
     eventsTotalTokens = Number(data.totalTokens) || eventsTotalTokens;
     hasNextPage = Boolean(data.hasNext);
     eventsSyncedAt = data.syncedAt || eventsSyncedAt;
+    if (data.syncError && reset && !batch.length) toast(data.syncError);
     if (reset) fillEventsModelOptions(data.models || []);
     if (reset) {
       eventsCache = batch;

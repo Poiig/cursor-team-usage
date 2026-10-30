@@ -7,13 +7,13 @@ import {
   writeHomeAuthBackup,
   type AuthBackupRecord,
 } from './authBackup';
-import { resolveLocalCursorSession } from './authReader';
+import { probeLocalSessionAuth, resolveLocalCursorSession } from './authReader';
 import { scheduleCursorRestart, writeLocalCursorAuth } from './authWriter';
 import {
   fetchRemoteBuildMeta,
+  autoUpdateAndReload,
   installAndOfferReload,
   installFromBoardWithAccessKey,
-  maybePromptUpdate,
   promptReinstallFromBoard,
   readLocalBuildInfo,
 } from './extensionInstall';
@@ -92,6 +92,15 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
     const session = await resolveLocalCursorSession();
     if (!session) {
       throw new Error('未找到有效的 Cursor 登录态，请先在本机登录 Cursor');
+    }
+    const authOk = await probeLocalSessionAuth(session);
+    if (authOk === false) {
+      const msg = '本机会话已失效，已跳过上报（避免覆盖看板 Token）';
+      updateStatus(msg);
+      if (!silent) {
+        void vscode.window.showWarningMessage(`Cursor Team Usage：${msg}`);
+      }
+      return;
     }
     const result = await reportSession(config, session);
     const exp = session.exp
@@ -265,19 +274,24 @@ function setupAutoReport(context: vscode.ExtensionContext) {
 /**
  * IDE 打开即周期心跳，看板用此判在线；失败静默，避免打扰。
  */
-function setupHeartbeat() {
+function setupHeartbeat(context: vscode.ExtensionContext) {
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = undefined;
   }
   const tick = () => {
-    void sendHeartbeat(readReporterConfig()).catch((e) => {
-      // 网络抖动静默；签名无效会导致看板一直离线，必须让用户知道
-      if (e instanceof OperatorProofError) {
-        updateStatus(`心跳被拒：${e.message}`);
-        warnOperatorProof(e.message);
-      }
-    });
+    void sendHeartbeat(readReporterConfig())
+      .then((info) => {
+        // 看板明确说有新版本才装；旧服务端没有该字段时不打扰
+        if (info.update) void autoUpdateAndReload(context.extensionPath);
+      })
+      .catch((e) => {
+        // 网络抖动静默；签名无效会导致看板一直离线，必须让用户知道
+        if (e instanceof OperatorProofError) {
+          updateStatus(`心跳被拒：${e.message}`);
+          warnOperatorProof(e.message);
+        }
+      });
   };
   tick();
   heartbeatTimer = setInterval(tick, HEARTBEAT_MS);
@@ -426,11 +440,11 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   setupAutoReport(context);
-  setupHeartbeat();
+  setupHeartbeat(context);
   void setupLocalBridge(context);
   // 启动后稍后自动报一次，避开扩展激活尖峰。
   setTimeout(() => void doReport(context, true), 8000);
-  setTimeout(() => void maybePromptUpdate(context.extensionPath), 12_000);
+  setTimeout(() => void autoUpdateAndReload(context.extensionPath), 12_000);
 }
 
 export function deactivate() {
