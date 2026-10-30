@@ -284,6 +284,10 @@ export async function upsertMemberBySession(input) {
   if (idx >= 0) {
     const member = store.members[idx];
     const manualProtected = isManualMemberSource(member.source);
+    if (member.cookieValue !== session.cookieValue) {
+      member.prevCookieValue = member.cookieValue;
+      member.prevEmail = member.email ?? null;
+    }
     member.cookieValue = session.cookieValue;
     member.userId = session.userId;
     member.tokenExpiresAt = tokenExpiresAt;
@@ -324,6 +328,24 @@ export async function upsertMemberBySession(input) {
     tokenUpdated: true,
     manualProtected: false,
   };
+}
+
+/**
+ * 上报换上来的 Token 刷新仍被拒绝时，还原上一份会话。只回滚一级。
+ * @param {string} id
+ */
+export async function rollbackMemberSession(id) {
+  const store = await readStore();
+  const member = store.members.find((m) => m.id === id);
+  if (!member?.prevCookieValue) return null;
+  member.cookieValue = member.prevCookieValue;
+  member.tokenExpiresAt = tokenExpiresAtFromCookie(member.prevCookieValue);
+  member.email = member.prevEmail || undefined;
+  member.prevCookieValue = null;
+  member.prevEmail = null;
+  member.updatedAt = new Date().toISOString();
+  await writeStore(store);
+  return member;
 }
 
 /** @param {string} id */

@@ -109,6 +109,8 @@ function rowToMember(row) {
     lastSnapshot,
     lastError: row.last_error ?? null,
     lastSyncedAt: row.last_synced_at ?? null,
+    prevCookieValue: row.prev_cookie_value ?? null,
+    prevEmail: row.prev_email ?? null,
     eventsSyncedAt: row.events_synced_at ?? null,
     usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
     prevCycleSummary: parsePrevCycleSummary(row.prev_cycle_summary),
@@ -242,6 +244,8 @@ function ensureMemberColumns() {
     ['prev_cycle_summary', 'TEXT'],
     // 缺省 report：旧行继续允许插件续 Token，避免误锁
     ['source', "TEXT NOT NULL DEFAULT 'report'"],
+    ['prev_cookie_value', 'TEXT'],
+    ['prev_email', 'TEXT'],
   ];
   for (const [name, type] of extras) {
     if (!cols.has(name)) run(`ALTER TABLE members ADD COLUMN ${name} ${type}`);
@@ -788,15 +792,17 @@ export async function upsertMemberBySession(input) {
   if (existing) {
     const id = String(existing.id);
     const before = await getMemberInternal(id);
-    // 人工录入号：仍接受插件续 Token（用户侧 Cursor 会换新 JWT），但不改显示名/主机名/来源
+    // 换 Token 前留下旧会话；同一份 Token 重复上报不盖掉上一份备份
     run(
       `UPDATE members SET
+        prev_cookie_value = CASE WHEN cookie_value IS NOT ? THEN cookie_value ELSE prev_cookie_value END,
+        prev_email = CASE WHEN cookie_value IS NOT ? THEN email ELSE prev_email END,
         cookie_value=?,
         token_expires_at=?,
         email=COALESCE(?, email),
         updated_at=?
        WHERE id=?`,
-      [session.cookieValue, tokenExpiresAt, email, now, id],
+      [session.cookieValue, session.cookieValue, session.cookieValue, tokenExpiresAt, email, now, id],
     );
     await persist();
     const member = await getMemberInternal(id);
@@ -835,6 +841,29 @@ export async function upsertMemberBySession(input) {
     tokenUpdated: true,
     manualProtected: false,
   };
+}
+
+/**
+ * 上报换上来的 Token 刷新仍被拒绝时，还原上一份会话。只回滚一级。
+ * @param {string} id
+ */
+export async function rollbackMemberSession(id) {
+  const before = await getMemberInternal(id);
+  if (!before?.prevCookieValue) return null;
+  const now = new Date().toISOString();
+  run(
+    `UPDATE members SET
+      cookie_value = prev_cookie_value,
+      token_expires_at = ?,
+      email = prev_email,
+      prev_cookie_value = NULL,
+      prev_email = NULL,
+      updated_at = ?
+     WHERE id = ? AND prev_cookie_value IS NOT NULL`,
+    [tokenExpiresAtFromCookie(before.prevCookieValue), now, id],
+  );
+  await persist();
+  return getMemberInternal(id);
 }
 
 /** @param {string} id */

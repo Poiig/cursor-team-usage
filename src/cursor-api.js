@@ -68,28 +68,51 @@ export function caughtHttpStatus(e) {
 }
 
 /**
- * 这次上报该不该直接丢掉。同一份已失效 Token 反复报、或换上来的 Token 被 Cursor 拒绝，都不要写号池。
- * probe 为 null 表示网络未知，放行，避免把真续期挡在外面。
+ * 换 Token 或新号必须探活成功才入库。同一份已失效 Token 静默丢掉。
+ * 探活未知也不许覆盖：吊销会话在 /api/auth/me 上是 204，当未知放行会再次盖掉好 Token。
  * @param {{ hasExisting: boolean, sameCookie: boolean, knownDead: boolean, probe: boolean | null }} input
- * @returns {'same-dead' | 'unauth' | null}
+ * @returns {'same-dead' | 'unauth' | 'unverified' | null}
  */
 export function uselessReportReason({ hasExisting, sameCookie, knownDead, probe }) {
   if (hasExisting && sameCookie && knownDead) return 'same-dead';
-  if (probe === false && (!hasExisting || !sameCookie)) return 'unauth';
-  return null;
+  if (hasExisting && sameCookie) return null;
+  if (probe === true) return null;
+  if (probe === false) return 'unauth';
+  return 'unverified';
 }
 
 /**
- * 上报前轻探：true=可用，false=未认证，null=网络等未知（勿因此挡掉续 Token）。
+ * 上报前向用量接口确认会话。true=可用，false=未认证或空响应，null=网络未知。
+ * 不用 /api/auth/me：吊销 Token 那里返回 204 空体，会被当成已登录。
  * @param {string} cookieValue
  * @returns {Promise<boolean | null>}
  */
 export async function probeCursorSessionAuth(cookieValue) {
   const session = sessionFromCookie(cookieValue);
   if (!session) return false;
+  const url = 'https://cursor.com/api/usage-summary';
   try {
-    await fetchMe(session);
-    return true;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        ...BROWSER_HEADERS,
+        Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.status === 401 || res.status === 403 || res.status === 204) return false;
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (!text.trim()) return false;
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return false;
+    }
+    if (!data || typeof data !== 'object') return false;
+    if (data.membershipType || data.billingCycleStart || data.individualUsage) return true;
+    return false;
   } catch (error) {
     if (isCursorAuthFailure(error)) return false;
     return null;

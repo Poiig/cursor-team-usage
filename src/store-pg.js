@@ -102,6 +102,8 @@ function rowToMember(row) {
     lastSnapshot: row.last_snapshot ?? null,
     lastError: row.last_error ?? null,
     lastSyncedAt: row.last_synced_at ? new Date(row.last_synced_at).toISOString() : null,
+    prevCookieValue: row.prev_cookie_value ?? null,
+    prevEmail: row.prev_email ?? null,
     eventsSyncedAt: row.events_synced_at ? new Date(row.events_synced_at).toISOString() : null,
     usagePercentHistory: parseUsagePercentHistory(row.usage_percent_history),
     prevCycleSummary: row.prev_cycle_summary ?? null,
@@ -186,7 +188,9 @@ export async function init() {
       ADD COLUMN IF NOT EXISTS usage_percent_history JSONB,
       ADD COLUMN IF NOT EXISTS events_synced_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS prev_cycle_summary JSONB,
-      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'report'
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'report',
+      ADD COLUMN IF NOT EXISTS prev_cookie_value TEXT,
+      ADD COLUMN IF NOT EXISTS prev_email TEXT
   `);
   await db().query(`
     CREATE TABLE IF NOT EXISTS usage_events (
@@ -583,20 +587,18 @@ export async function upsertMemberBySession(input) {
     const id = existing.rows[0].id;
     const before = await getMemberInternal(id);
     // 人工录入号也续 Token（用户侧 Cursor 会换新 JWT）；显示名/主机名/来源不改
+    const email = input.email ? String(input.email).trim() : null;
+    // 换 Token 前留下旧会话，刷新仍鉴权失败时能回滚；同一份 Token 不覆盖上一份备份
     await db().query(
       `UPDATE members SET
+        prev_cookie_value = CASE WHEN cookie_value IS DISTINCT FROM $1 THEN cookie_value ELSE prev_cookie_value END,
+        prev_email = CASE WHEN cookie_value IS DISTINCT FROM $1 THEN email ELSE prev_email END,
         cookie_value=$1,
         token_expires_at=$2,
         email=COALESCE($3, email),
         updated_at=$4
        WHERE id=$5`,
-      [
-        session.cookieValue,
-        tokenExpiresAt,
-        input.email ? String(input.email).trim() : null,
-        now,
-        id,
-      ],
+      [session.cookieValue, tokenExpiresAt, email, now, id],
     );
     const member = await getMemberInternal(id);
     return {
@@ -632,6 +634,29 @@ export async function upsertMemberBySession(input) {
     tokenUpdated: true,
     manualProtected: false,
   };
+}
+
+/**
+ * 上报换上来的 Token 刷新仍被拒绝时，还原上一份会话。只回滚一级，避免坏 Token 再被换回来。
+ * @param {string} id
+ * @returns {Promise<Member | null>}
+ */
+export async function rollbackMemberSession(id) {
+  const before = await getMemberInternal(id);
+  if (!before?.prevCookieValue) return null;
+  const now = new Date().toISOString();
+  await db().query(
+    `UPDATE members SET
+      cookie_value = prev_cookie_value,
+      token_expires_at = $2,
+      email = prev_email,
+      prev_cookie_value = NULL,
+      prev_email = NULL,
+      updated_at = $3
+     WHERE id = $1 AND prev_cookie_value IS NOT NULL`,
+    [id, tokenExpiresAtFromCookie(before.prevCookieValue), now],
+  );
+  return getMemberInternal(id);
 }
 
 /** @param {string} id */

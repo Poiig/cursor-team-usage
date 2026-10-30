@@ -60,6 +60,7 @@ import {
   setUsagePercentHistory,
   toPublicMember,
   updateMember,
+  rollbackMemberSession,
   upsertMemberBySession,
 } from './store.js';
 import {
@@ -1174,7 +1175,7 @@ const server = http.createServer(async (req, res) => {
           code: 'OPERATOR_PROOF',
         });
       }
-      // 失效会话不许进号池：不盖 Token、不刷新、不占席位。网络探活失败则放行。
+      // 换 Token 必须用量接口确认有效。未确认或已失效都不写号池、不刷新、不占席位。
       const existingByUser = await findMemberByUserId(parsedSession.userId);
       const sameCookie = Boolean(
         existingByUser?.cookieValue && existingByUser.cookieValue === parsedSession.cookieValue,
@@ -1195,10 +1196,10 @@ const server = http.createServer(async (req, res) => {
         probe,
       });
       if (useless) {
-        if (useless === 'unauth') {
+        if (useless === 'unauth' || useless === 'unverified') {
           await writeAppLog('上报', {
             账号: existingByUser ? memberLogLabel(existingByUser) : parsedSession.userId,
-            操作: '拒绝无效Token',
+            操作: useless === 'unauth' ? '拒绝无效Token' : '拒绝未验证Token',
             使用人: operatorUsername || undefined,
             主机名: body?.hostname || undefined,
             邮箱: body?.email || undefined,
@@ -1207,7 +1208,10 @@ const server = http.createServer(async (req, res) => {
         }
         return sendJson(res, 409, {
           ok: false,
-          error: '本机会话已失效，已拒绝上报',
+          error:
+            useless === 'unverified'
+              ? '未能向 Cursor 确认会话有效，已拒绝上报'
+              : '本机会话已失效，已拒绝上报',
           code: 'TOKEN_REJECTED',
         });
       }
@@ -1247,11 +1251,38 @@ const server = http.createServer(async (req, res) => {
       });
       const shouldRefresh = body?.refresh !== false;
       let refreshed = member;
+      const cookieChanged = Boolean(
+        !created &&
+          existingByUser?.cookieValue &&
+          existingByUser.cookieValue !== parsedSession.cookieValue,
+      );
       if (shouldRefresh && member?.id) {
         refreshed = await refreshOne(member.id, {
           source: created ? '注册' : '上报',
           trigger: '上报后刷新',
         });
+        // 探活通过但整页刷新仍鉴权失败：还原上一份 Token，避免坏上报盖掉能用的会话
+        if (
+          cookieChanged &&
+          refreshed?.lastError &&
+          isCursorAuthFailure({ message: refreshed.lastError })
+        ) {
+          const restored = await rollbackMemberSession(member.id);
+          if (restored) {
+            await writeAppLog('上报', {
+              账号: memberLogLabel(member),
+              操作: '回滚Token',
+              使用人: operatorUsername || undefined,
+              主机名: body?.hostname || undefined,
+              邮箱: body?.email || undefined,
+              插件版本: body?.pluginVersion || undefined,
+            });
+            refreshed = await refreshOne(member.id, {
+              source: '上报',
+              trigger: 'Token回滚',
+            });
+          }
+        }
       }
       await recordReportEvent({
         operatorUsername,

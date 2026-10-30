@@ -56,6 +56,11 @@ export async function upsertMemberBySession(input) {
   return api().upsertMemberBySession(input);
 }
 
+/** 上报写入后刷新仍鉴权失败时，还原上一份会话。 */
+export async function rollbackMemberSession(id) {
+  return api().rollbackMemberSession(id);
+}
+
 /** @param {string} id */
 export async function deleteMember(id) {
   return api().deleteMember(id);

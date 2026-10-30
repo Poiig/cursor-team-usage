@@ -379,11 +379,15 @@ test('isTransientCursorError 识别连接超时，排除会话失效', () => {
   );
 });
 
-test('uselessReportReason 丢掉失效会话，网络未知放行', async () => {
+test('uselessReportReason 换 Token 必须探活成功', async () => {
   const { uselessReportReason } = await import('../src/cursor-api.js');
   assert.equal(
     uselessReportReason({ hasExisting: true, sameCookie: true, knownDead: true, probe: null }),
     'same-dead',
+  );
+  assert.equal(
+    uselessReportReason({ hasExisting: true, sameCookie: true, knownDead: false, probe: null }),
+    null,
   );
   assert.equal(
     uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: false }),
@@ -395,7 +399,11 @@ test('uselessReportReason 丢掉失效会话，网络未知放行', async () => 
   );
   assert.equal(
     uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: null }),
-    null,
+    'unverified',
+  );
+  assert.equal(
+    uselessReportReason({ hasExisting: false, sameCookie: false, knownDead: false, probe: null }),
+    'unverified',
   );
   assert.equal(
     uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: true }),
@@ -445,6 +453,16 @@ test('isCursorAuthFailure / probeCursorSessionAuth 区分吊销与网络抖动',
       await probeCursorSessionAuth(buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s')),
       null,
     );
+    const cookie = buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s');
+    globalThis.fetch = async () => new Response(null, { status: 204 });
+    assert.equal(await probeCursorSessionAuth(cookie), false);
+    globalThis.fetch = async () => new Response('', { status: 200 });
+    assert.equal(await probeCursorSessionAuth(cookie), false);
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ membershipType: 'pro', billingCycleStart: '2026-10-01' }), {
+        status: 200,
+      });
+    assert.equal(await probeCursorSessionAuth(cookie), true);
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -1610,6 +1628,51 @@ test('上个账单周期：拉全后落库，同周期再进不请求 Cursor；�
     globalThis.fetch = realFetch;
     const sqlite = await import('../src/store-sqlite.js');
     await sqlite.close().catch(() => {});
+    if (prevDriver === undefined) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite === undefined) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('换 Token 留下上一份会话，回滚只还原一级', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-rb-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 't.sqlite');
+  try {
+    await loadAppConfig();
+    const store = await import('../src/store-sqlite.js');
+    await store.close().catch(() => {});
+    await store.init();
+    const userId = 'user_rb';
+    const jwt = (sig) =>
+      'h.' + Buffer.from(JSON.stringify({ sub: `auth0|${userId}` })).toString('base64url') + '.' + sig;
+    const first = buildCookieValue(userId, jwt('a'));
+    const second = buildCookieValue(userId, jwt('b'));
+    const added = await store.addMember({ displayName: '回滚', sessionToken: first });
+    await store.upsertMemberBySession({ sessionToken: first, email: 'good@example.com' });
+    await store.upsertMemberBySession({ sessionToken: second, email: 'bad@example.com' });
+    const mid = await store.getMemberInternal(added.id);
+    assert.equal(mid.cookieValue, second);
+    assert.equal(mid.email, 'bad@example.com');
+    assert.equal(mid.prevCookieValue, first);
+    assert.equal(mid.prevEmail, 'good@example.com');
+    assert.equal(store.toPublicMember(mid).prevCookieValue, undefined);
+
+    const restored = await store.rollbackMemberSession(added.id);
+    assert.equal(restored.cookieValue, first);
+    assert.equal(restored.email, 'good@example.com');
+    assert.equal(restored.prevCookieValue, null);
+    assert.equal(await store.rollbackMemberSession(added.id), null);
+  } finally {
+    const store = await import('../src/store-sqlite.js');
+    await store.close().catch(() => {});
     if (prevDriver === undefined) delete process.env.STORE_DRIVER;
     else process.env.STORE_DRIVER = prevDriver;
     if (prevSqlite === undefined) delete process.env.SQLITE_PATH;

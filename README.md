@@ -127,7 +127,7 @@ cd D:\AppData\wslc\cursor-team-usage
 落盘的是 Cursor access JWT，有过期时间（列表显示「Token 有效至」）。看板**不会**自己刷新 Token。
 
 - **本机导入 / 粘贴 / 邮箱验证码**：过期后需再导入、再粘贴，或再走一遍邮箱验证码。Cursor IDE 保持登录时会把新 Token 写回本地库，再点一次「本机导入」即可。
-- **Reporter 扩展**：Cursor 开着时按间隔把当前会话上报到看板，过期前一般会带上续期后的 Token；关机或未登录期间不会续。本机 JWT 未过期但已被 Cursor 吊销时，插件与服务端都会拒绝覆盖看板里已有 Token。
+- **Reporter 扩展**：Cursor 开着时按间隔把当前会话上报到看板，过期前一般会带上续期后的 Token；关机或未登录期间不会续。换 Token 前服务端会向用量接口确认会话有效，确认失败或无法确认则拒绝覆盖。写入后若刷新仍鉴权失败，自动回滚到上一份 Token。
 
 ### Reporter 扩展
 
