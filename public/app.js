@@ -20,6 +20,8 @@ import {
   formatTokens,
   loadSettings,
   money,
+  aggregateTodayModels,
+  rankAccountsByTodayModel,
   formatOperatorLabel,
   planBadgeClass,
   renderBarChart,
@@ -652,6 +654,13 @@ function renderSummary(summary) {
   document.getElementById('btnFilterError')?.addEventListener('click', () => setAccountStatusFilter('error'));
 }
 
+/** 今日排行维度。历史某日的快照没有按模型拆分，只能按人。 */
+let todayRankMode = 'people';
+/** @type {string | null} */
+let todayRankDate = null;
+/** 按模型下钻时记下模型名；空表示还在模型列表。 */
+let todayRankModel = '';
+
 /** 打开今日用量排行：按 tokens 倒序，展示用户名。 */
 function openTodayRank() {
   openDayRank(null);
@@ -663,6 +672,32 @@ function openTodayRank() {
  * @param {string | null} date YYYY-MM-DD
  */
 function openDayRank(date) {
+  todayRankDate = date || null;
+  todayRankModel = '';
+  renderDayRank();
+  els.todayRankDialog?.showModal();
+}
+
+/** 按人 / 按模型共用同一个表，切换时只重绘，不重新打开弹窗。 */
+function renderDayRank() {
+  const mode = todayRankDate ? 'people' : todayRankMode;
+  const drilled = mode === 'model' && Boolean(todayRankModel);
+  const tabs = document.getElementById('todayRankMode');
+  if (tabs) tabs.hidden = Boolean(todayRankDate);
+  tabs?.querySelectorAll('[data-mode]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  document.getElementById('btnTodayRankBack')?.classList.toggle('hidden', !drilled);
+  if (drilled) renderModelAccountRank(todayRankModel);
+  else if (mode === 'model') renderModelRank();
+  else renderPeopleRank(todayRankDate);
+}
+
+/**
+ * 按账号列出当日用量。历史日只有 daily 合计，没有模型拆分。
+ * @param {string | null} date
+ */
+function renderPeopleRank(date) {
   const usageOf = (m) => {
     if (!date) return { tokens: todayTokensOf(m), requests: todayRequestsOf(m), dollars: todayDollarsOf(m) };
     const row = (m.lastSnapshot?.spend?.daily || []).find((d) => d?.date === date);
@@ -675,10 +710,12 @@ function openDayRank(date) {
   const dayText = date || '今日';
   const titleEl = document.getElementById('todayRankTitle');
   const hintEl = document.getElementById('todayRankHint');
-  const thEl = document.getElementById('todayRankTokensTh');
+  const head = document.querySelector('#todayRankTable thead tr');
   if (titleEl) titleEl.textContent = `${dayText}用量排行`;
   if (hintEl) hintEl.textContent = `按${dayText} tokens 从高到低；点击行可进入账号详情。`;
-  if (thEl) thEl.textContent = date ? '当日 tokens' : '今日 tokens';
+  if (head) {
+    head.innerHTML = `<th>#</th><th>用户名</th><th>${date ? '当日 tokens' : '今日 tokens'}</th><th>次数</th><th>花费</th>`;
+  }
   const ranked = membersCache
     .map((m) => ({ m, u: usageOf(m) }))
     .sort((a, b) => b.u.tokens - a.u.tokens);
@@ -705,7 +742,71 @@ function openDayRank(date) {
       })
       .join('');
   }
-  els.todayRankDialog?.showModal();
+}
+
+/** 按模型列出今日用量：各账号 todayModels 加总，快照里没有按模型的次数和花费。 */
+function renderModelRank() {
+  const titleEl = document.getElementById('todayRankTitle');
+  const hintEl = document.getElementById('todayRankHint');
+  const head = document.querySelector('#todayRankTable thead tr');
+  if (titleEl) titleEl.textContent = '今日用量排行';
+  if (hintEl) hintEl.textContent = '按今日 tokens 从高到低；点击模型可看各账号用量。';
+  if (head) head.innerHTML = `<th>#</th><th>模型</th><th>今日 tokens</th><th>占比</th><th>账号数</th>`;
+  const ranked = aggregateTodayModels(membersCache);
+  const total = ranked.reduce((sum, row) => sum + row.tokens, 0);
+  if (!els.todayRankBody) return;
+  if (!ranked.length) {
+    els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">暂无模型用量</td></tr>`;
+    return;
+  }
+  els.todayRankBody.innerHTML = ranked
+    .map((row, i) => {
+      const pct = total ? ((row.tokens / total) * 100).toFixed(1) : '0.0';
+      return `
+        <tr class="rank-row" data-model="${escapeHtml(row.model)}" title="查看各账号用量">
+          <td class="rank-num">${i + 1}</td>
+          <td><span class="rank-name">${escapeHtml(row.model)}</span></td>
+          <td class="rank-metric">${escapeHtml(formatTokens(row.tokens))}</td>
+          <td class="rank-metric">${pct}%</td>
+          <td class="rank-metric">${row.accounts}</td>
+        </tr>
+      `;
+    })
+    .join('');
+}
+
+/** 下钻后的账号排名：只比较这个模型的当日 tokens。 */
+function renderModelAccountRank(model) {
+  const titleEl = document.getElementById('todayRankTitle');
+  const hintEl = document.getElementById('todayRankHint');
+  const head = document.querySelector('#todayRankTable thead tr');
+  if (titleEl) titleEl.textContent = model;
+  if (hintEl) hintEl.textContent = '按该模型今日 tokens 从高到低；点击行可进入账号详情。';
+  if (head) head.innerHTML = `<th>#</th><th>用户名</th><th>今日 tokens</th><th>占该模型</th>`;
+  const ranked = rankAccountsByTodayModel(membersCache, model);
+  const total = ranked.reduce((sum, row) => sum + row.tokens, 0);
+  if (!els.todayRankBody) return;
+  if (!ranked.length) {
+    els.todayRankBody.innerHTML = `<tr><td colspan="4" class="muted">暂无账号用量</td></tr>`;
+    return;
+  }
+  els.todayRankBody.innerHTML = ranked
+    .map(({ member, tokens }, i) => {
+      const idn = accountIdentity(member, settings.privacyMode);
+      const pct = total ? ((tokens / total) * 100).toFixed(1) : '0.0';
+      return `
+        <tr class="rank-row" data-id="${escapeHtml(member.id)}" title="打开详情">
+          <td class="rank-num">${i + 1}</td>
+          <td>
+            <span class="rank-name">${escapeHtml(idn.title)}</span>
+            ${idn.subtitle ? `<span class="rank-sub">${escapeHtml(idn.subtitle)}</span>` : ''}
+          </td>
+          <td class="rank-metric">${escapeHtml(formatTokens(tokens))}</td>
+          <td class="rank-metric">${pct}%</td>
+        </tr>
+      `;
+    })
+    .join('');
 }
 
 function filteredMembers() {
@@ -1372,24 +1473,14 @@ async function loadReports() {
       .sort((a, b) => b.value - a.value);
     renderHorizontalBars(els.chartAccountTokens, accountTokens, '#7c9cff', tokensFmt);
 
-    // 今日模型分布：各账号 todayModels 合并
-    /** @type {Map<string, number>} */
-    const modelTokens = new Map();
-    for (const m of membersCache) {
-      for (const row of m.lastSnapshot?.spend?.todayModels || []) {
-        if (!row?.model) continue;
-        modelTokens.set(row.model, (modelTokens.get(row.model) || 0) + (Number(row.tokens) || 0));
-      }
-    }
-    const modelTotal = [...modelTokens.values()].reduce((s, v) => s + v, 0);
-    const modelRows = [...modelTokens.entries()]
-      .filter(([, v]) => v > 0)
-      .sort((a, b) => b[1] - a[1])
-      .map(([model, v]) => ({
-        label: model,
-        value: v,
-        tip: `${model} · ${formatTokens(v)} · ${modelTotal ? ((v / modelTotal) * 100).toFixed(1) : 0}%`,
-      }));
+    // 今日模型分布与排行弹窗共用同一套加总
+    const todayModels = aggregateTodayModels(membersCache);
+    const modelTotal = todayModels.reduce((s, r) => s + r.tokens, 0);
+    const modelRows = todayModels.map((r) => ({
+      label: r.model,
+      value: r.tokens,
+      tip: `${r.model} · ${formatTokens(r.tokens)} · ${modelTotal ? ((r.tokens / modelTotal) * 100).toFixed(1) : 0}%`,
+    }));
     renderHorizontalBars(els.chartTodayModels, modelRows, '#c38bff', (v) =>
       `${formatTokens(v)} · ${modelTotal ? ((v / modelTotal) * 100).toFixed(1) : 0}%`,
     );
@@ -2162,11 +2253,28 @@ els.btnRulesDownload?.addEventListener('click', () => {
 els.btnRulesClose?.addEventListener('click', () => els.rulesDialog?.close());
 els.btnRulesCancel?.addEventListener('click', () => els.rulesDialog?.close());
 
+document.getElementById('todayRankMode')?.addEventListener('click', (e) => {
+  const mode = e.target.closest('[data-mode]')?.dataset.mode;
+  if (mode !== 'people' && mode !== 'model') return;
+  todayRankModel = '';
+  if (mode !== todayRankMode) todayRankMode = mode;
+  renderDayRank();
+});
+document.getElementById('btnTodayRankBack')?.addEventListener('click', () => {
+  todayRankModel = '';
+  renderDayRank();
+});
 els.btnTodayRankClose?.addEventListener('click', () => els.todayRankDialog?.close());
 els.btnTodayRankCancel?.addEventListener('click', () => els.todayRankDialog?.close());
 els.todayRankBody?.addEventListener('click', (e) => {
-  const row = e.target.closest('tr[data-id]');
-  if (!row?.dataset.id) return;
+  const row = e.target.closest('tr');
+  if (!row) return;
+  if (row.dataset.model) {
+    todayRankModel = row.dataset.model;
+    renderDayRank();
+    return;
+  }
+  if (!row.dataset.id) return;
   els.todayRankDialog?.close();
   location.href = `/detail.html?id=${encodeURIComponent(row.dataset.id)}`;
 });

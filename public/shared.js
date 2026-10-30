@@ -68,6 +68,51 @@ export function money(n, digits = 2) {
   return `$${Number(n).toFixed(digits)}`;
 }
 
+/**
+ * 各账号快照里的当日模型是分开存的，排行和报表要看团队合计。
+ * 同一模型出现在多个账号时，账号数按账号计一次。
+ * @param {Array<{ lastSnapshot?: { spend?: { todayModels?: Array<{ model?: string, tokens?: number }> } } }>} members
+ * @returns {Array<{ model: string, tokens: number, accounts: number }>}
+ */
+export function aggregateTodayModels(members) {
+  /** @type {Map<string, { tokens: number, accounts: number }>} */
+  const byModel = new Map();
+  for (const member of members || []) {
+    for (const row of member?.lastSnapshot?.spend?.todayModels || []) {
+      const model = String(row?.model || '').trim();
+      const tokens = Number(row?.tokens) || 0;
+      if (!model || tokens <= 0) continue;
+      const cur = byModel.get(model) || { tokens: 0, accounts: 0 };
+      cur.tokens += tokens;
+      cur.accounts += 1;
+      byModel.set(model, cur);
+    }
+  }
+  return [...byModel.entries()]
+    .map(([model, v]) => ({ model, tokens: v.tokens, accounts: v.accounts }))
+    .sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model));
+}
+
+/**
+ * 点进某个模型后，要看是哪些账号把这个模型的 tokens 用掉的。
+ * @param {Array<{ lastSnapshot?: { spend?: { todayModels?: Array<{ model?: string, tokens?: number }> } } }>} members
+ * @param {string} model
+ * @returns {Array<{ member: any, tokens: number }>}
+ */
+export function rankAccountsByTodayModel(members, model) {
+  const name = String(model || '').trim();
+  if (!name) return [];
+  return (members || [])
+    .map((member) => {
+      const row = (member?.lastSnapshot?.spend?.todayModels || []).find(
+        (item) => String(item?.model || '').trim() === name,
+      );
+      return { member, tokens: Number(row?.tokens) || 0 };
+    })
+    .filter((row) => row.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens);
+}
+
 export function formatTokens(n) {
   if (n == null || !Number.isFinite(n) || n <= 0) return '—';
   // 中文常见量级：≥1 亿用「亿」，≥1 万用「万」

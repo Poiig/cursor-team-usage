@@ -719,7 +719,7 @@ function localDayBounds(nowMs = Date.now()) {
  * 指定本地日按模型汇总 tokens（与日花费同一口径，含 cache write）。
  * @param {Array<{ timestamp?: unknown, model?: string, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
  * @param {string} dayKey yyyy-MM-dd
- * @param {number} [limit]
+ * @param {number} [limit] 保留前 N 名；≤0 表示不截断
  * @returns {Array<{ model: string, tokens: number }>}
  */
 export function topModelsByTokens(events, dayKey, limit = 8) {
@@ -737,10 +737,10 @@ export function topModelsByTokens(events, dayKey, limit = 8) {
     const model = String(e.model || 'unknown');
     byModel[model] = (byModel[model] || 0) + tokens;
   }
-  return Object.entries(byModel)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([model, tokens]) => ({ model, tokens }));
+  const ranked = Object.entries(byModel).sort((a, b) => b[1] - a[1]);
+  // 看板要把各账号加总，截断会漏掉单账号用量靠后的模型。
+  const picked = limit > 0 ? ranked.slice(0, limit) : ranked;
+  return picked.map(([model, tokens]) => ({ model, tokens }));
 }
 
 /**
@@ -821,8 +821,8 @@ export function aggregateSpendPeriods(events, nowMs = Date.now()) {
           }
         : null,
     daily,
-    // 当日按模型 tokens，详情页「当日模型统计」用。
-    todayModels: topModelsByTokens(events, todayKey),
+    // 当日按模型 tokens。不截断，否则团队按模型加总会漏掉单账号第 9 名以后的模型。
+    todayModels: topModelsByTokens(events, todayKey, 0),
   };
 }
 

@@ -594,6 +594,60 @@ test('切换日志：领取后久无回报、未领取票据丢失时判定为�
   );
 });
 
+test('topModelsByTokens 在 limit<=0 时保留全部模型', () => {
+  const now = Date.parse('2026-09-15T12:00:00+08:00');
+  const events = Array.from({ length: 9 }, (_, i) => ({
+    timestamp: now,
+    model: `m${i}`,
+    inputTokens: 9 - i,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  }));
+  assert.equal(topModelsByTokens(events, '2026-09-15').length, 8);
+  assert.equal(topModelsByTokens(events, '2026-09-15', 0).length, 9);
+});
+
+test('aggregateTodayModels 跨账号按模型加总', async () => {
+  const { aggregateTodayModels } = await import('../public/shared.js');
+  const rows = aggregateTodayModels([
+    {
+      lastSnapshot: {
+        spend: { todayModels: [{ model: 'composer', tokens: 10 }, { model: 'grok', tokens: 3 }] },
+      },
+    },
+    {
+      lastSnapshot: {
+        spend: {
+          todayModels: [
+            { model: 'composer', tokens: 5 },
+            { model: '', tokens: 9 },
+            { model: 'empty', tokens: 0 },
+          ],
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(rows, [
+    { model: 'composer', tokens: 15, accounts: 2 },
+    { model: 'grok', tokens: 3, accounts: 1 },
+  ]);
+});
+
+test('rankAccountsByTodayModel 只保留用过该模型的账号并按 tokens 排序', async () => {
+  const { rankAccountsByTodayModel } = await import('../public/shared.js');
+  const a = { id: 'a', lastSnapshot: { spend: { todayModels: [{ model: 'composer', tokens: 4 }] } } };
+  const b = { id: 'b', lastSnapshot: { spend: { todayModels: [{ model: 'composer', tokens: 9 }, { model: 'grok', tokens: 1 }] } } };
+  const c = { id: 'c', lastSnapshot: { spend: { todayModels: [{ model: 'grok', tokens: 8 }] } } };
+  const ranked = rankAccountsByTodayModel([a, b, c], 'composer');
+  assert.deepEqual(
+    ranked.map((row) => row.member.id),
+    ['b', 'a'],
+  );
+  assert.equal(ranked[0].tokens, 9);
+  assert.equal(rankAccountsByTodayModel([a], '').length, 0);
+});
+
 test('renderMarkdown 渲染规则常见块且转义原始 HTML', async () => {
   const { renderMarkdown } = await import('../public/shared.js');
   const html = renderMarkdown(

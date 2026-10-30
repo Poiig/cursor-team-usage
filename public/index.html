@@ -339,6 +339,10 @@
           <button type="button" class="icon-close" id="btnTodayRankClose" aria-label="关闭">×</button>
         </header>
         <p class="hint" id="todayRankHint">按今日 tokens 从高到低；点击行可进入账号详情。</p>
+        <div class="filter-tabs" id="todayRankMode" role="tablist" aria-label="排行维度">
+          <button type="button" class="filter-tab active" data-mode="people">按人</button>
+          <button type="button" class="filter-tab" data-mode="model">按模型</button>
+        </div>
         <div class="rank-table-wrap">
           <table class="rank-table" id="todayRankTable">
             <thead>
@@ -354,6 +358,7 @@
           </table>
         </div>
         <footer class="sheet-footer">
+          <button type="button" class="btn hidden" id="btnTodayRankBack">返回模型列表</button>
           <div class="sheet-footer-right">
             <button type="button" class="btn" id="btnTodayRankCancel">关闭</button>
           </div>
