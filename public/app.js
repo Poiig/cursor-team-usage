@@ -300,12 +300,39 @@ function resetMs(member) {
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
 }
 
+/** 与服务端 recommendSwitchMember 同口径：按消耗速度下剩余可撑量，所剩无几的不推荐。 */
+const RECOMMEND_MIN_REMAINING_PERCENT = 5;
+
+function recommendSwitchScoreLocal(member) {
+  const used = usedPercent(member);
+  if (used == null) return null;
+  const remaining = Math.max(0, Math.round((100 - used) * 10) / 10);
+  if (remaining < RECOMMEND_MIN_REMAINING_PERCENT) return null;
+  const pace = computeUsagePace(member);
+  let runway = remaining;
+  if (pace) {
+    if (pace.daysAffordable != null && Number.isFinite(pace.daysAffordable)) {
+      runway = pace.daysAffordable;
+    } else if ((pace.dailyPercent || 0) <= 0) {
+      runway = remaining * 100;
+    }
+  }
+  const paceRank = pace?.status === 'ok' ? 2 : pace?.status === 'warn' ? 1 : pace ? 0 : 1;
+  return { runway, remaining, paceRank };
+}
+
 function recommendedMemberFromList() {
   return (
     [...membersCache]
       .filter((member) => !switchBlockReason(member))
-      .sort((a, b) => resetMs(a) - resetMs(b) || usedPercent(b) - usedPercent(a))[0] ||
-    null
+      .map((member) => ({ member, score: recommendSwitchScoreLocal(member) }))
+      .filter((row) => row.score)
+      .sort((a, b) => {
+        if (a.score.runway !== b.score.runway) return b.score.runway - a.score.runway;
+        if (a.score.remaining !== b.score.remaining) return b.score.remaining - a.score.remaining;
+        if (a.score.paceRank !== b.score.paceRank) return b.score.paceRank - a.score.paceRank;
+        return 0;
+      })[0]?.member || null
   );
 }
 

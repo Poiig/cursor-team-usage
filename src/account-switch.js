@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { computeUsagePace } from '../public/shared.js';
 import { decodeJwtPayload, jwtFromCookie, sessionFromCookie } from './auth.js';
 import { getMemberCapacity } from './account-presence.js';
 import { getPublicUser } from './users.js';
@@ -15,6 +16,9 @@ import {
   listSwitchLogs,
   updateSwitchLog,
 } from './store.js';
+
+/** 剩余额度低于此比例（%）时不推荐切换。 */
+export const RECOMMEND_MIN_REMAINING_PERCENT = 5;
 
 /** 票据有效期：2 分钟，够打开 Cursor 并领取。 */
 const TICKET_TTL_MS = 2 * 60 * 1000;
@@ -220,19 +224,48 @@ export function switchBlockReason(member) {
 }
 
 /**
- * 推荐最早到期且仍有额度的账号；没有重置日时排到最后。
- * @param {any[]} members
+ * 按当前消耗速度估「还能撑多久」：剩余% ÷ 日均%，无消耗时用剩余% 放大表示很充裕。
+ * @param {any} member
+ * @param {number} [nowMs]
+ * @returns {{ runway: number, remaining: number, paceRank: number } | null}
  */
-export function recommendSwitchMember(members) {
+export function recommendSwitchScore(member, nowMs = Date.now()) {
+  const used = usageTotalPercentOf(member);
+  if (used == null) return null;
+  const remaining = Math.max(0, Math.round((100 - used) * 10) / 10);
+  if (remaining < RECOMMEND_MIN_REMAINING_PERCENT) return null;
+
+  const pace = computeUsagePace(member, nowMs);
+  let runway = remaining;
+  if (pace) {
+    if (pace.daysAffordable != null && Number.isFinite(pace.daysAffordable)) {
+      runway = pace.daysAffordable;
+    } else if ((pace.dailyPercent || 0) <= 0) {
+      // 几乎没消耗：剩余越多越好，给高分避免被低剩余但有日均的号挤掉
+      runway = remaining * 100;
+    }
+  }
+  const paceRank = pace?.status === 'ok' ? 2 : pace?.status === 'warn' ? 1 : pace ? 0 : 1;
+  return { runway, remaining, paceRank };
+}
+
+/**
+ * 推荐「按当前速度剩余最多」的账号：优先可撑工作日，再比剩余%；所剩无几的不进候选。
+ * @param {any[]} members
+ * @param {number} [nowMs]
+ */
+export function recommendSwitchMember(members, nowMs = Date.now()) {
   return (
     [...(members || [])]
       .filter((member) => !switchBlockReason(member))
+      .map((member) => ({ member, score: recommendSwitchScore(member, nowMs) }))
+      .filter((row) => row.score)
       .sort((a, b) => {
-        const aReset = Date.parse(a?.lastSnapshot?.window?.resetIso || '') || Infinity;
-        const bReset = Date.parse(b?.lastSnapshot?.window?.resetIso || '') || Infinity;
-        if (aReset !== bReset) return aReset - bReset;
-        return (usageTotalPercentOf(b) || 0) - (usageTotalPercentOf(a) || 0);
-      })[0] || null
+        if (a.score.runway !== b.score.runway) return b.score.runway - a.score.runway;
+        if (a.score.remaining !== b.score.remaining) return b.score.remaining - a.score.remaining;
+        if (a.score.paceRank !== b.score.paceRank) return b.score.paceRank - a.score.paceRank;
+        return 0;
+      })[0]?.member || null
   );
 }
 

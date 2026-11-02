@@ -1067,8 +1067,56 @@ test('切换报表汇总与 Total usage 快照', async () => {
         window: { resetIso: '2026-10-11T00:00:00Z' },
       },
     },
+    {
+      id: 'almost',
+      lastSnapshot: {
+        meters: { totalPercentUsed: 97 },
+        window: { resetIso: '2026-10-12T00:00:00Z' },
+      },
+    },
   ]);
-  assert.equal(recommended.id, 'soon');
+  // 剩余最多（95%）优先，不再按最早到期；所剩无几（3%）不进候选
+  assert.equal(recommended.id, 'later');
+  assert.equal(
+    recommendSwitchMember([
+      {
+        id: 'almost',
+        lastSnapshot: {
+          meters: { totalPercentUsed: 97 },
+          window: { resetIso: '2026-10-12T00:00:00Z' },
+        },
+      },
+    ]),
+    null,
+  );
+  // 剩余%相同：日均低、可撑更久的优先
+  const nowMs = Date.parse('2026-10-10T12:00:00+08:00');
+  const byPace = recommendSwitchMember(
+    [
+      {
+        id: 'fast',
+        lastSnapshot: {
+          meters: { totalPercentUsed: 40 },
+          window: {
+            startIso: '2026-10-09T00:00:00+08:00',
+            resetIso: '2026-10-31T00:00:00+08:00',
+          },
+        },
+      },
+      {
+        id: 'slow',
+        lastSnapshot: {
+          meters: { totalPercentUsed: 40 },
+          window: {
+            startIso: '2026-09-01T00:00:00+08:00',
+            resetIso: '2026-10-31T00:00:00+08:00',
+          },
+        },
+      },
+    ],
+    nowMs,
+  );
+  assert.equal(byPace.id, 'slow');
   assert.match(
     switchBlockReason({
       activeUserCount: 3,
