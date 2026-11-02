@@ -187,9 +187,21 @@ function isFreePlanMember(member) {
   return plan === 'free' || /\bfree\b/.test(plan);
 }
 
-/** 同步失败或 Free 视为异常，不可切换。 */
+/** 有效期内额度已用尽：重置日未到，但 Total usage ≥ 100%。 */
+function isQuotaExhaustedInPeriod(member) {
+  const used = usedPercent(member);
+  if (used == null || used < 100) return false;
+  const days = daysUntil(member?.lastSnapshot?.window?.resetIso);
+  return days != null && days > 0;
+}
+
+/** 同步失败、Free，或有效期内额满 → 异常（不可切换，也不进临期）。 */
 function isAbnormalMember(member) {
-  return Boolean(member?.lastError) || isFreePlanMember(member);
+  return (
+    Boolean(member?.lastError) ||
+    isFreePlanMember(member) ||
+    isQuotaExhaustedInPeriod(member)
+  );
 }
 
 /**
@@ -205,7 +217,7 @@ function isExpiringMember(member) {
 function switchBlockReason(member) {
   if (!member) return '账号不存在';
   if (isFreePlanMember(member)) return 'Free 套餐不可用，请换号';
-  if (isAbnormalMember(member)) return '同步异常，请先更新 Token';
+  if (member.lastError) return '同步异常，请先更新 Token';
   const used = usedPercent(member);
   if (used == null) return '尚无额度数据，请先刷新';
   if (used >= 100) return '额度已用完';
@@ -350,8 +362,8 @@ function todayDollarsOf(member) {
 }
 
 function memberStatus(member) {
-  // 有 lastError / Free 一律视为异常（含仍有旧快照的情况），避免卡片仍显示「充足」
-  if (member.lastError || isFreePlanMember(member)) return 'error';
+  // 异常优先（含仍有旧快照），避免卡片仍显示「充足 / 临期」
+  if (isAbnormalMember(member)) return 'error';
   if (!member.lastSnapshot) return 'pending';
   const pace = computeUsagePace(member);
   if (pace) return pace.status;
@@ -367,7 +379,9 @@ function statusBadgeHtml(member) {
       ? member.lastError
       : isFreePlanMember(member)
         ? 'Free 套餐，请更换可用账号'
-        : '';
+        : isQuotaExhaustedInPeriod(member)
+          ? '有效期内额度已用完'
+          : '';
     return `<span class="badge danger" title="${escapeHtml(tip)}">异常</span>`;
   }
   const expiring =
@@ -394,12 +408,14 @@ function statusBadgeHtml(member) {
 
 /** 今日排行只用使用速度，不带临期。 */
 function paceOnlyBadgeHtml(member) {
-  if (member.lastError || isFreePlanMember(member)) {
+  if (isAbnormalMember(member)) {
     const tip = member.lastError
       ? member.lastError
       : isFreePlanMember(member)
         ? 'Free 套餐，请更换可用账号'
-        : '';
+        : isQuotaExhaustedInPeriod(member)
+          ? '有效期内额度已用完'
+          : '';
     return `<span class="badge danger" title="${escapeHtml(tip)}">异常</span>`;
   }
   if (!member.lastSnapshot) return `<span class="badge muted">待同步</span>`;
@@ -687,10 +703,10 @@ function renderSummary(summary) {
       <p class="value ${expiringCount > 0 ? 'warn' : ''}">${expiringCount}</p>
       <p class="note">额度重置 ≤${EXPIRING_WITHIN_DAYS} 天</p>
     </button>
-    <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号（同步失败或 Free）">
+    <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号（同步失败、Free 或有效期内额满）">
       <p class="label">异常</p>
       <p class="value ${badCount > 0 ? 'danger' : ''}">${badCount}</p>
-      <p class="note">token / Free</p>
+      <p class="note">Token / Free / 额满</p>
     </button>
   `;
   document.getElementById('btnTodayUsage')?.addEventListener('click', openTodayRank);
