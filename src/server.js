@@ -28,6 +28,7 @@ import {
 } from './cursor-api.js';
 import {
   ensureMemberUsageEventsSynced,
+  enrichPublicMemberFromEvents,
   loadPreviousCycle,
   persistSnapshotUsageEvents,
 } from './usage-events-sync.js';
@@ -48,6 +49,8 @@ import {
 } from './session-auth.js';
 import {
   addMember,
+  aggregateUsageModelAccountsInRange,
+  aggregateUsageModelsInRange,
   deleteMember,
   findMemberByUserId,
   getAllMembersInternal,
@@ -63,6 +66,7 @@ import {
   rollbackMemberSession,
   upsertMemberBySession,
 } from './store.js';
+import { localDayStartMs } from './usage-events.js';
 import {
   archiveYesterdayPercents,
   msUntilNextLocalMidnight,
@@ -1397,6 +1401,30 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, log });
     }
 
+    if (method === 'GET' && pathname === '/api/usage/today-models') {
+      const now = Date.now();
+      const startMs = localDayStartMs(now);
+      const endMs = now + 1;
+      const model = String(url.searchParams.get('model') || '').trim();
+      if (model) {
+        const rows = await aggregateUsageModelAccountsInRange(model, startMs, endMs);
+        const memberById = new Map((await listMembers()).map((m) => [m.id, m]));
+        return sendJson(res, 200, {
+          model,
+          startMs,
+          endMs,
+          accounts: rows
+            .map((r) => ({
+              member: memberById.get(r.memberId) || { id: r.memberId },
+              tokens: r.tokens,
+            }))
+            .filter((r) => r.tokens > 0),
+        });
+      }
+      const models = await aggregateUsageModelsInRange(startMs, endMs);
+      return sendJson(res, 200, { startMs, endMs, models });
+    }
+
     if (method === 'GET' && pathname === '/api/members') {
       const named = applyPresenceDisplayNames(
         await enrichMembersWithPresence(await listMembers()),
@@ -1562,7 +1590,9 @@ const server = http.createServer(async (req, res) => {
       if (method === 'GET' && !suffix) {
         const member = await getMemberInternal(id);
         if (!member) throw new Error('成员不存在');
-        return sendJson(res, 200, { member: toPublicMember(member) });
+        return sendJson(res, 200, {
+          member: await enrichPublicMemberFromEvents(member),
+        });
       }
 
       if (method === 'GET' && suffix === '/usage-events') {

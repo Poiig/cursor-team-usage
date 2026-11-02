@@ -90,6 +90,19 @@ export function maxUsersForMember(member) {
     return limits.proPlus;
   }
   if (plan === 'pro' || /\bpro\b/.test(plan)) return limits.pro;
+  // The X Subscription：Plus / Premium / Super / Ultra（周额度）
+  const weekly =
+    member?.lastSnapshot?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+    member?.lastSnapshot?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+  if (
+    plan === 'plus' ||
+    plan.includes('premium') ||
+    plan.includes('super') ||
+    (plan.includes('ultra') && weekly) ||
+    weekly
+  ) {
+    return limits.x;
+  }
   return null;
 }
 

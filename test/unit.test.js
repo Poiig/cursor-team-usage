@@ -28,7 +28,13 @@ import {
   fetchMe,
   fetchUserRules,
   isTransientCursorError,
+  isWeeklyIncludedUsage,
+  parsePeriodUsage,
+  billingItemToEvent,
+  mergeUsageEventsById,
+  topModelsForLocalDay,
 } from '../src/cursor-api.js';
+import { formatPlanLabel, planBadgeClass } from '../public/shared.js';
 import {
   archiveYesterdayPercents,
   dailyPercentDeltas,
@@ -198,6 +204,9 @@ test('summarizeEvents 汇总花费、token 与模型', () => {
   assert.equal(s.billedDollars, 3);
   assert.equal(s.totalTokens, 1380);
   assert.equal(s.topModels[0].model, 'gpt-5');
+  assert.equal(s.topModels[0].tokens, 1370);
+  assert.equal(s.topModels[1].model, 'composer');
+  assert.equal(s.topModels[1].tokens, 10);
 });
 
 test('parseUsageSummary 读取 totalPercentUsed', () => {
@@ -220,6 +229,215 @@ test('parseUsageSummary 读取 totalPercentUsed', () => {
   const m = mergePlanMeters(s, null);
   assert.equal(m.totalPercentUsed, 8.1);
   assert.equal(m.planLimitDollars, 70);
+});
+
+test('The X Subscription 周额度：优先 period，不看 summary 的月窗 0%', () => {
+  assert.equal(isWeeklyIncludedUsage('INCLUDED_USAGE_PERIOD_WEEKLY'), true);
+  assert.equal(isWeeklyIncludedUsage('INCLUDED_USAGE_PERIOD_MONTHLY'), false);
+
+  // 张朝刚形：usage-summary 月窗 0%，GetCurrentPeriodUsage 周窗 ~3.27%
+  const summary = parseUsageSummary({
+    membershipType: 'premium',
+    billingCycleStart: '2026-11-01T00:00:00.000Z',
+    billingCycleEnd: '2026-12-01T00:00:00.000Z',
+    individualUsage: {
+      plan: {
+        used: 0,
+        limit: 4615,
+        totalPercentUsed: 0,
+        autoPercentUsed: 0,
+        apiPercentUsed: 0,
+      },
+      onDemand: { enabled: false, used: 0 },
+    },
+  });
+  const period = parsePeriodUsage({
+    billingCycleStart: '1793596236797',
+    billingCycleEnd: '1794201036797',
+    planUsage: {
+      autoPercentUsed: 3.2719393282773566,
+      apiPercentUsed: 0,
+      totalPercentUsed: 3.2719393282773566,
+    },
+    displayMessage: "You've used 3% of your included usage",
+  });
+  const legacy = mergePlanMeters(summary, period);
+  assert.equal(legacy.totalPercentUsed, 0);
+  assert.equal(legacy.billingCycleStart, '2026-11-01T00:00:00.000Z');
+
+  const weekly = mergePlanMeters(summary, period, { weekly: true });
+  assert.equal(weekly.totalPercentUsed, 3.3);
+  assert.equal(weekly.autoPercentUsed, 3.3);
+  assert.equal(weekly.apiPercentUsed, 0);
+  assert.equal(weekly.billingCycleStart, '2026-11-02T05:10:36.797Z');
+  assert.equal(weekly.billingCycleEnd, '2026-11-09T05:10:36.797Z');
+  assert.equal(weekly.includedUsagePeriod, 'INCLUDED_USAGE_PERIOD_WEEKLY');
+  assert.equal(weekly.membershipType, 'premium');
+});
+
+test('周订阅只画 Weekly usage；legacy 仍含 Grok Bot', () => {
+  const linesWeekly = buildOpenUsagePanelLines({
+    planMeters: {
+      totalPercentUsed: 3.3,
+      autoPercentUsed: 3.3,
+      apiPercentUsed: 0,
+      billingCycleEnd: '2026-11-09T05:10:36.797Z',
+      onDemand: { enabled: false },
+      includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY',
+    },
+    meters: {},
+    grokBot: {
+      usagePercent: 3.3,
+      resetsAt: '2026-11-09T05:10:36.797Z',
+      isUnified: true,
+    },
+    spend: { today: null, yesterday: null, last30: null, last30Label: 'This week' },
+    window: { resetIso: '2026-11-09T05:10:36.797Z' },
+  });
+  const progress = linesWeekly.filter((l) => l.type === 'progress');
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0].label, 'Weekly usage');
+  assert.equal(progress[0].used, 3.3);
+  assert.equal(
+    linesWeekly.some((l) => l.label === 'Other Models' || l.label === 'Grok Bot usage'),
+    false,
+  );
+  assert.equal(linesWeekly.find((l) => l.type === 'spend-row')?.last30Label, 'This week');
+
+  const linesWeekFallback = buildOpenUsagePanelLines({
+    planMeters: {
+      totalPercentUsed: 5.1,
+      includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY',
+      onDemand: { enabled: false },
+    },
+    meters: {},
+    spend: {
+      today: null,
+      yesterday: null,
+      last30: { text: '$1.05 · 109万', dollars: 1.05, tokens: 1091628, requests: 2 },
+      last30Label: 'Last 30 Days',
+    },
+    window: { resetIso: '2026-11-09T05:10:36.797Z' },
+  });
+  const spendFb = linesWeekFallback.find((l) => l.type === 'spend-row');
+  assert.equal(spendFb?.last30Label, 'Last 30 Days');
+  assert.match(String(spendFb?.last30?.text || ''), /1\.05/);
+
+  const linesLegacy = buildOpenUsagePanelLines({
+    planMeters: {
+      totalPercentUsed: 8.1,
+      autoPercentUsed: 8.9,
+      apiPercentUsed: 0,
+      onDemand: { enabled: false },
+    },
+    meters: {},
+    grokBot: { usagePercent: 1.2, resetsAt: '2026-09-22T00:00:00.000Z', isUnified: false },
+    spend: null,
+    window: { resetIso: '2026-10-10T00:00:00.000Z' },
+  });
+  assert.equal(linesLegacy.some((l) => l.label === 'Grok Bot usage'), true);
+  assert.equal(linesLegacy.some((l) => l.label === 'Other Models'), true);
+});
+
+test('CUSTOM_SUBSCRIPTION 记为 Included', () => {
+  assert.equal(usageKindLabel('USAGE_EVENT_KIND_CUSTOM_SUBSCRIPTION'), 'Included');
+  assert.equal(
+    usageCostLabel({ kind: 'USAGE_EVENT_KIND_CUSTOM_SUBSCRIPTION', chargedCents: 60 }),
+    'Included',
+  );
+});
+
+test('mergeUsageEventsById 合并多源并按指纹去掉伪 id 重复', () => {
+  const merged = mergeUsageEventsById(
+    [{ id: 'a', timestamp: 100, model: 'auto', inputTokens: 0, outputTokens: 0, totalTokens: 0 }],
+    [
+      {
+        id: 'a',
+        timestamp: 100,
+        model: 'auto',
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadTokens: 5,
+        totalTokens: 17,
+      },
+      { id: 'b', timestamp: 200, model: 'composer', inputTokens: 1, totalTokens: 1 },
+      {
+        id: '1793606077291-default',
+        timestamp: 1793606077291,
+        model: 'default',
+        inputTokens: 100,
+        totalTokens: 100,
+      },
+      {
+        id: '22f73252-801e-4b51-a098-97bab5dfa563',
+        timestamp: 1793606077291,
+        model: 'default',
+        inputTokens: 100,
+        totalTokens: 100,
+      },
+    ],
+  );
+  assert.equal(merged.length, 3);
+  assert.equal(merged.find((e) => e.model === 'default')?.id, '22f73252-801e-4b51-a098-97bab5dfa563');
+  assert.equal(merged.find((e) => e.id === 'a')?.inputTokens, 10);
+});
+
+test('topModelsForLocalDay 只取指定日', () => {
+  const rows = topModelsForLocalDay(
+    {
+      modelsByDay: {
+        '2026-11-02': [
+          { model: 'auto', tokens: 100 },
+          { model: 'composer', tokens: 20 },
+        ],
+        '2026-11-01': [{ model: 'old', tokens: 999 }],
+      },
+    },
+    '2026-11-02',
+    8,
+  );
+  assert.deepEqual(
+    rows.map((r) => r.model),
+    ['auto', 'composer'],
+  );
+  assert.equal(topModelsForLocalDay(null, '2026-11-02').length, 0);
+});
+
+test('billingItemToEvent 解析 grok.com Usage 同源明细', () => {
+  const row = billingItemToEvent({
+    billingItemId: '0805e8ce-ccae-574b-b0b8-450ea2e2fed3',
+    eventTime: '2026-11-02T08:46:21.100Z',
+    product: 'cursor',
+    usageType: 'included',
+    usage: {
+      'cache-write-text-tokens': '0',
+      'cached-prompt-text-tokens': '214784',
+      'completion-text-tokens': '814',
+      'prompt-text-tokens': '2106',
+    },
+    pricing: { currency: 'USD', contracted: '0.0000000000' },
+    displayExtras: { model: 'auto', userEmail: 'c66803567@gmail.com' },
+    hasTokenMeters: true,
+    totalTokens: '217704',
+  });
+  assert.equal(row?.id, '0805e8ce-ccae-574b-b0b8-450ea2e2fed3');
+  assert.equal(row?.model, 'auto');
+  assert.equal(row?.kindLabel, 'Included');
+  assert.equal(row?.inputTokens, 2106);
+  assert.equal(row?.outputTokens, 814);
+  assert.equal(row?.cacheReadTokens, 214784);
+  assert.equal(row?.totalTokens, 217704);
+  assert.equal(row?.timestamp, Date.parse('2026-11-02T08:46:21.100Z'));
+});
+
+test('X 订阅套餐文案与 badge', () => {
+  assert.equal(formatPlanLabel('premium'), 'Premium');
+  assert.equal(formatPlanLabel('super'), 'Super');
+  assert.equal(formatPlanLabel('plus'), 'Plus');
+  assert.equal(planBadgeClass('premium'), 'plan-pro-plus');
+  assert.equal(planBadgeClass('Premium'), 'plan-pro-plus');
+  assert.equal(planBadgeClass('super'), 'plan-ultra');
+  assert.equal(planBadgeClass('plus'), 'plan-pro');
 });
 
 test('buildOpenUsagePanelLines 含百分比与花费块', () => {
@@ -866,6 +1084,16 @@ test('切换报表汇总与 Total usage 快照', async () => {
   assert.equal(maxUsersForMember({ planName: 'Pro' }), 3);
   assert.equal(maxUsersForMember({ planName: 'Pro+' }), 5);
   assert.equal(maxUsersForMember({ planName: 'Free' }), null);
+  assert.equal(maxUsersForMember({ planName: 'Premium' }), 3);
+  assert.equal(maxUsersForMember({ membershipType: 'premium' }), 3);
+  assert.equal(maxUsersForMember({ planName: 'Plus' }), 3);
+  assert.equal(
+    maxUsersForMember({
+      planName: 'Ultra',
+      lastSnapshot: { plan: { includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY' } },
+    }),
+    3,
+  );
   assert.deepEqual(
     resolvePresenceIdentity({
       username: '',
@@ -1235,6 +1463,16 @@ test('额度日历史：同步写入今天、凌晨归档昨天、日差与对�
   assert.deepEqual(dailyPercentDeltas(hist, 'total'), [
     { date: '2026-10-11', value: 4.9 },
   ]);
+
+  // 换周期 / 新开通：累计%回落，不展示负差额；柱图用当日累计
+  const resetHist = [
+    { date: '2026-10-31', total: 52.5, auto: 50, api: 0 },
+    { date: '2026-11-01', total: 7.2, auto: 7, api: 0 },
+  ];
+  assert.equal(deltaVsYesterday(resetHist, 'total', 7.2, Date.parse('2026-11-01T12:00:00+08:00')), null);
+  assert.deepEqual(dailyPercentDeltas(resetHist, 'total'), [
+    { date: '2026-11-01', value: 7.2 },
+  ]);
 });
 
 test('usage events 增量窗口与过期判断', () => {
@@ -1362,10 +1600,10 @@ test('sqlite usage_events upsert 去重、model 筛选与分页', async () => {
     assert.equal(grok.total, 2);
     assert.equal(grok.events.every((e) => e.model === 'grok'), true);
 
-    // 凑满超过一页，验证 hasNext。
+    // 凑满超过一页，验证 hasNext（tokens 错开，避免指纹去重把同模型同刻合成一条）。
     const more = [];
     for (let i = 0; i < 12; i++) {
-      more.push(mk(`x${i}`, 'default', 4, 1));
+      more.push(mk(`x${i}`, 'default', 4 + i / 60, 10 + i));
     }
     await store.upsertUsageEvents(memberId, more);
     const paged = await store.listUsageEvents(memberId, {
@@ -1577,6 +1815,17 @@ test('上个账单周期：窗口、收尾使用率留存与按模型汇总', as
   assert.equal(new Date(win.startMs).toISOString(), '2026-09-18T08:43:00.000Z');
   assert.equal(new Date(win.endMs).toISOString(), '2026-10-18T08:43:00.000Z');
   assert.equal(previousCycleWindow({}), null);
+
+  const weeklySnap = {
+    plan: { includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY' },
+    window: {
+      startIso: '2026-11-02T05:10:36.797Z',
+      endIso: '2026-11-09T05:10:36.797Z',
+    },
+  };
+  const weeklyWin = previousCycleWindow(weeklySnap);
+  assert.equal(new Date(weeklyWin.startMs).toISOString(), '2026-10-26T05:10:36.797Z');
+  assert.equal(new Date(weeklyWin.endMs).toISOString(), '2026-11-02T05:10:36.797Z');
 
   const prev = {
     window: { startIso: '2026-09-18T08:43:00.000Z', endIso: '2026-10-18T08:43:00.000Z' },

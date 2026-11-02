@@ -5,6 +5,7 @@
  */
 
 import { jwtFromCookie, sessionFromCookie } from './auth.js';
+import { isSyntheticEventId as isSyntheticEventIdFromUsage } from './usage-events.js';
 
 const USER_AGENT = 'cursor-team-usage/0.1';
 const PAGE_SIZE = 100;
@@ -217,6 +218,19 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** 毫秒时间戳 → ISO；非法则 null。 */
+function msToIso(v) {
+  const n = num(v);
+  if (n == null || n <= 0) return null;
+  const d = new Date(n);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/** The X Subscription：included 额度按周重置。 */
+export function isWeeklyIncludedUsage(period) {
+  return String(period || '') === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+}
+
 /**
  * 账单周期重置日：从周期起始日加一个月，并夹紧到目标月天数。
  * @param {string | undefined} startOfCycleIso
@@ -310,9 +324,17 @@ export function usageKindLabel(kind) {
   const k = String(kind || '');
   if (!k) return '—';
   if (/FREE/i.test(k)) return 'Free';
-  if (/INCLUDED/i.test(k)) return 'Included';
+  // The X Subscription 周池内调用
+  if (/INCLUDED|CUSTOM_SUBSCRIPTION/i.test(k)) return 'Included';
   if (/USAGE_BASED|ON_?DEMAND|ERRORED/i.test(k)) return 'On-Demand';
   return k.replace(/^USAGE_EVENT_KIND_/, '').replaceAll('_', ' ');
+}
+
+/** 官方事件 id：新字段 usageEventId，旧字段 id / eventId。 */
+function eventIdFromRaw(e) {
+  const raw = e?.usageEventId ?? e?.id ?? e?.eventId;
+  if (raw != null && String(raw) !== '' && String(raw) !== 'null') return String(raw);
+  return `${e?.timestamp ?? 0}-${e?.model ?? e?.modelIntent ?? 'unknown'}`;
 }
 
 /**
@@ -440,12 +462,9 @@ export async function fetchDashboardUsage(session, startMs, endMs) {
     const batch = data.usageEventsDisplay || data.usageEvents || data.events || [];
     let added = 0;
     for (const e of batch) {
-      const rawId = e?.id ?? e?.eventId;
-      if (rawId != null) {
-        const key = String(rawId);
-        if (seenIds.has(key)) continue;
-        seenIds.add(key);
-      }
+      const key = eventIdFromRaw(e);
+      if (seenIds.has(key)) continue;
+      seenIds.add(key);
       const tu = e.tokenUsage || null;
       const inputTokens = tu ? num(tu.inputTokens) ?? num(tu.input_tokens) ?? 0 : 0;
       const outputTokens = tu ? num(tu.outputTokens) ?? num(tu.output_tokens) ?? 0 : 0;
@@ -463,7 +482,7 @@ export async function fetchDashboardUsage(session, startMs, endMs) {
         : 0;
       const kind = e.kind || e.usageEventKind || '';
       const row = {
-        id: String(rawId ?? `${e.timestamp}-${e.model ?? 'unknown'}`),
+        id: key,
         timestamp: e.timestamp ?? e.timestampEpoch ?? 0,
         model: e.model || e.modelIntent || 'unknown',
         kind,
@@ -516,14 +535,24 @@ export function summarizeEvents(events) {
     outputTokens += e.outputTokens || 0;
     cacheReadTokens += e.cacheReadTokens || 0;
     cacheWriteTokens += e.cacheWriteTokens || 0;
-    byModel[e.model] = (byModel[e.model] || 0) + 1;
+    const modelTokens =
+      (e.inputTokens || 0) +
+      (e.outputTokens || 0) +
+      (e.cacheReadTokens || 0) +
+      (e.cacheWriteTokens || 0) ||
+      Number(e.totalTokens) ||
+      0;
+    if (modelTokens > 0) {
+      const model = String(e.model || 'unknown');
+      byModel[model] = (byModel[model] || 0) + modelTokens;
+    }
   }
 
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   const topModels = Object.entries(byModel)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
-    .map(([model, count]) => ({ model, count }));
+    .map(([model, tokens]) => ({ model, tokens }));
 
   return {
     requestCount: events.length,
@@ -649,19 +678,41 @@ export function parsePeriodUsage(data) {
 
 /**
  * 合并 usage-summary 与 Connect RPC，得到看板主进度条用的百分比。
+ * 周订阅（The X Subscription）优先 period：usage-summary 常仍给月窗与 0%。
  * @param {ReturnType<typeof parseUsageSummary>} summary
  * @param {ReturnType<typeof parsePeriodUsage>} period
+ * @param {{ weekly?: boolean, includedUsageResetsAt?: string | null }} [opts]
  */
-export function mergePlanMeters(summary, period) {
-  const totalPercentUsed = summary?.totalPercentUsed ?? period?.totalPercentUsed ?? null;
-  const autoPercentUsed = summary?.autoPercentUsed ?? period?.autoPercentUsed ?? null;
-  const apiPercentUsed = summary?.apiPercentUsed ?? period?.apiPercentUsed ?? null;
+export function mergePlanMeters(summary, period, opts = {}) {
+  const weekly = opts.weekly === true;
+  const pick = (sVal, pVal) => (weekly ? (pVal ?? sVal) : (sVal ?? pVal));
+
+  const totalPercentUsed = pick(summary?.totalPercentUsed, period?.totalPercentUsed) ?? null;
+  const autoPercentUsed = pick(summary?.autoPercentUsed, period?.autoPercentUsed) ?? null;
+  const apiPercentUsed = pick(summary?.apiPercentUsed, period?.apiPercentUsed) ?? null;
   const planUsedCents = summary?.planUsedCents ?? period?.planUsedCents ?? null;
   const planLimitCents = summary?.planLimitCents ?? period?.planLimitCents ?? null;
 
   let planSpendPercent = null;
   if (planLimitCents != null && planLimitCents > 0 && planUsedCents != null) {
     planSpendPercent = Math.min(100, Math.round((planUsedCents / planLimitCents) * 1000) / 10);
+  }
+
+  let billingCycleStart = summary?.billingCycleStart;
+  let billingCycleEnd = summary?.billingCycleEnd;
+  if (weekly) {
+    const periodStart = msToIso(period?.billingCycleStartMs);
+    const periodEnd = msToIso(period?.billingCycleEndMs);
+    if (periodStart && periodEnd) {
+      billingCycleStart = periodStart;
+      billingCycleEnd = periodEnd;
+    } else if (opts.includedUsageResetsAt) {
+      const endMs = Date.parse(opts.includedUsageResetsAt);
+      if (Number.isFinite(endMs)) {
+        billingCycleEnd = opts.includedUsageResetsAt;
+        billingCycleStart = new Date(endMs - 7 * 86400000).toISOString();
+      }
+    }
   }
 
   return {
@@ -674,10 +725,11 @@ export function mergePlanMeters(summary, period) {
     planLimitDollars: planLimitCents != null ? Math.round((planLimitCents / 100) * 100) / 100 : null,
     planSpendPercent,
     displayMessage: summary?.displayMessage || period?.displayMessage || null,
-    billingCycleStart: summary?.billingCycleStart,
-    billingCycleEnd: summary?.billingCycleEnd,
+    billingCycleStart,
+    billingCycleEnd,
     onDemand: summary?.onDemand || null,
     planBreakdown: summary?.planBreakdown || null,
+    includedUsagePeriod: weekly ? 'INCLUDED_USAGE_PERIOD_WEEKLY' : null,
   };
 }
 
@@ -725,14 +777,18 @@ function localDayBounds(nowMs = Date.now()) {
 export function topModelsByTokens(events, dayKey, limit = 8) {
   /** @type {Record<string, number>} */
   const byModel = {};
+  const filterDay = dayKey ? String(dayKey) : '';
   for (const e of events) {
     const ts = eventTimestampMs(e.timestamp);
-    if (!ts || localDayKey(ts) !== dayKey) continue;
+    if (!ts) continue;
+    if (filterDay && localDayKey(ts) !== filterDay) continue;
     const tokens =
       (e.inputTokens || 0) +
       (e.outputTokens || 0) +
       (e.cacheReadTokens || 0) +
-      (e.cacheWriteTokens || 0);
+      (e.cacheWriteTokens || 0) ||
+      Number(e.totalTokens) ||
+      0;
     if (tokens <= 0) continue;
     const model = String(e.model || 'unknown');
     byModel[model] = (byModel[model] || 0) + tokens;
@@ -855,6 +911,9 @@ export async function fetchGrokBotUsage(session) {
       usagePercent: Math.round(usagePercent * 10) / 10,
       resetsAt: typeof data.nextResetTimestampUtc === 'string' ? data.nextResetTimestampUtc : null,
       periodStart: typeof data.currentPeriodStart === 'string' ? data.currentPeriodStart : null,
+      // The X Subscription 与 Cursor 周池合一，勿再单独画 Grok Bot 行
+      isUnified: data?.isUnified === true,
+      cursorPlanName: data?.cursorPlanName ? String(data.cursorPlanName) : null,
     };
   } catch {
     return null;
@@ -887,6 +946,8 @@ export async function fetchPlanInfo(session) {
       planName: info.planName ? String(info.planName) : null,
       includedAmountCents: num(info.includedAmountCents),
       price: info.price ? String(info.price) : null,
+      includedUsagePeriod: info.includedUsagePeriod ? String(info.includedUsagePeriod) : null,
+      includedUsageResetsAt: msToIso(info.includedUsageResetsAt),
     };
   } catch {
     return null;
@@ -926,8 +987,8 @@ export async function fetchUserRules(cookieValue) {
  *   planMeters: ReturnType<typeof mergePlanMeters>,
  *   meters: Record<string, number | null | undefined>,
  *   quota?: { used: number, limit: number | null } | null,
- *   grokBot?: { usagePercent: number, resetsAt?: string | null } | null,
- *   spend?: ReturnType<typeof aggregateSpendPeriods> | null,
+ *   grokBot?: { usagePercent: number, resetsAt?: string | null, isUnified?: boolean } | null,
+ *   spend?: (ReturnType<typeof aggregateSpendPeriods> & { last30Label?: string }) | null,
  *   window?: { resetIso?: string },
  * }} input
  */
@@ -936,6 +997,7 @@ export function buildOpenUsagePanelLines(input) {
   const lines = [];
   const pm = input.planMeters || {};
   const resetsAt = input.window?.resetIso || pm.billingCycleEnd || null;
+  const weekly = pm.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
 
   const pushPercent = (label, used) => {
     if (used == null || !Number.isFinite(used)) return;
@@ -949,33 +1011,39 @@ export function buildOpenUsagePanelLines(input) {
     });
   };
 
-  // 展示顺序：Total → Cursor Models → Other Models → Grok → On-demand → spend tiles
-  if (pm.totalPercentUsed != null) {
-    pushPercent('Total usage', pm.totalPercentUsed);
-  } else if (input.quota?.limit != null && input.quota.limit > 0) {
-    lines.push({
-      type: 'progress',
-      label: 'Total usage',
-      used: input.quota.used,
-      limit: input.quota.limit,
-      format: 'count',
-      suffix: 'requests',
-      resetsAt,
-    });
-  }
+  // The X Subscription：单一周池，只画 Weekly usage
+  if (weekly) {
+    pushPercent('Weekly usage', pm.totalPercentUsed);
+  } else {
+    // 展示顺序：Total → Cursor Models → Other Models → Grok → On-demand → spend tiles
+    if (pm.totalPercentUsed != null) {
+      pushPercent('Total usage', pm.totalPercentUsed);
+    } else if (input.quota?.limit != null && input.quota.limit > 0) {
+      lines.push({
+        type: 'progress',
+        label: 'Total usage',
+        used: input.quota.used,
+        limit: input.quota.limit,
+        format: 'count',
+        suffix: 'requests',
+        resetsAt,
+      });
+    }
 
-  pushPercent('Cursor Models', pm.autoPercentUsed);
-  pushPercent('Other Models', pm.apiPercentUsed);
+    pushPercent('Cursor Models', pm.autoPercentUsed);
+    pushPercent('Other Models', pm.apiPercentUsed);
 
-  if (input.grokBot?.usagePercent != null) {
-    lines.push({
-      type: 'progress',
-      label: 'Grok Bot usage',
-      used: input.grokBot.usagePercent,
-      limit: 100,
-      format: 'percent',
-      resetsAt: input.grokBot.resetsAt || null,
-    });
+    // 统一周池账号的 Grok Bot 与主用量同池，不再单独一行
+    if (input.grokBot?.usagePercent != null && !input.grokBot.isUnified) {
+      lines.push({
+        type: 'progress',
+        label: 'Grok Bot usage',
+        used: input.grokBot.usagePercent,
+        limit: 100,
+        format: 'percent',
+        resetsAt: input.grokBot.resetsAt || null,
+      });
+    }
   }
 
   const od = pm.onDemand;
@@ -1015,9 +1083,7 @@ export function buildOpenUsagePanelLines(input) {
     } else {
       tokenLabel = String(Math.round(tokens));
     }
-    const parts = [`$${Number(row.dollars || 0).toFixed(2)}`];
-    if (requests > 0) parts.push(`${requests}次`);
-    parts.push(tokenLabel);
+    const parts = [`$${Number(row.dollars || 0).toFixed(2)}`, tokenLabel];
     return {
       text: parts.join(' · '),
       dollars: row.dollars,
@@ -1032,10 +1098,398 @@ export function buildOpenUsagePanelLines(input) {
     today: fmtCell(input.spend?.today),
     yesterday: fmtCell(input.spend?.yesterday),
     last30: fmtCell(input.spend?.last30),
+    last30Label: input.spend?.last30Label || (weekly ? 'This week' : 'Last 30 Days'),
     estimated: true,
   });
 
   return lines;
+}
+
+/**
+ * Connect RPC 聚合用量（按模型 token / 花费），事件列表为空时补周期 token。
+ * @param {{ cookieValue: string }} session
+ * @param {number} startMs
+ * @param {number} endMs
+ */
+export async function fetchAggregatedUsageEvents(session, startMs, endMs) {
+  const jwt = jwtFromCookie(session.cookieValue);
+  if (!jwt) return null;
+  try {
+    const data = await fetchJson(
+      'https://api2.cursor.sh/aiserver.v1.DashboardService/GetAggregatedUsageEvents',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          'Content-Type': 'application/json',
+          'Connect-Protocol-Version': '1',
+          'User-Agent': USER_AGENT,
+        },
+        body: JSON.stringify({
+          startDate: String(startMs),
+          endDate: String(endMs),
+        }),
+      },
+    );
+    const aggregations = Array.isArray(data?.aggregations) ? data.aggregations : [];
+    if (!aggregations.length && num(data?.totalInputTokens) == null) return null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    /** @type {Array<{ model: string, tokens: number, costCents: number }>} */
+    const topModels = [];
+    for (const row of aggregations) {
+      const input = num(row.inputTokens) ?? 0;
+      const output = num(row.outputTokens) ?? 0;
+      const cacheRead = num(row.cacheReadTokens) ?? 0;
+      const costCents = num(row.totalCents) ?? 0;
+      inputTokens += input;
+      outputTokens += output;
+      cacheReadTokens += cacheRead;
+      topModels.push({
+        model: String(row.modelIntent || row.model || 'unknown'),
+        tokens: input + output + cacheRead,
+        costCents,
+      });
+    }
+    if (!aggregations.length) {
+      inputTokens = num(data.totalInputTokens) ?? 0;
+      outputTokens = num(data.totalOutputTokens) ?? 0;
+      cacheReadTokens = num(data.totalCacheReadTokens) ?? 0;
+    }
+    const totalTokens = inputTokens + outputTokens + cacheReadTokens;
+    const billedCents = num(data.totalCostCents) ?? topModels.reduce((s, m) => s + m.costCents, 0);
+    topModels.sort((a, b) => b.tokens - a.tokens);
+    return {
+      requestCount: aggregations.length,
+      billedDollars: Math.round((billedCents / 100) * 100) / 100,
+      tokenValueDollars: Math.round((billedCents / 100) * 100) / 100,
+      totalTokens,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens: 0,
+      topModels: topModels.slice(0, 8).map(({ model, tokens }) => ({ model, tokens })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The X Subscription：周池状态（grok.com Usage 同源，走 cursor.com v2）。
+ * @param {{ cookieValue: string }} session
+ */
+export async function fetchV2UsageStatus(session) {
+  const data = await fetchJson(
+    'https://cursor.com/api/dashboard/v2/usage-status?scope=user',
+    {
+      method: 'GET',
+      headers: {
+        ...BROWSER_HEADERS,
+        Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+      },
+    },
+  );
+  const weekly = data?.weeklyIncludedUsage || null;
+  if (!weekly) return null;
+  const usedCents = num(weekly.usedCents) ?? 0;
+  const budgetCents = num(weekly.budgetCents) ?? 0;
+  const percent =
+    budgetCents > 0 ? Math.round((usedCents / budgetCents) * 1000) / 10 : null;
+  return {
+    usedCents,
+    budgetCents,
+    percent,
+    periodStart: typeof weekly.periodStart === 'string' ? weekly.periodStart : null,
+    resetsAt: typeof weekly.resetsAt === 'string' ? weekly.resetsAt : null,
+    additionalUsageOff: Boolean(data?.monthlyUsage?.additionalUsageOff),
+  };
+}
+
+/**
+ * v2 billing item → 看板事件行（含 token 明细）。
+ * @param {any} item
+ */
+export function billingItemToEvent(item) {
+  if (!item || typeof item !== 'object') return null;
+  const usage = item.usage || {};
+  const inputTokens = num(usage['prompt-text-tokens']) ?? 0;
+  const outputTokens = num(usage['completion-text-tokens']) ?? 0;
+  const cacheReadTokens = num(usage['cached-prompt-text-tokens']) ?? 0;
+  const cacheWriteTokens = num(usage['cache-write-text-tokens']) ?? 0;
+  const totalFromFields = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  const totalTokens = num(item.totalTokens) ?? totalFromFields;
+  const usageType = String(item.usageType || '').toLowerCase();
+  const kind =
+    usageType === 'included'
+      ? 'USAGE_EVENT_KIND_INCLUDED'
+      : usageType === 'credit' || usageType === 'on_demand' || usageType === 'ondemand'
+        ? 'USAGE_EVENT_KIND_USAGE_BASED'
+        : `USAGE_EVENT_KIND_${String(item.usageType || 'CUSTOM').toUpperCase()}`;
+  const contracted = num(item?.pricing?.contracted) ?? 0;
+  const chargedCents = contracted > 0 ? Math.round(contracted * 10000) / 100 : 0;
+  const model = String(item?.displayExtras?.model || item?.model || 'unknown');
+  const ts = Date.parse(item.eventTime || '');
+  const row = {
+    id: String(item.billingItemId || `${item.eventTime}-${model}`),
+    timestamp: Number.isFinite(ts) ? ts : 0,
+    model,
+    kind,
+    kindLabel: usageKindLabel(kind),
+    isTokenBasedCall: item.hasTokenMeters !== false,
+    chargedCents: chargedCents > 0 ? chargedCents : 0,
+    tokenCents: null,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    product: item.product ? String(item.product) : null,
+  };
+  row.totalTokens = totalTokens || eventTotalTokens(row);
+  row.costLabel = usageCostLabel(row);
+  return row;
+}
+
+/**
+ * The X 账单明细（grok.com Usage events 同源）。
+ * @param {{ cookieValue: string }} session
+ * @param {string} startIso
+ * @param {string} endIso
+ * @param {{ pageSize?: number, maxPages?: number }} [opts]
+ */
+export async function fetchV2BillingItems(session, startIso, endIso, opts = {}) {
+  const pageSize = Math.min(100, Math.max(1, Number(opts.pageSize) || 100));
+  const maxPages = Math.min(50, Math.max(1, Number(opts.maxPages) || MAX_PAGES));
+  /** @type {ReturnType<typeof billingItemToEvent>[]} */
+  const events = [];
+  let cursor = '';
+  for (let page = 0; page < maxPages; page++) {
+    const qs = new URLSearchParams({
+      scope: 'user',
+      startTime: startIso,
+      endTime: endIso,
+      pageSize: String(pageSize),
+    });
+    if (cursor) qs.set('cursor', cursor);
+    const data = await fetchJson(
+      `https://cursor.com/api/dashboard/v2/query-billing-items?${qs}`,
+      {
+        method: 'GET',
+        headers: {
+          ...BROWSER_HEADERS,
+          Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+        },
+      },
+    );
+    const batch = Array.isArray(data?.data) ? data.data : [];
+    for (const item of batch) {
+      const row = billingItemToEvent(item);
+      if (row) events.push(row);
+    }
+    if (!data?.pagination?.hasMore || !data?.pagination?.nextCursor) break;
+    cursor = String(data.pagination.nextCursor);
+    if (!batch.length) break;
+  }
+  return events;
+}
+
+/**
+ * 按日 / 按模型 token（Tokens per day 图同源）。
+ * @param {{ cookieValue: string }} session
+ * @param {string} startIso
+ * @param {string} endIso
+ * @param {string[]} [groupBy]
+ */
+export async function fetchV2DailyUsage(session, startIso, endIso, groupBy = ['model']) {
+  const data = await fetchJson('https://cursor.com/api/dashboard/v2/query-daily-usage', {
+    method: 'POST',
+    headers: {
+      ...BROWSER_HEADERS,
+      'Content-Type': 'application/json',
+      Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+    },
+    body: JSON.stringify({
+      scope: 'user',
+      startTime: startIso,
+      endTime: endIso,
+      groupBy,
+    }),
+  });
+  const series = Array.isArray(data?.series) ? data.series : [];
+  /** @type {Array<{ model: string, tokens: number }>} */
+  const topModels = series
+    .map((s) => ({
+      model: String(s?.dimensions?.model || 'unknown'),
+      tokens: num(s?.totalTokens) ?? 0,
+    }))
+    .filter((m) => m.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens);
+  /** @type {Map<string, { date: string, tokens: number, dollars: number, requests: number }>} */
+  const dailyMap = new Map();
+  /** @type {Map<string, Map<string, number>>} */
+  const modelsByDayMap = new Map();
+  for (const s of series) {
+    const model = String(s?.dimensions?.model || 'unknown');
+    for (const p of s?.points || []) {
+      const day = String(p.dayStartTime || '').slice(0, 10);
+      if (!day) continue;
+      const tokens = num(p.tokens) ?? 0;
+      const prev = dailyMap.get(day) || { date: day, tokens: 0, dollars: 0, requests: 0 };
+      prev.tokens += tokens;
+      dailyMap.set(day, prev);
+      if (tokens > 0) {
+        const dayModels = modelsByDayMap.get(day) || new Map();
+        dayModels.set(model, (dayModels.get(model) || 0) + tokens);
+        modelsByDayMap.set(day, dayModels);
+      }
+    }
+  }
+  /** @type {Record<string, Array<{ model: string, tokens: number }>>} */
+  const modelsByDay = {};
+  for (const [day, byModel] of modelsByDayMap) {
+    modelsByDay[day] = [...byModel.entries()]
+      .map(([model, tokens]) => ({ model, tokens }))
+      .sort((a, b) => b.tokens - a.tokens);
+  }
+  return {
+    totalTokens: num(data?.totalTokens) ?? topModels.reduce((s, m) => s + m.tokens, 0),
+    totalIncludedTokens: num(data?.totalIncludedTokens) ?? null,
+    topModels: topModels.slice(0, 8),
+    daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    modelsByDay,
+  };
+}
+
+/**
+ * 从 v2 日用量里取某一本地日的模型 tokens 排行。
+ * @param {{ modelsByDay?: Record<string, Array<{ model: string, tokens: number }>> } | null | undefined} dailyUsage
+ * @param {string} dayKey
+ * @param {number} [limit]
+ */
+export function topModelsForLocalDay(dailyUsage, dayKey, limit = 8) {
+  const rows = dailyUsage?.modelsByDay?.[String(dayKey || '')] || [];
+  if (!rows.length) return [];
+  return limit > 0 ? rows.slice(0, limit) : rows;
+}
+
+/** @param {unknown} id */
+export function isSyntheticEventId(id) {
+  return isSyntheticEventIdFromUsage(id);
+}
+
+/**
+ * 同笔调用指纹（多面板 / legacy+v2 去重用）。
+ * @param {any} e
+ */
+export function eventFingerprint(e) {
+  const ts = eventTimestampMs(e?.timestamp);
+  const model = String(e?.model || 'unknown');
+  const tokens =
+    (e?.inputTokens || 0) +
+      (e?.outputTokens || 0) +
+      (e?.cacheReadTokens || 0) +
+      (e?.cacheWriteTokens || 0) ||
+    Number(e?.totalTokens) ||
+    0;
+  return `${ts}|${model}|${Math.round(tokens)}`;
+}
+
+/**
+ * 多源事件按 id 合并，再按指纹去重（优先保留真实 UUID、token 更全的行）。
+ * @param {...Array<any | null | undefined>} lists
+ */
+export function mergeUsageEventsById(...lists) {
+  /** @type {Map<string, any>} */
+  const byId = new Map();
+  const score = (e) =>
+    (e?.inputTokens || 0) +
+    (e?.outputTokens || 0) +
+    (e?.cacheReadTokens || 0) +
+    (e?.cacheWriteTokens || 0) +
+    (e?.totalTokens || 0);
+  const prefer = (a, b) => {
+    const aSyn = isSyntheticEventId(a?.id);
+    const bSyn = isSyntheticEventId(b?.id);
+    if (aSyn !== bSyn) return aSyn ? b : a;
+    return score(a) >= score(b) ? a : b;
+  };
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const e of list) {
+      if (!e) continue;
+      const id = String(e.id || '');
+      if (!id) continue;
+      const prev = byId.get(id);
+      byId.set(id, prev ? prefer(prev, e) : e);
+    }
+  }
+  /** @type {Map<string, any>} */
+  const byFp = new Map();
+  for (const e of byId.values()) {
+    const fp = eventFingerprint(e);
+    const prev = byFp.get(fp);
+    byFp.set(fp, prev ? prefer(prev, e) : e);
+  }
+  return [...byFp.values()].sort(
+    (a, b) => eventTimestampMs(b.timestamp) - eventTimestampMs(a.timestamp),
+  );
+}
+
+/**
+ * legacy 明细 + v2 billing-items 合并拉取，避免周池/部分账号漏事件。
+ * @param {{ cookieValue: string }} session
+ * @param {number} startMs
+ * @param {number} endMs
+ */
+export async function fetchUsageEventsMerged(session, startMs, endMs) {
+  const startIso = new Date(startMs).toISOString();
+  const endIso = new Date(Math.max(endMs, startMs)).toISOString();
+  /** @type {Error | null} */
+  let legacyErr = null;
+  /** @type {Error | null} */
+  let billingErr = null;
+  const [legacy, billing] = await Promise.all([
+    fetchDashboardUsage(session, startMs, endMs).catch((e) => {
+      legacyErr = e instanceof Error ? e : new Error(String(e));
+      return [];
+    }),
+    fetchV2BillingItems(session, startIso, endIso, { maxPages: MAX_PAGES }).catch((e) => {
+      billingErr = e instanceof Error ? e : new Error(String(e));
+      return [];
+    }),
+  ]);
+  const merged = mergeUsageEventsById(legacy, billing);
+  if (!merged.length && (legacyErr || billingErr)) {
+    throw legacyErr || billingErr;
+  }
+  return merged;
+}
+
+/**
+ * 事件列表 → spend 单元格（本周 / 周期汇总）。
+ * @param {Array<{ chargedCents?: number | null, tokenCents?: number | null, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
+ */
+export function spendCellFromEvents(events) {
+  if (!Array.isArray(events) || !events.length) return null;
+  let dollars = 0;
+  let tokens = 0;
+  for (const e of events) {
+    const t =
+      (e.inputTokens || 0) +
+      (e.outputTokens || 0) +
+      (e.cacheReadTokens || 0) +
+      (e.cacheWriteTokens || 0);
+    tokens += t;
+    if (e.chargedCents != null && e.chargedCents > 0) dollars += e.chargedCents / 100;
+    else if (e.tokenCents != null && e.tokenCents > 0) dollars += e.tokenCents / 100;
+  }
+  return {
+    dollars: Math.round(dollars * 100) / 100,
+    tokens,
+    requests: events.length,
+    estimated: true,
+  };
 }
 
 /**
@@ -1086,9 +1540,8 @@ export async function fetchMemberUsageEvents(cookieValue, opts = {}) {
         0
       : 0;
     const kind = e.kind || e.usageEventKind || '';
-    const rawId = e?.id ?? e?.eventId;
     const row = {
-      id: String(rawId ?? `${e.timestamp}-${e.model ?? 'unknown'}`),
+      id: eventIdFromRaw(e),
       timestamp: e.timestamp ?? e.timestampEpoch ?? 0,
       model: e.model || e.modelIntent || 'unknown',
       kind,
@@ -1172,7 +1625,27 @@ export async function fetchMemberSnapshot(cookieValue) {
       fetchPlanInfo(session),
     ]);
 
-  const planMeters = mergePlanMeters(usageSummary, periodUsage);
+  const weekly = isWeeklyIncludedUsage(planInfo?.includedUsagePeriod);
+  let planMeters = mergePlanMeters(usageSummary, periodUsage, {
+    weekly,
+    includedUsageResetsAt: planInfo?.includedUsageResetsAt,
+  });
+
+  // grok.com Usage 同源：周池 used/budget 比 period 百分比更准
+  const v2Status = weekly
+    ? await optional('周池状态', fetchV2UsageStatus(session), null)
+    : null;
+  if (weekly && v2Status?.percent != null) {
+    planMeters = {
+      ...planMeters,
+      totalPercentUsed: v2Status.percent,
+      autoPercentUsed: v2Status.percent,
+      billingCycleStart: v2Status.periodStart || planMeters.billingCycleStart,
+      billingCycleEnd: v2Status.resetsAt || planMeters.billingCycleEnd,
+      weeklyUsedCents: v2Status.usedCents,
+      weeklyBudgetCents: v2Status.budgetCents,
+    };
+  }
 
   let window;
   if (planMeters.billingCycleStart && planMeters.billingCycleEnd) {
@@ -1191,15 +1664,16 @@ export async function fetchMemberSnapshot(cookieValue) {
     );
   }
 
-  // 一次拉齐：账单周期 ∪ 近 30 本地日，供周期汇总与 Today/Yesterday/Last30。
   const { last30Start } = localDayBounds();
   const fetchStart = Math.min(window.start, last30Start);
   const fetchEnd = Math.max(Date.now(), Math.min(window.end, Date.now()));
+  /** @type {any[]} */
   const allEvents = await optional(
     '用量事件',
-    fetchDashboardUsage(session, fetchStart, fetchEnd),
+    fetchUsageEventsMerged(session, fetchStart, fetchEnd),
     [],
   );
+
   const authFailures = warnings.filter((warning) =>
     /not_authenticated|HTTP 40[13]/i.test(warning),
   );
@@ -1215,8 +1689,71 @@ export async function fetchMemberSnapshot(cookieValue) {
     const ts = eventTimestampMs(e.timestamp);
     return ts === 0 || (ts >= window.start && ts <= window.end);
   });
-  const usage = summarizeEvents(cycleEvents);
+  let usage = summarizeEvents(cycleEvents);
+
+  const dailyStartIso = new Date(fetchStart).toISOString();
+  const dailyEndIso = new Date(fetchEnd + 86400000).toISOString();
+  const dailyUsage = await optional(
+    '日用量',
+    fetchV2DailyUsage(session, dailyStartIso, dailyEndIso, ['model']),
+    null,
+  );
+  const hasTokenTopModels =
+    Array.isArray(usage.topModels) &&
+    usage.topModels.some((m) => Number(m?.tokens) > 0);
+  if (dailyUsage?.topModels?.length && (!hasTokenTopModels || weekly)) {
+    usage = {
+      ...usage,
+      topModels: dailyUsage.topModels.map((m) => ({ model: m.model, tokens: m.tokens })),
+      totalTokens: usage.totalTokens || dailyUsage.totalTokens || 0,
+    };
+  }
+  if (usage.totalTokens === 0 && usage.requestCount === 0) {
+    const agg = await optional(
+      '聚合用量',
+      fetchAggregatedUsageEvents(session, window.start, Math.min(window.end, Date.now())),
+      null,
+    );
+    if (agg && (agg.totalTokens > 0 || agg.requestCount > 0)) usage = agg;
+  }
+
   const spend = aggregateSpendPeriods(allEvents);
+  if (dailyUsage?.daily?.length) {
+    // 用 v2 日 token 补 spend.daily 里缺 token 的日期
+    const byDate = new Map((spend.daily || []).map((d) => [d.date, { ...d }]));
+    for (const d of dailyUsage.daily) {
+      const prev = byDate.get(d.date) || { date: d.date, dollars: 0, tokens: 0, requests: 0 };
+      if (!prev.tokens && d.tokens) prev.tokens = d.tokens;
+      byDate.set(d.date, prev);
+    }
+    spend.daily = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  }
+  const { todayKey } = localDayBounds();
+  // 今日排行只认「今天」；禁止用整窗 / 周期 topModels 冒充今日。
+  let todayModels = topModelsByTokens(allEvents, todayKey, 8);
+  if (!todayModels.length) {
+    todayModels = topModelsForLocalDay(dailyUsage, todayKey, 8);
+  }
+  spend.todayModels = todayModels;
+  spend.todayModelsFallback = false;
+
+  if (weekly) {
+    const weekCell = spendCellFromEvents(cycleEvents);
+    if (weekCell) {
+      spend.last30 = weekCell;
+      spend.last30Label = 'This week';
+    } else if (usage.totalTokens > 0) {
+      spend.last30 = {
+        dollars: usage.billedDollars || 0,
+        tokens: usage.totalTokens,
+        requests: usage.requestCount || cycleEvents.length || 0,
+        estimated: true,
+      };
+      spend.last30Label = 'This week';
+    } else {
+      spend.last30Label = 'Last 30 Days';
+    }
+  }
 
   const quotaPercent =
     quota?.limit != null && quota.limit > 0
@@ -1252,6 +1789,7 @@ export async function fetchMemberSnapshot(cookieValue) {
       membershipType: planMeters.membershipType || plan.membershipType,
       planName: planInfo?.planName || null,
       price: planInfo?.price || null,
+      includedUsagePeriod: planInfo?.includedUsagePeriod || null,
     },
     quota,
     hardLimit,
@@ -1270,6 +1808,8 @@ export async function fetchMemberSnapshot(cookieValue) {
       planSpendPercent: planMeters.planSpendPercent,
       quotaPercent,
       spendPercent,
+      weeklyUsedCents: planMeters.weeklyUsedCents ?? null,
+      weeklyBudgetCents: planMeters.weeklyBudgetCents ?? null,
     },
     syncedAt: new Date().toISOString(),
     // 仅刷新路径落库用，勿写入 last_snapshot（体量大）。

@@ -1735,6 +1735,22 @@ code {
   width: min(720px, calc(100vw - 2rem));
 }
 
+.sheet.sheet-xl {
+  width: min(960px, calc(100vw - 2rem));
+  max-height: min(90vh, 880px);
+}
+
+.sheet.sheet-xl .sheet-body {
+  max-height: min(90vh, 880px);
+  display: flex;
+  flex-direction: column;
+}
+
+.rank-table-wrap-tall {
+  max-height: min(62vh, 560px);
+  overflow: auto;
+}
+
 /* 用户规则弹窗：Markdown 阅读视图 */
 .md-view {
   max-height: min(65vh, 560px);

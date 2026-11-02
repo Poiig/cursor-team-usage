@@ -130,15 +130,15 @@ export function formatTokens(n) {
 }
 
 /**
- * Today / Yesterday / Last 30 单元格文案：金额 · 调用次数 · tokens。
+ * Today / Yesterday / Last 30 单元格文案：金额 · tokens。
  * @param {{ text?: string, dollars?: number | null, tokens?: number | null, requests?: number | null } | null | undefined} part
  */
 export function formatSpendPart(part) {
   if (!part || part.text === 'No data') return part?.text || 'No data';
-  if (part.requests != null && part.requests > 0 && part.dollars != null) {
+  if (part.dollars != null && (part.tokens != null || part.requests != null)) {
     const tokenLabel = formatTokens(part.tokens);
     const tokenText = tokenLabel === '—' ? '0' : tokenLabel;
-    return `$${Number(part.dollars).toFixed(2)} · ${part.requests}次 · ${tokenText}`;
+    return `$${Number(part.dollars).toFixed(2)} · ${tokenText}`;
   }
   return part.text || 'No data';
 }
@@ -151,7 +151,13 @@ export function formatSpendPart(part) {
 export function resolveSpendRow(snap, panelSpend) {
   const s = snap?.spend;
   if (s && (s.today || s.yesterday || s.last30)) {
-    return { type: 'spend-row', today: s.today, yesterday: s.yesterday, last30: s.last30 };
+    return {
+      type: 'spend-row',
+      today: s.today,
+      yesterday: s.yesterday,
+      last30: s.last30,
+      last30Label: s.last30Label || panelSpend?.last30Label || 'Last 30 Days',
+    };
   }
   return panelSpend || null;
 }
@@ -162,7 +168,7 @@ export function resolveSpendRow(snap, panelSpend) {
  * @returns {'total' | 'auto' | 'api' | null}
  */
 export function fieldForProgressLabel(label) {
-  if (label === 'Total usage') return 'total';
+  if (label === 'Total usage' || label === 'Weekly usage') return 'total';
   if (label === 'Cursor Models') return 'auto';
   if (label === 'Other Models') return 'api';
   return null;
@@ -183,7 +189,21 @@ export function yesterdayDayKey(nowMs = Date.now()) {
 }
 
 /**
- * 当前累计% 相对昨日收盘的差值（今日用量）。
+ * 换周期回落时用今日累计代替负差额。
+ * @param {number} current
+ * @param {number} previous
+ */
+export function percentDayDelta(current, previous) {
+  const cur = Number(current);
+  const prev = Number(previous);
+  if (!Number.isFinite(cur) || !Number.isFinite(prev)) return null;
+  const raw = Math.round((cur - prev) * 10) / 10;
+  if (raw < 0) return Math.round(cur * 10) / 10;
+  return raw;
+}
+
+/**
+ * 当前累计% 相对昨日收盘的差值（今日用量）。换周期回落不展示。
  * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
  * @param {'total' | 'auto' | 'api'} field
  * @param {number | null | undefined} current
@@ -194,15 +214,31 @@ export function deltaVsYesterday(history, field, current) {
   const y = (history || []).find((r) => r && r.date === yesterdayDayKey());
   const prev = y?.[field];
   if (prev == null || !Number.isFinite(Number(prev))) return null;
-  return Math.round((Number(current) - Number(prev)) * 10) / 10;
+  const raw = Math.round((Number(current) - Number(prev)) * 10) / 10;
+  if (raw < 0) return null;
+  return raw;
 }
 
 /**
- * 额度旁「(+x%)」文案；无昨日快照时返回空。
+ * 排行用的今日用量%（换周期回落时取当前累计）。
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
+ * @param {'total' | 'auto' | 'api'} field
+ * @param {number | null | undefined} current
+ */
+export function todayUsagePercent(history, field, current) {
+  if (current == null || !Number.isFinite(Number(current))) return null;
+  const y = (history || []).find((r) => r && r.date === yesterdayDayKey());
+  const prev = y?.[field];
+  if (prev == null || !Number.isFinite(Number(prev))) return null;
+  return percentDayDelta(Number(current), Number(prev));
+}
+
+/**
+ * 额度旁「(+x%)」文案；无昨日或换周期时返回空。
  * @param {number | null | undefined} delta
  */
 export function formatDeltaVsYesterday(delta) {
-  if (delta == null || !Number.isFinite(delta)) return '';
+  if (delta == null || !Number.isFinite(delta) || delta < 0) return '';
   const sign = delta > 0 ? '+' : '';
   return `(${sign}${delta.toFixed(1)}%)`;
 }
@@ -220,10 +256,9 @@ export function dailyPercentDeltaPoints(history, field = 'total') {
   /** @type {Array<{ label: string, value: number }>} */
   const out = [];
   for (let i = 1; i < rows.length; i++) {
-    out.push({
-      label: rows[i].date,
-      value: Math.round((Number(rows[i][field]) - Number(rows[i - 1][field])) * 10) / 10,
-    });
+    const value = percentDayDelta(rows[i][field], rows[i - 1][field]);
+    if (value == null) continue;
+    out.push({ label: rows[i].date, value });
   }
   return out;
 }
@@ -411,6 +446,8 @@ export function planBadgeClass(plan) {
     .toLowerCase();
   if (!s || s === 'unknown') return 'plan-unknown';
   if (s.includes('ultra')) return 'plan-ultra';
+  if (s.includes('super')) return 'plan-ultra';
+  if (s.includes('premium')) return 'plan-pro-plus';
   if (
     s.includes('pro+') ||
     s.includes('pro plus') ||
@@ -422,6 +459,7 @@ export function planBadgeClass(plan) {
   if (s.includes('business') || s.includes('team') || s.includes('enterprise')) {
     return 'plan-business';
   }
+  if (s === 'plus') return 'plan-pro';
   if (s === 'pro' || /\bpro\b/.test(s)) return 'plan-pro';
   if (s.includes('free') || s.includes('hobby')) return 'plan-free';
   return 'plan-unknown';
@@ -439,6 +477,9 @@ export function formatPlanLabel(plan) {
   if (s === 'pro') return 'Pro';
   if (s === 'free' || s === 'hobby') return 'Free';
   if (s === 'ultra') return 'Ultra';
+  if (s === 'premium') return 'Premium';
+  if (s === 'super') return 'Super';
+  if (s === 'plus') return 'Plus';
   if (s === 'business' || s === 'team') return raw.charAt(0).toUpperCase() + raw.slice(1);
   return raw;
 }

@@ -122,7 +122,7 @@ function renderSpendRow(line) {
     <div class="spend-row">
       ${cell('Today', line.today)}
       ${cell('Yesterday', line.yesterday)}
-      ${cell('Last 30 Days', line.last30)}
+      ${cell(line.last30Label || 'Last 30 Days', line.last30)}
     </div>
   `;
 }
@@ -214,7 +214,7 @@ function renderBarChart(el, points, color, formatValue = (v) => String(v)) {
 }
 
 /**
- * 横向条：右侧数值可格式化（当日模型用 tokens 万/亿，周期 Top 用次数）。
+ * 横向条：右侧数值可格式化（模型排行统一 tokens 万/亿）。
  * @param {HTMLElement | null} el
  * @param {Array<{ label: string, value: number }>} items
  * @param {string} color
@@ -435,17 +435,30 @@ function renderMember() {
     (v) => `${Number(v).toFixed(1)}%`,
   );
   const todayModels = (snap?.spend?.todayModels || []).slice(0, 8);
+  const todayModelsTitle = els.chartTodayModels?.previousElementSibling;
+  if (todayModelsTitle && todayModelsTitle.tagName === 'H3') {
+    todayModelsTitle.textContent = '当日模型统计';
+  }
   renderHorizontalBars(
     els.chartTodayModels,
-    todayModels.map((m) => ({ label: m.model, value: m.tokens || 0 })),
+    todayModels.map((m) => ({ label: m.model, value: Number(m.tokens) || 0 })),
     '#2dd4bf',
     (v) => (v <= 0 ? '0' : formatTokens(v)),
   );
   const models = (snap?.usage?.topModels || []).slice(0, 8);
+  const modelsTitle = els.chartModels?.previousElementSibling;
+  const weekly =
+    snap?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+    snap?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+  if (modelsTitle && modelsTitle.tagName === 'H3') {
+    modelsTitle.textContent = weekly ? 'Top models (近期)' : 'Top models (cycle)';
+  }
+  // 只认 tokens；旧快照若仍是 count（调用次数）则显示 0，刷新后会写入 tokens。
   renderHorizontalBars(
     els.chartModels,
-    models.map((m) => ({ label: m.model, value: m.count })),
+    models.map((m) => ({ label: m.model, value: Number(m.tokens) || 0 })),
     '#a78bfa',
+    (v) => (v <= 0 ? '0' : formatTokens(v)),
   );
 
   if (location.hash === '#usage-percent') {
@@ -547,7 +560,16 @@ if (!memberId) {
 } else {
   setupEventsInfiniteScroll();
   loadMember()
-    .then(() => loadEvents({ reset: true }))
+    .then(() => {
+      // 周订阅「今天」常无 Cursor 事件；默认拉近 30 天才有明细
+      const weekly =
+        member?.lastSnapshot?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+        member?.lastSnapshot?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+      if (weekly && els.eventsDays && Number(els.eventsDays.value) === 1) {
+        els.eventsDays.value = '30';
+      }
+      return loadEvents({ reset: true, forceSync: true });
+    })
     .catch((e) => toast(e.message || String(e)));
 }
 

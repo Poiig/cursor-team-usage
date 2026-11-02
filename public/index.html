@@ -332,7 +332,7 @@
       </div>
     </dialog>
 
-    <dialog id="todayRankDialog" class="sheet sheet-wide">
+    <dialog id="todayRankDialog" class="sheet sheet-xl">
       <div class="sheet-body">
         <header>
           <h3 id="todayRankTitle">今日用量排行</h3>
@@ -343,14 +343,15 @@
           <button type="button" class="filter-tab active" data-mode="people">按人</button>
           <button type="button" class="filter-tab" data-mode="model">按模型</button>
         </div>
-        <div class="rank-table-wrap">
+        <div class="rank-table-wrap rank-table-wrap-tall">
           <table class="rank-table" id="todayRankTable">
             <thead>
               <tr>
                 <th>#</th>
-                <th>用户名</th>
+                <th>账号</th>
                 <th id="todayRankTokensTh">今日 tokens</th>
-                <th>次数</th>
+                <th>今日%</th>
+                <th>状态</th>
                 <th>花费</th>
               </tr>
             </thead>

@@ -21,7 +21,8 @@ import { recordSyncPercents } from './usage-percent-history.js';
 import { carryCycleHistory } from './billing-cycle.js';
 import {
   USAGE_EVENTS_RETENTION_DAYS,
-  normalizeUsageEventForStore,
+  dedupeNormalizedUsageEvents,
+  isSyntheticEventId,
   usageEventFromStoreRow,
   usageEventsRangeStartMs,
 } from './usage-events.js';
@@ -884,11 +885,9 @@ export async function deleteMember(id) {
 export async function upsertUsageEvents(memberId, events) {
   if (!memberId) return { upserted: 0 };
   const syncedAt = new Date().toISOString();
-  const list = Array.isArray(events) ? events : [];
+  const normalized = dedupeNormalizedUsageEvents(events, syncedAt);
   let upserted = 0;
-  for (const raw of list) {
-    const e = normalizeUsageEventForStore(raw, syncedAt);
-    if (!e.eventId || !e.tsMs) continue;
+  for (const e of normalized) {
     run(
       `INSERT INTO usage_events (
         member_id, event_id, ts_ms, model, kind, kind_label, is_token_based,
@@ -933,6 +932,25 @@ export async function upsertUsageEvents(memberId, events) {
   }
   const cutoff = Date.now() - USAGE_EVENTS_RETENTION_DAYS * 86400000;
   run('DELETE FROM usage_events WHERE member_id = ? AND ts_ms < ?', [memberId, cutoff]);
+  // 清伪 id 与真实 UUID 的同指纹重复
+  /** @type {Map<string, { syn: string[], real: string[] }>} */
+  const groups = new Map();
+  for (const row of getAll(
+    'SELECT event_id, ts_ms, model, total_tokens FROM usage_events WHERE member_id = ?',
+    [memberId],
+  )) {
+    const fp = `${row.ts_ms}|${row.model}|${row.total_tokens}`;
+    const g = groups.get(fp) || { syn: [], real: [] };
+    if (isSyntheticEventId(row.event_id)) g.syn.push(String(row.event_id));
+    else g.real.push(String(row.event_id));
+    groups.set(fp, g);
+  }
+  for (const g of groups.values()) {
+    if (!g.real.length || !g.syn.length) continue;
+    for (const synId of g.syn) {
+      run('DELETE FROM usage_events WHERE member_id = ? AND event_id = ?', [memberId, synId]);
+    }
+  }
   run('UPDATE members SET events_synced_at=?, updated_at=? WHERE id=?', [
     syncedAt,
     syncedAt,
@@ -1032,6 +1050,53 @@ export async function listUsageEventsInRange(memberId, startMs, endMs) {
     'SELECT * FROM usage_events WHERE member_id = ? AND ts_ms >= ? AND ts_ms < ? ORDER BY ts_ms ASC',
     [memberId, startMs, endMs],
   ).map(usageEventFromStoreRow);
+}
+
+/**
+ * @param {number} startMs
+ * @param {number} endMs
+ * @returns {Promise<Array<{ model: string, tokens: number, accounts: number }>>}
+ */
+export async function aggregateUsageModelsInRange(startMs, endMs) {
+  return getAll(
+    `SELECT model,
+            COALESCE(SUM(total_tokens), 0) AS tokens,
+            COUNT(DISTINCT member_id) AS accounts
+     FROM usage_events
+     WHERE ts_ms >= ? AND ts_ms < ?
+       AND model IS NOT NULL AND model <> ''
+       AND total_tokens > 0
+     GROUP BY model
+     ORDER BY tokens DESC, model ASC`,
+    [startMs, endMs],
+  ).map((r) => ({
+    model: String(r.model),
+    tokens: Number(r.tokens) || 0,
+    accounts: Number(r.accounts) || 0,
+  }));
+}
+
+/**
+ * @param {string} model
+ * @param {number} startMs
+ * @param {number} endMs
+ * @returns {Promise<Array<{ memberId: string, tokens: number }>>}
+ */
+export async function aggregateUsageModelAccountsInRange(model, startMs, endMs) {
+  const name = String(model || '').trim();
+  if (!name) return [];
+  return getAll(
+    `SELECT member_id AS memberId,
+            COALESCE(SUM(total_tokens), 0) AS tokens
+     FROM usage_events
+     WHERE ts_ms >= ? AND ts_ms < ? AND model = ? AND total_tokens > 0
+     GROUP BY member_id
+     ORDER BY tokens DESC`,
+    [startMs, endMs, name],
+  ).map((r) => ({
+    memberId: String(r.memberId ?? r.member_id),
+    tokens: Number(r.tokens) || 0,
+  }));
 }
 
 /** @param {string} id */

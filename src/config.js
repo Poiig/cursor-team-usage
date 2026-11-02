@@ -32,6 +32,7 @@ export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
  *   logRetentionDays: number,
  *   proMaxUsers: number,
  *   proPlusMaxUsers: number,
+ *   xMaxUsers: number,
  *   notifyChannel: string,
  *   notifyBotId: string,
  *   notifyHour: number,
@@ -50,6 +51,7 @@ let runtime = {
   logRetentionDays: 30,
   proMaxUsers: 3,
   proPlusMaxUsers: 5,
+  xMaxUsers: 3,
   notifyChannel: '',
   notifyBotId: '',
   notifyHour: 9,
@@ -109,6 +111,7 @@ function defaults() {
     logRetentionDays: 30, // data/log 下日志保留天数，0=不自动删除
     proMaxUsers: 3,
     proPlusMaxUsers: 5,
+    xMaxUsers: 3,
     notifyChannel: '',
     notifyBotId: '',
     notifyHour: 9,
@@ -175,6 +178,12 @@ function configFromProcessEnv() {
   if (process.env.PRO_PLUS_MAX_USERS != null && process.env.PRO_PLUS_MAX_USERS !== '') {
     const n = Number(process.env.PRO_PLUS_MAX_USERS);
     if (Number.isFinite(n) && n > 0) next.proPlusMaxUsers = Math.floor(n);
+  }
+  // The X Subscription（Plus / Premium / Super / Ultra）席位；兼容 PREMIUM_MAX_USERS
+  const xRaw = process.env.X_MAX_USERS ?? process.env.PREMIUM_MAX_USERS;
+  if (xRaw != null && xRaw !== '') {
+    const n = Number(xRaw);
+    if (Number.isFinite(n) && n > 0) next.xMaxUsers = Math.floor(n);
   }
   if (process.env.NOTIFY_CHANNEL != null) {
     next.notifyChannel = String(process.env.NOTIFY_CHANNEL).trim().toLowerCase();
@@ -313,6 +322,7 @@ export function getAccountUserLimits() {
   return {
     pro: config.proMaxUsers,
     proPlus: config.proPlusMaxUsers,
+    x: config.xMaxUsers,
   };
 }
 

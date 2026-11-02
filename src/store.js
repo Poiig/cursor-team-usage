@@ -182,6 +182,16 @@ export async function listUsageEventsInRange(memberId, startMs, endMs) {
   return api().listUsageEventsInRange(memberId, startMs, endMs);
 }
 
+/** @param {number} startMs @param {number} endMs */
+export async function aggregateUsageModelsInRange(startMs, endMs) {
+  return api().aggregateUsageModelsInRange(startMs, endMs);
+}
+
+/** @param {string} model @param {number} startMs @param {number} endMs */
+export async function aggregateUsageModelAccountsInRange(model, startMs, endMs) {
+  return api().aggregateUsageModelAccountsInRange(model, startMs, endMs);
+}
+
 /** 账号使用人席位（按主机）。 */
 export async function loadAccountPresenceMap() {
   return api().loadAccountPresenceMap();

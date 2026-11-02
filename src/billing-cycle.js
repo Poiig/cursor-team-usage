@@ -17,14 +17,38 @@ export function isCursorModel(model) {
   return m === 'auto' || m === 'default' || m.includes('composer');
 }
 
+const WEEK_MS = 7 * 86400000;
+
 /**
- * 当前周期起点往前推一个自然月，得到上个周期窗口。
+ * 当前窗是否像周额度（The X Subscription）而非自然月账单。
+ * @param {any} snapshot
+ */
+function isWeeklyUsageWindow(snapshot) {
+  if (
+    snapshot?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+    snapshot?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY'
+  ) {
+    return true;
+  }
+  const start = Date.parse(snapshot?.window?.startIso || '');
+  const end = Date.parse(snapshot?.window?.endIso || '');
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+  const dur = end - start;
+  return dur >= 6 * 86400000 && dur <= 8 * 86400000;
+}
+
+/**
+ * 当前周期起点往前推一窗，得到上个周期窗口。
+ * 周额度 −7 天；否则按自然月 −1。
  * @param {any} snapshot
  * @returns {{ startMs: number, endMs: number } | null}
  */
 export function previousCycleWindow(snapshot) {
   const endMs = Date.parse(snapshot?.window?.startIso || '');
   if (!Number.isFinite(endMs)) return null;
+  if (isWeeklyUsageWindow(snapshot)) {
+    return { startMs: endMs - WEEK_MS, endMs };
+  }
   const start = new Date(endMs);
   start.setUTCMonth(start.getUTCMonth() - 1);
   return { startMs: start.getTime(), endMs };

@@ -362,6 +362,16 @@ export async function upsertUsageEvents() {
   return { upserted: 0 };
 }
 
+/** @returns {Promise<Array<{ model: string, tokens: number, accounts: number }>>} */
+export async function aggregateUsageModelsInRange() {
+  return [];
+}
+
+/** @returns {Promise<Array<{ memberId: string, tokens: number }>>} */
+export async function aggregateUsageModelAccountsInRange() {
+  return [];
+}
+
 /** @returns {Promise<number | null>} */
 export async function getUsageEventsWatermark() {
   return null;

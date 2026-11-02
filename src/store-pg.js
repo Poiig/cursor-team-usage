@@ -18,7 +18,7 @@ import { recordSyncPercents } from './usage-percent-history.js';
 import { carryCycleHistory } from './billing-cycle.js';
 import {
   USAGE_EVENTS_RETENTION_DAYS,
-  normalizeUsageEventForStore,
+  dedupeNormalizedUsageEvents,
   usageEventFromStoreRow,
   usageEventsRangeStartMs,
 } from './usage-events.js';
@@ -674,10 +674,7 @@ export async function deleteMember(id) {
 export async function upsertUsageEvents(memberId, events) {
   if (!memberId) return { upserted: 0 };
   const syncedAt = new Date().toISOString();
-  const list = Array.isArray(events) ? events : [];
-  const normalized = list
-    .map((raw) => normalizeUsageEventForStore(raw, syncedAt))
-    .filter((event) => event.eventId && event.tsMs);
+  const normalized = dedupeNormalizedUsageEvents(events, syncedAt);
   const client = await db().connect();
   try {
     await client.query('BEGIN');
@@ -736,6 +733,19 @@ export async function upsertUsageEvents(memberId, events) {
       memberId,
       cutoff,
     ]);
+    // 清掉与真实 UUID 同指纹的伪 id 行（多面板 / legacy+v2 双写）
+    await client.query(
+      `DELETE FROM usage_events a
+       USING usage_events b
+       WHERE a.member_id = $1
+         AND b.member_id = $1
+         AND a.ts_ms = b.ts_ms
+         AND a.model = b.model
+         AND a.total_tokens = b.total_tokens
+         AND a.event_id ~ '^[0-9]{10,}-'
+         AND b.event_id !~ '^[0-9]{10,}-'`,
+      [memberId],
+    );
     await client.query(
       'UPDATE members SET events_synced_at=$1, updated_at=$1 WHERE id=$2',
       [syncedAt, memberId],
@@ -851,6 +861,57 @@ export async function listUsageEventsInRange(memberId, startMs, endMs) {
     [memberId, startMs, endMs],
   );
   return rows.map(usageEventFromStoreRow);
+}
+
+/**
+ * 全团队按模型汇总 tokens（今日排行等报表用，直接读落库事件）。
+ * @param {number} startMs
+ * @param {number} endMs
+ * @returns {Promise<Array<{ model: string, tokens: number, accounts: number }>>}
+ */
+export async function aggregateUsageModelsInRange(startMs, endMs) {
+  const { rows } = await db().query(
+    `SELECT model,
+            COALESCE(SUM(total_tokens), 0)::bigint AS tokens,
+            COUNT(DISTINCT member_id)::int AS accounts
+     FROM usage_events
+     WHERE ts_ms >= $1 AND ts_ms < $2
+       AND model IS NOT NULL AND model <> ''
+       AND total_tokens > 0
+     GROUP BY model
+     ORDER BY tokens DESC, model ASC`,
+    [startMs, endMs],
+  );
+  return rows.map((r) => ({
+    model: String(r.model),
+    tokens: Number(r.tokens) || 0,
+    accounts: Number(r.accounts) || 0,
+  }));
+}
+
+/**
+ * 某模型在时间窗内各账号 tokens（模型下钻）。
+ * @param {string} model
+ * @param {number} startMs
+ * @param {number} endMs
+ * @returns {Promise<Array<{ memberId: string, tokens: number }>>}
+ */
+export async function aggregateUsageModelAccountsInRange(model, startMs, endMs) {
+  const name = String(model || '').trim();
+  if (!name) return [];
+  const { rows } = await db().query(
+    `SELECT member_id,
+            COALESCE(SUM(total_tokens), 0)::bigint AS tokens
+     FROM usage_events
+     WHERE ts_ms >= $1 AND ts_ms < $2 AND model = $3 AND total_tokens > 0
+     GROUP BY member_id
+     ORDER BY tokens DESC`,
+    [startMs, endMs, name],
+  );
+  return rows.map((r) => ({
+    memberId: String(r.member_id),
+    tokens: Number(r.tokens) || 0,
+  }));
 }
 
 /** @param {string} id */

@@ -99,7 +99,23 @@ export function fieldForProgressLabel(label) {
 }
 
 /**
+ * 相邻两日累计差；换周期 / 新开通导致「今日 < 昨日」时按从 0 起算（用今日累计值）。
+ * @param {number} current
+ * @param {number} previous
+ */
+export function percentDayDelta(current, previous) {
+  const cur = Number(current);
+  const prev = Number(previous);
+  if (!Number.isFinite(cur) || !Number.isFinite(prev)) return null;
+  const raw = Math.round((cur - prev) * 10) / 10;
+  // 账单重置或新开账号：累计%回落，不能出现 -45% 这种差额
+  if (raw < 0) return Math.round(cur * 10) / 10;
+  return raw;
+}
+
+/**
  * 当前累计% 相对昨日收盘的差值（今日用量）。
+ * 换周期回落时返回 null（标签不展示负差额）；图表用 dailyPercentDeltas。
  * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
  * @param {'total' | 'auto' | 'api'} field
  * @param {number | null | undefined} current
@@ -112,7 +128,26 @@ export function deltaVsYesterday(history, field, current, nowMs = Date.now()) {
   const y = (history || []).find((r) => r && r.date === yKey);
   const prev = y?.[field];
   if (prev == null || !Number.isFinite(Number(prev))) return null;
-  return Math.round((Number(current) - Number(prev)) * 10) / 10;
+  const raw = Math.round((Number(current) - Number(prev)) * 10) / 10;
+  // 进度条旁只展示正向「今日增量」；换周期不挂奇怪的负数
+  if (raw < 0) return null;
+  return raw;
+}
+
+/**
+ * 排行「今日%」：有昨日则用日增量；换周期回落则用当前累计（视为新周期已用）。
+ * @param {Array<{ date: string, total?: number | null, auto?: number | null, api?: number | null }> | null | undefined} history
+ * @param {'total' | 'auto' | 'api'} field
+ * @param {number | null | undefined} current
+ * @param {number} [nowMs]
+ */
+export function todayUsagePercent(history, field, current, nowMs = Date.now()) {
+  if (current == null || !Number.isFinite(Number(current))) return null;
+  const yKey = yesterdayDayKey(nowMs);
+  const y = (history || []).find((r) => r && r.date === yKey);
+  const prev = y?.[field];
+  if (prev == null || !Number.isFinite(Number(prev))) return null;
+  return percentDayDelta(Number(current), Number(prev));
 }
 
 /**
@@ -128,10 +163,9 @@ export function dailyPercentDeltas(history, field = 'total') {
   /** @type {Array<{ date: string, value: number }>} */
   const out = [];
   for (let i = 1; i < rows.length; i++) {
-    out.push({
-      date: rows[i].date,
-      value: Math.round((Number(rows[i][field]) - Number(rows[i - 1][field])) * 10) / 10,
-    });
+    const value = percentDayDelta(rows[i][field], rows[i - 1][field]);
+    if (value == null) continue;
+    out.push({ date: rows[i].date, value });
   }
   return out;
 }

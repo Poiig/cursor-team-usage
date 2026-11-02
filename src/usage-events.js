@@ -92,6 +92,11 @@ function intOrZero(v) {
   return n == null ? 0 : Math.max(0, n);
 }
 
+/** 旧路径 `${timestamp}-${model}` 伪 id；与真实 UUID 并存时会双记。 */
+export function isSyntheticEventId(id) {
+  return /^\d{10,}-/.test(String(id || ''));
+}
+
 /**
  * API/快照事件 → 落库行形状（字段齐全、便于 upsert）。
  * @param {any} e
@@ -99,9 +104,21 @@ function intOrZero(v) {
  */
 export function normalizeUsageEventForStore(e, syncedAt = new Date().toISOString()) {
   const ts = eventTsMs(e?.timestamp ?? e?.ts_ms ?? e?.tsMs);
-  const id = String(e?.id ?? e?.event_id ?? e?.eventId ?? `${ts}-${e?.model ?? 'unknown'}`);
+  const rawId = e?.usageEventId ?? e?.id ?? e?.event_id ?? e?.eventId;
+  const id = String(
+    rawId != null && String(rawId) !== '' && String(rawId) !== 'null'
+      ? rawId
+      : `${ts}-${e?.model ?? 'unknown'}`,
+  );
   const chargedRaw = e?.chargedCents ?? e?.charged_cents;
   const tokenRaw = e?.tokenCents ?? e?.token_cents;
+  const inputTokens = intOrZero(e?.inputTokens ?? e?.input_tokens);
+  const outputTokens = intOrZero(e?.outputTokens ?? e?.output_tokens);
+  const cacheReadTokens = intOrZero(e?.cacheReadTokens ?? e?.cache_read_tokens);
+  const cacheWriteTokens = intOrZero(e?.cacheWriteTokens ?? e?.cache_write_tokens);
+  const totalTokens =
+    intOrZero(e?.totalTokens ?? e?.total_tokens) ||
+    inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   return {
     eventId: id,
     tsMs: ts,
@@ -111,14 +128,38 @@ export function normalizeUsageEventForStore(e, syncedAt = new Date().toISOString
     isTokenBased: Boolean(e?.isTokenBasedCall ?? e?.is_token_based),
     chargedCents: intOrNull(chargedRaw),
     tokenCents: intOrNull(tokenRaw),
-    inputTokens: intOrZero(e?.inputTokens ?? e?.input_tokens),
-    outputTokens: intOrZero(e?.outputTokens ?? e?.output_tokens),
-    cacheReadTokens: intOrZero(e?.cacheReadTokens ?? e?.cache_read_tokens),
-    cacheWriteTokens: intOrZero(e?.cacheWriteTokens ?? e?.cache_write_tokens),
-    totalTokens: intOrZero(e?.totalTokens ?? e?.total_tokens),
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens,
     costLabel: String(e?.costLabel ?? e?.cost_label ?? ''),
     syncedAt,
   };
+}
+
+/**
+ * 落库前按指纹去重；多面板 / legacy+v2 同笔不同 id 只留一条（优先真实 UUID）。
+ * @param {any[]} events
+ * @param {string} [syncedAt]
+ */
+export function dedupeNormalizedUsageEvents(events, syncedAt = new Date().toISOString()) {
+  /** @type {Map<string, ReturnType<typeof normalizeUsageEventForStore>>} */
+  const byFp = new Map();
+  for (const raw of Array.isArray(events) ? events : []) {
+    const e = normalizeUsageEventForStore(raw, syncedAt);
+    if (!e.eventId || !e.tsMs) continue;
+    const fp = `${e.tsMs}|${e.model}|${e.totalTokens}`;
+    const prev = byFp.get(fp);
+    if (!prev) {
+      byFp.set(fp, e);
+      continue;
+    }
+    const prevSyn = isSyntheticEventId(prev.eventId);
+    const curSyn = isSyntheticEventId(e.eventId);
+    if (prevSyn && !curSyn) byFp.set(fp, e);
+  }
+  return [...byFp.values()];
 }
 
 /**

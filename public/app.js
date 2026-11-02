@@ -20,8 +20,7 @@ import {
   formatTokens,
   loadSettings,
   money,
-  aggregateTodayModels,
-  rankAccountsByTodayModel,
+  todayUsagePercent,
   formatOperatorLabel,
   planBadgeClass,
   renderBarChart,
@@ -366,6 +365,27 @@ function statusBadgeHtml(member) {
   return `${expiring}<span class="badge ok" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '充足')}</span>`;
 }
 
+/** 今日排行只用使用速度，不带临期。 */
+function paceOnlyBadgeHtml(member) {
+  if (member.lastError || isFreePlanMember(member)) {
+    const tip = member.lastError
+      ? member.lastError
+      : isFreePlanMember(member)
+        ? 'Free 套餐，请更换可用账号'
+        : '';
+    return `<span class="badge danger" title="${escapeHtml(tip)}">异常</span>`;
+  }
+  if (!member.lastSnapshot) return `<span class="badge muted">待同步</span>`;
+  const pace = computeUsagePace(member);
+  if (!pace) {
+    const used = usedPercent(member) ?? 0;
+    if (used >= 80) return `<span class="badge warn">偏快</span>`;
+    return `<span class="badge ok">充足</span>`;
+  }
+  const cls = pace.status === 'danger' ? 'danger' : pace.status === 'warn' ? 'warn' : 'ok';
+  return `<span class="badge ${cls}" title="${escapeHtml(pace.summary || '')}">${escapeHtml(pace.label)}</span>`;
+}
+
 function fillClass(pct) {
   if (pct == null) return '';
   if (pct >= 95) return 'danger';
@@ -525,7 +545,7 @@ function renderSpendRow(line) {
     <div class="spend-row spend-row--link" data-action="bill" title="查看每日用量百分比图表">
       ${cell('Today', line.today)}
       ${cell('Yesterday', line.yesterday)}
-      ${cell('Last 30 Days', line.last30)}
+      ${cell(line.last30Label || 'Last 30 Days', line.last30)}
     </div>
   `;
 }
@@ -688,8 +708,8 @@ function renderDayRank() {
     btn.classList.toggle('active', btn.dataset.mode === mode);
   });
   document.getElementById('btnTodayRankBack')?.classList.toggle('hidden', !drilled);
-  if (drilled) renderModelAccountRank(todayRankModel);
-  else if (mode === 'model') renderModelRank();
+  if (drilled) void renderModelAccountRank(todayRankModel);
+  else if (mode === 'model') void renderModelRank();
   else renderPeopleRank(todayRankDate);
 }
 
@@ -714,19 +734,24 @@ function renderPeopleRank(date) {
   if (titleEl) titleEl.textContent = `${dayText}用量排行`;
   if (hintEl) hintEl.textContent = `按${dayText} tokens 从高到低；点击行可进入账号详情。`;
   if (head) {
-    head.innerHTML = `<th>#</th><th>用户名</th><th>${date ? '当日 tokens' : '今日 tokens'}</th><th>次数</th><th>花费</th>`;
+    head.innerHTML = `<th>#</th><th>账号</th><th>${date ? '当日 tokens' : '今日 tokens'}</th><th>今日%</th><th>状态</th><th>花费</th>`;
   }
   const ranked = membersCache
     .map((m) => ({ m, u: usageOf(m) }))
     .sort((a, b) => b.u.tokens - a.u.tokens);
   if (!els.todayRankBody) return;
   if (!ranked.length) {
-    els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">暂无账号</td></tr>`;
+    els.todayRankBody.innerHTML = `<tr><td colspan="6" class="muted">暂无账号</td></tr>`;
   } else {
     els.todayRankBody.innerHTML = ranked
       .map(({ m, u }, i) => {
         const idn = accountIdentity(m, settings.privacyMode);
-        const { tokens, requests: reqs, dollars } = u;
+        const { tokens, dollars } = u;
+        const used = usedPercent(m);
+        const todayPct = date
+          ? null
+          : todayUsagePercent(m.usagePercentHistory, 'total', used);
+        const pctText = todayPct == null ? '—' : `${Number(todayPct).toFixed(1)}%`;
         return `
           <tr class="rank-row" data-id="${escapeHtml(m.id)}" title="打开详情">
             <td class="rank-num">${i + 1}</td>
@@ -735,7 +760,8 @@ function renderPeopleRank(date) {
               ${idn.subtitle ? `<span class="rank-sub">${escapeHtml(idn.subtitle)}</span>` : ''}
             </td>
             <td class="rank-metric">${escapeHtml(formatTokens(tokens))}</td>
-            <td class="rank-metric">${reqs}次</td>
+            <td class="rank-metric">${escapeHtml(pctText)}</td>
+            <td class="rank-metric">${paceOnlyBadgeHtml(m)}</td>
             <td class="rank-metric">${money(dollars)}</td>
           </tr>
         `;
@@ -744,57 +770,67 @@ function renderPeopleRank(date) {
   }
 }
 
-/** 按模型列出今日用量：各账号 todayModels 加总，快照里没有按模型的次数和花费。 */
-function renderModelRank() {
+/** 按模型列出今日用量：读落库 usage_events 的今日窗，不依赖快照 todayModels。 */
+async function renderModelRank() {
   const titleEl = document.getElementById('todayRankTitle');
   const hintEl = document.getElementById('todayRankHint');
   const head = document.querySelector('#todayRankTable thead tr');
   if (titleEl) titleEl.textContent = '今日用量排行';
   if (hintEl) hintEl.textContent = '按今日 tokens 从高到低；点击模型可看各账号用量。';
   if (head) head.innerHTML = `<th>#</th><th>模型</th><th>今日 tokens</th><th>占比</th><th>账号数</th>`;
-  const ranked = aggregateTodayModels(membersCache);
-  const total = ranked.reduce((sum, row) => sum + row.tokens, 0);
   if (!els.todayRankBody) return;
-  if (!ranked.length) {
-    els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">暂无模型用量</td></tr>`;
-    return;
-  }
-  els.todayRankBody.innerHTML = ranked
-    .map((row, i) => {
-      const pct = total ? ((row.tokens / total) * 100).toFixed(1) : '0.0';
-      return `
+  els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">加载中…</td></tr>`;
+  try {
+    const data = await api('/api/usage/today-models');
+    const ranked = Array.isArray(data.models) ? data.models : [];
+    const total = ranked.reduce((sum, row) => sum + (Number(row.tokens) || 0), 0);
+    if (!ranked.length) {
+      els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">今日暂无模型用量</td></tr>`;
+      return;
+    }
+    els.todayRankBody.innerHTML = ranked
+      .map((row, i) => {
+        const tokens = Number(row.tokens) || 0;
+        const pct = total ? ((tokens / total) * 100).toFixed(1) : '0.0';
+        return `
         <tr class="rank-row" data-model="${escapeHtml(row.model)}" title="查看各账号用量">
           <td class="rank-num">${i + 1}</td>
           <td><span class="rank-name">${escapeHtml(row.model)}</span></td>
-          <td class="rank-metric">${escapeHtml(formatTokens(row.tokens))}</td>
+          <td class="rank-metric">${escapeHtml(formatTokens(tokens))}</td>
           <td class="rank-metric">${pct}%</td>
           <td class="rank-metric">${row.accounts}</td>
         </tr>
       `;
-    })
-    .join('');
+      })
+      .join('');
+  } catch (e) {
+    els.todayRankBody.innerHTML = `<tr><td colspan="5" class="muted">加载失败：${escapeHtml(e?.message || String(e))}</td></tr>`;
+  }
 }
 
-/** 下钻后的账号排名：只比较这个模型的当日 tokens。 */
-function renderModelAccountRank(model) {
+/** 下钻后的账号排名：只比较这个模型的当日 tokens（落库事件）。 */
+async function renderModelAccountRank(model) {
   const titleEl = document.getElementById('todayRankTitle');
   const hintEl = document.getElementById('todayRankHint');
   const head = document.querySelector('#todayRankTable thead tr');
   if (titleEl) titleEl.textContent = model;
   if (hintEl) hintEl.textContent = '按该模型今日 tokens 从高到低；点击行可进入账号详情。';
   if (head) head.innerHTML = `<th>#</th><th>用户名</th><th>今日 tokens</th><th>占该模型</th>`;
-  const ranked = rankAccountsByTodayModel(membersCache, model);
-  const total = ranked.reduce((sum, row) => sum + row.tokens, 0);
   if (!els.todayRankBody) return;
-  if (!ranked.length) {
-    els.todayRankBody.innerHTML = `<tr><td colspan="4" class="muted">暂无账号用量</td></tr>`;
-    return;
-  }
-  els.todayRankBody.innerHTML = ranked
-    .map(({ member, tokens }, i) => {
-      const idn = accountIdentity(member, settings.privacyMode);
-      const pct = total ? ((tokens / total) * 100).toFixed(1) : '0.0';
-      return `
+  els.todayRankBody.innerHTML = `<tr><td colspan="4" class="muted">加载中…</td></tr>`;
+  try {
+    const data = await api(`/api/usage/today-models?model=${encodeURIComponent(model)}`);
+    const ranked = Array.isArray(data.accounts) ? data.accounts : [];
+    const total = ranked.reduce((sum, row) => sum + (Number(row.tokens) || 0), 0);
+    if (!ranked.length) {
+      els.todayRankBody.innerHTML = `<tr><td colspan="4" class="muted">暂无账号用量</td></tr>`;
+      return;
+    }
+    els.todayRankBody.innerHTML = ranked
+      .map(({ member, tokens }, i) => {
+        const idn = accountIdentity(member, settings.privacyMode);
+        const pct = total ? ((tokens / total) * 100).toFixed(1) : '0.0';
+        return `
         <tr class="rank-row" data-id="${escapeHtml(member.id)}" title="打开详情">
           <td class="rank-num">${i + 1}</td>
           <td>
@@ -805,8 +841,11 @@ function renderModelAccountRank(model) {
           <td class="rank-metric">${pct}%</td>
         </tr>
       `;
-    })
-    .join('');
+      })
+      .join('');
+  } catch (e) {
+    els.todayRankBody.innerHTML = `<tr><td colspan="4" class="muted">加载失败：${escapeHtml(e?.message || String(e))}</td></tr>`;
+  }
 }
 
 function filteredMembers() {
@@ -1473,17 +1512,22 @@ async function loadReports() {
       .sort((a, b) => b.value - a.value);
     renderHorizontalBars(els.chartAccountTokens, accountTokens, '#7c9cff', tokensFmt);
 
-    // 今日模型分布与排行弹窗共用同一套加总
-    const todayModels = aggregateTodayModels(membersCache);
-    const modelTotal = todayModels.reduce((s, r) => s + r.tokens, 0);
-    const modelRows = todayModels.map((r) => ({
-      label: r.model,
-      value: r.tokens,
-      tip: `${r.model} · ${formatTokens(r.tokens)} · ${modelTotal ? ((r.tokens / modelTotal) * 100).toFixed(1) : 0}%`,
-    }));
-    renderHorizontalBars(els.chartTodayModels, modelRows, '#c38bff', (v) =>
-      `${formatTokens(v)} · ${modelTotal ? ((v / modelTotal) * 100).toFixed(1) : 0}%`,
-    );
+    // 今日模型分布：与排行弹窗一样读落库今日窗，避免快照整窗冒充今日
+    try {
+      const todayModelData = await api('/api/usage/today-models');
+      const todayModels = Array.isArray(todayModelData.models) ? todayModelData.models : [];
+      const modelTotal = todayModels.reduce((s, r) => s + (Number(r.tokens) || 0), 0);
+      const modelRows = todayModels.map((r) => ({
+        label: r.model,
+        value: Number(r.tokens) || 0,
+        tip: `${r.model} · ${formatTokens(r.tokens)} · ${modelTotal ? ((Number(r.tokens) / modelTotal) * 100).toFixed(1) : 0}%`,
+      }));
+      renderHorizontalBars(els.chartTodayModels, modelRows, '#c38bff', (v) =>
+        `${formatTokens(v)} · ${modelTotal ? ((v / modelTotal) * 100).toFixed(1) : 0}%`,
+      );
+    } catch {
+      renderHorizontalBars(els.chartTodayModels, [], '#c38bff');
+    }
 
     // 顶部指标
     const sum30 = dailyRows.reduce(
