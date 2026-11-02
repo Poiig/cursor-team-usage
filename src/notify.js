@@ -6,12 +6,10 @@
 import { computeUsagePace } from '../public/shared.js';
 import { enrichMembersWithPresence } from './account-presence.js';
 import { switchBlockReason, usageTotalPercentOf } from './account-switch.js';
-import { getNotifyConfig } from './config.js';
+import { getExpiringWithinDays, getNotifyConfig } from './config.js';
 import { listMembers } from './store.js';
 import { writeAppLog } from './app-log.js';
 
-/** 与看板「临期」筛选一致：重置日剩余天数 ≤ 此值。 */
-export const EXPIRING_WITHIN_DAYS = 10;
 /** 没有账单窗口、算不出节奏时的兜底：已用超过此比例不算充足。 */
 export const SUFFICIENT_USED_MAX = 80;
 
@@ -78,7 +76,7 @@ export function isExpiringSwitchableMember(member, nowMs = Date.now()) {
     return false;
   }
   const days = daysUntilReset(member.lastSnapshot?.window?.resetIso, nowMs);
-  return days != null && days <= EXPIRING_WITHIN_DAYS;
+  return days != null && days <= getExpiringWithinDays();
 }
 
 /**

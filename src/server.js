@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_ACCESS_KEY,
   getAccessKey,
+  getExpiringWithinDays,
   getListenConfig,
   getLogRetentionDays,
   getServerAutoRefreshSec,
@@ -918,6 +919,7 @@ const server = http.createServer(async (req, res) => {
         role: me.role,
         mustChangePassword: await mustChangePasswordFor(me.username),
         guideCompleted: me.guideCompleted,
+        expiringWithinDays: getExpiringWithinDays(),
       });
     }
 

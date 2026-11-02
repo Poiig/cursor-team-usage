@@ -37,6 +37,7 @@ export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
  *   notifyBotId: string,
  *   notifyHour: number,
  *   notifyMinute: number,
+ *   expiringWithinDays: number,
  * }} AppConfig
  */
 
@@ -56,6 +57,7 @@ let runtime = {
   notifyBotId: '',
   notifyHour: 9,
   notifyMinute: 30,
+  expiringWithinDays: 7,
 };
 
 /**
@@ -116,6 +118,7 @@ function defaults() {
     notifyBotId: '',
     notifyHour: 9,
     notifyMinute: 30,
+    expiringWithinDays: 7,
   };
 }
 
@@ -198,6 +201,10 @@ function configFromProcessEnv() {
   if (process.env.NOTIFY_MINUTE != null && process.env.NOTIFY_MINUTE !== '') {
     const n = Number(process.env.NOTIFY_MINUTE);
     if (Number.isFinite(n) && n >= 0 && n <= 59) next.notifyMinute = Math.floor(n);
+  }
+  if (process.env.EXPIRING_WITHIN_DAYS != null && process.env.EXPIRING_WITHIN_DAYS !== '') {
+    const n = Number(process.env.EXPIRING_WITHIN_DAYS);
+    if (Number.isFinite(n) && n >= 0) next.expiringWithinDays = Math.floor(n);
   }
   return next;
 }
@@ -324,6 +331,12 @@ export function getAccountUserLimits() {
     proPlus: config.proPlusMaxUsers,
     x: config.xMaxUsers,
   };
+}
+
+/** 额度重置「临期」阈值（天，含到期日）；看板筛选与企微推送共用。 */
+export function getExpiringWithinDays() {
+  const n = getAppConfig().expiringWithinDays;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 7;
 }
 
 /**

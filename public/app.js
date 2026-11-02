@@ -166,8 +166,8 @@ let onboardingStep = 0;
 /** @type {'all' | 'ok' | 'expiring' | 'error'} */
 let accountStatusFilter = 'all';
 
-/** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」。 */
-const EXPIRING_WITHIN_DAYS = 10;
+/** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」；服务端 env 可改，默认 7。 */
+let EXPIRING_WITHIN_DAYS = 7;
 
 function isAdmin() {
   return currentUser?.role === 'admin';
@@ -193,7 +193,7 @@ function isAbnormalMember(member) {
 }
 
 /**
- * 非异常且额度周期在十天内重置（含已到期）→ 临期。
+ * 非异常且额度周期在临期阈值内重置（含已到期）→ 临期。
  * 异常优先归异常，不重复计入临期。
  */
 function isExpiringMember(member) {
@@ -1224,6 +1224,8 @@ async function ensurePasswordPolicy() {
       role: me.role || 'user',
       guideCompleted: Boolean(me.guideCompleted),
     };
+    const days = Number(me.expiringWithinDays);
+    if (Number.isFinite(days) && days >= 0) EXPIRING_WITHIN_DAYS = Math.floor(days);
     applyRoleUi();
     // 按地址恢复页面；面板显隐只走 showView，避免 admin-only 把用户管理挂在账号列表下方
     applyRoute();
