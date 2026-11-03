@@ -15,6 +15,7 @@ import {
   decodeJwtPayload,
   userIdFromSub,
 } from './auth.js';
+import { unwrapCursorAuthToken } from './cursor-safe-storage.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -133,20 +134,32 @@ async function readItemTableValues(dbPath, keys) {
  * @returns {Promise<{ cookieValue: string, userId: string, email?: string, exp?: number, source: 'ide', dbPath: string } | null>}
  */
 export async function resolveLocalCursorSession() {
-  const keys = ['cursorAuth/accessToken', 'cursorAuth/cachedEmail'];
+  const keys = [
+    'cursorAuth/accessToken',
+    'cursorAuth/cachedEmail',
+    'cursorAuth/stripeMembershipAuthId',
+  ];
   for (const dbPath of candidateStateDbPaths()) {
     const values = await readItemTableValues(dbPath, keys);
-    const token = values.get('cursorAuth/accessToken');
-    if (!token) continue;
+    const rawToken = values.get('cursorAuth/accessToken');
+    if (!rawToken) continue;
+    const token = unwrapCursorAuthToken(rawToken);
+    if (!token || token.startsWith('cursor-safe-storage:')) continue;
     const payload = decodeJwtPayload(token);
-    if (!payload?.sub) continue;
-    if (payload.exp && payload.exp * 1000 < Date.now()) continue;
-    const userId = userIdFromSub(String(payload.sub));
+    const membershipId = values.get('cursorAuth/stripeMembershipAuthId') || '';
+    const sub = payload?.sub
+      ? String(payload.sub)
+      : membershipId.includes('|')
+        ? membershipId
+        : '';
+    if (!sub) continue;
+    if (payload?.exp && payload.exp * 1000 < Date.now()) continue;
+    const userId = userIdFromSub(sub);
     return {
       cookieValue: buildCookieValue(userId, token),
       userId,
       email: values.get('cursorAuth/cachedEmail'),
-      exp: typeof payload.exp === 'number' ? payload.exp : undefined,
+      exp: typeof payload?.exp === 'number' ? payload.exp : undefined,
       source: 'ide',
       dbPath,
     };

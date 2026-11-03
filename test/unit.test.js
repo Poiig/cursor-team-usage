@@ -2032,3 +2032,23 @@ test('换 Token 留下上一份会话，回滚只还原一级', async () => {
   }
 });
 
+
+test('cursor-safe-storage Windows v10 AES-GCM 可解', async () => {
+  const {
+    decryptWindowsV10,
+    CURSOR_SAFE_STORAGE_PREFIX,
+    unwrapCursorAuthToken,
+  } = await import('../src/cursor-safe-storage.js');
+  const crypto = await import('node:crypto');
+  const key = crypto.randomBytes(32);
+  const nonce = crypto.randomBytes(12);
+  const plain = 'header.payload.sig';
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
+  const ciphertext = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const payload = Buffer.concat([Buffer.from('v10'), nonce, ciphertext, tag]);
+  assert.equal(decryptWindowsV10(payload, key), plain);
+  assert.equal(unwrapCursorAuthToken(plain), plain);
+  assert.equal(unwrapCursorAuthToken(null), null);
+  assert.match(CURSOR_SAFE_STORAGE_PREFIX, /^cursor-safe-storage:v1:/);
+});

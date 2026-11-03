@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CURSOR_AUTH_KEYS, readCursorAuthKeys } from './cursorAuthDb';
+import { unwrapCursorAuthToken } from './cursorSafeStorage';
 
 export type LocalSession = {
   cookieValue: string;
@@ -69,21 +70,29 @@ function buildCookieValue(userId: string, token: string): string {
 export async function readLocalAuthSnapshot(): Promise<LocalAuthSnapshot | null> {
   for (const dbPath of candidateDbPaths()) {
     const values = await readCursorAuthKeys(dbPath, CURSOR_AUTH_KEYS);
-    const token = values.get('cursorAuth/accessToken');
-    if (!token) continue;
+    const rawToken = values.get('cursorAuth/accessToken');
+    if (!rawToken) continue;
+    // Cursor 3.27+ 可能写成 cursor-safe-storage:v1 密文，先解开再当 JWT 用
+    const token = unwrapCursorAuthToken(rawToken) || rawToken;
     const payload = decodeJwtPayload(token);
-    const sub = payload?.sub ? String(payload.sub) : '';
+    const membershipId = values.get('cursorAuth/stripeMembershipAuthId') || '';
+    const sub = payload?.sub
+      ? String(payload.sub)
+      : membershipId.includes('|')
+        ? membershipId
+        : '';
     const userId = sub ? userIdFromSub(sub) : undefined;
     const provider = sub.includes('|') ? sub.split('|')[0] : '';
+    const rawRefresh = values.get('cursorAuth/refreshToken') || rawToken;
+    const refreshToken = unwrapCursorAuthToken(rawRefresh) || rawRefresh;
     return {
       dbPath,
       exp: typeof payload?.exp === 'number' ? payload.exp : undefined,
       auth: {
         accessToken: token,
-        refreshToken: values.get('cursorAuth/refreshToken') || token,
+        refreshToken,
         cachedEmail: values.get('cursorAuth/cachedEmail') || null,
-        stripeMembershipAuthId:
-          values.get('cursorAuth/stripeMembershipAuthId') || (sub || null),
+        stripeMembershipAuthId: membershipId || (sub || null),
         cachedSignUpType: values.get('cursorAuth/cachedSignUpType') || provider || null,
         userId,
       },
@@ -98,6 +107,9 @@ export async function readLocalAuthSnapshot(): Promise<LocalAuthSnapshot | null>
 export async function resolveLocalCursorSession(): Promise<LocalSession | null> {
   const snap = await readLocalAuthSnapshot();
   if (!snap?.auth.accessToken || !snap.auth.userId) return null;
+  // 仍是密文前缀说明解不开，不能拿去当 Cookie
+  if (snap.auth.accessToken.startsWith('cursor-safe-storage:')) return null;
+  if (!decodeJwtPayload(snap.auth.accessToken)?.sub) return null;
   if (typeof snap.exp === 'number' && snap.exp * 1000 < Date.now()) return null;
   return {
     cookieValue: buildCookieValue(snap.auth.userId, snap.auth.accessToken),

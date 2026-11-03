@@ -1821,6 +1821,12 @@ async function detectCurrentCursorAccount() {
     const shownKey = `ctu_current_cursor_shown_${currentUser?.username || 'user'}`;
     if (sessionStorage.getItem(shownKey) !== '1') {
       sessionStorage.setItem(shownKey, '1');
+      if (info.available === false) {
+        alert(
+          '未能识别当前 Cursor 账号。\n请确认已登录 Cursor，并更新到最新插件（看板可点「更新插件」）。',
+        );
+        return;
+      }
       const account = info.email || info.userId || '未识别';
       const person = member?.displayName || '名册中未匹配到人员';
       alert(`当前 Cursor 账号：${account}\n对应人员：${person}`);
