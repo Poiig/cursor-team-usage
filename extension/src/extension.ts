@@ -297,19 +297,42 @@ function setupHeartbeat(context: vscode.ExtensionContext) {
   heartbeatTimer = setInterval(tick, HEARTBEAT_MS);
 }
 
-async function setupLocalBridge(context: vscode.ExtensionContext) {
-  if (bridgeServer) {
-    bridgeServer.close();
-    bridgeServer = undefined;
+/** 探测 127.0.0.1:port 是否已是本扩展桥（多窗口时只有一个能 listen）。 */
+async function isOwnBridgeListening(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(800),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json().catch(() => ({}))) as { service?: string };
+    return data.service === 'cursor-team-usage-reporter';
+  } catch {
+    return false;
   }
+}
+
+async function closeBridgeServer(): Promise<void> {
+  const server = bridgeServer;
+  if (!server) return;
+  bridgeServer = undefined;
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    // close 偶发不回调时不堵死重绑
+    setTimeout(resolve, 500);
+  });
+}
+
+async function setupLocalBridge(context: vscode.ExtensionContext) {
+  await closeBridgeServer();
   const port = readLocalBridgePort();
   if (port <= 0) {
     updateStatus(lastMessage.includes('桥') ? lastMessage : `${lastMessage} · 本地桥已关闭`);
     return;
   }
-  try {
+
+  const bind = async () => {
     const boardOrigin = new URL(readReporterConfig().apiBaseUrl).origin;
-    const { server, port: bound } = await startLocalBridge(
+    return startLocalBridge(
       port,
       boardOrigin,
       (ticketId) => handleAccountSwitch(context, ticketId),
@@ -347,6 +370,30 @@ async function setupLocalBridge(context: vscode.ExtensionContext) {
         };
       },
     );
+  };
+
+  try {
+    let started: Awaited<ReturnType<typeof startLocalBridge>>;
+    try {
+      started = await bind();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/EADDRINUSE/i.test(msg)) throw e;
+      // 重载时旧监听可能尚未释放：稍等再试一次
+      await new Promise((r) => setTimeout(r, 400));
+      try {
+        started = await bind();
+      } catch (e2) {
+        const msg2 = e2 instanceof Error ? e2.message : String(e2);
+        if (/EADDRINUSE/i.test(msg2) && (await isOwnBridgeListening(port))) {
+          // 另一 Cursor 窗口已在听：请求会打到那个窗口，本窗口不必再告警
+          updateStatus(`就绪 · 本地桥 :${port}（其他窗口已监听）`);
+          return;
+        }
+        throw e2;
+      }
+    }
+    const { server, port: bound } = started;
     bridgeServer = server;
     context.subscriptions.push({
       dispose: () => {
@@ -418,13 +465,14 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.window.registerUriHandler({
       handleUri(uri: vscode.Uri) {
-        // 浏览器打不开本机桥时，用 cursor:// 拉起 IDE。path 区分切换和恢复，恢复不需要票据。
+        // 浏览器用 cursor:// 拉起 IDE。恢复认 path=/restore 或 ?action=restore（与切换同形，避免无 query 被协议层丢掉）。
         const route = uri.path.replace(/^\/+|\/+$/g, '');
-        if (route === 'restore') {
+        const params = new URLSearchParams(uri.query);
+        if (route === 'restore' || params.get('action') === 'restore') {
           void handleRestoreHomeAccount(context);
           return;
         }
-        const ticket = new URLSearchParams(uri.query).get('ticket') || '';
+        const ticket = params.get('ticket') || '';
         if (!ticket) {
           void vscode.window.showErrorMessage('Cursor Team Usage：切换链接缺少 ticket');
           return;

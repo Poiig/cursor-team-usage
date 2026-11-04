@@ -1184,7 +1184,7 @@ function onboardingSteps() {
       text: isAdmin()
         ? '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。管理员还能添加账号、查看报表和管理用户。'
         : '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。首次切换会记下本机账号，之后可「恢复本机账号」。',
-      warning: 'IDE 未打开时，切换和恢复会用 cursor:// 拉起 IDE，请在 Cursor 弹窗里确认。需先装好 Reporter 插件。',
+      warning: '恢复本机账号会用 cursor:// 拉起 IDE；切换在桥不可用时同样拉起。请在 Cursor 弹窗里确认，并先装好 Reporter 插件。',
       note: '以后可在「说明」页面点击「重新打开引导」，随时回看这些步骤。',
     },
   ];
@@ -1957,53 +1957,40 @@ function openCursorProtocol(uri) {
 }
 
 /**
- * 通过本机桥恢复首次切换前记下的本机 Cursor 账号。
- * 桥不在（IDE 没开）时改走 cursor://，由系统拉起 IDE 再恢复。
+ * 恢复本机账号：始终走 cursor:// 拉起/聚焦 IDE 再确认。
+ * 多窗口时 :3781 常被 Agent 占用，看板打桥会把确认框弹到看不见的窗口；与切换不同，恢复必须进 IDE。
  */
 async function restoreLastLocalAccount() {
+  let label = '本机账号';
+  let detail = '将按本机备份或号池主机名找回';
   const port = await findLocalBridgePort();
-  if (port == null) {
-    if (
-      !confirm(
-        '本机 Cursor 未在运行。将拉起 Cursor IDE 并恢复本机账号。\n请在弹出的 Cursor 窗口中确认。继续？',
-      )
-    ) {
-      return;
+  if (port != null) {
+    try {
+      const infoRes = await fetch(`http://127.0.0.1:${port}/backup`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(2000),
+      });
+      const info = await infoRes.json().catch(() => ({}));
+      label = info.email || info.userId || label;
+      detail = info.exists
+        ? `备份于 ${info.savedAt ? formatDateTime(info.savedAt) : '未知时间'}`
+        : '本机尚无备份，将按主机名从号池找回首次上报账号';
+    } catch {
+      /* 摘要失败仍可拉起 IDE 恢复 */
     }
-    openCursorProtocol('cursor://poiig.cursor-team-usage-reporter/restore');
-    toast('已尝试拉起 Cursor IDE。请在弹窗中确认恢复。若提示缺少 ticket，请先把 Reporter 更新到 0.2.22', 8000);
+  }
+  if (
+    !confirm(
+      `将拉起 Cursor IDE 并恢复本机账号「${label}」（${detail}）。\n请在 Cursor 弹窗中确认。继续？`,
+    )
+  ) {
     return;
   }
-  try {
-    const infoRes = await fetch(`http://127.0.0.1:${port}/backup`, {
-      method: 'GET',
-      signal: AbortSignal.timeout(2000),
-    });
-    const info = await infoRes.json().catch(() => ({}));
-    const label = info.email || info.userId || '本机账号';
-    const detail = info.exists
-      ? `备份于 ${info.savedAt ? formatDateTime(info.savedAt) : '未知时间'}`
-      : '本机尚无备份，将按主机名从号池找回首次上报账号';
-    if (!confirm(`将恢复本机账号「${label}」（${detail}）并重启 Cursor。\n请在 Cursor 弹窗中确认。继续？`)) {
-      return;
-    }
-    setBusy(els.btnRestoreLocal, true, '恢复中…');
-    const res = await fetch(`http://127.0.0.1:${port}/restore`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok && res.status !== 202) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `桥返回 ${res.status}`);
-    }
-    toast(`已通知本机 Cursor 恢复本机账号「${label}」，请在弹窗中确认`);
-  } catch (e) {
-    toast(e.message || String(e));
-  } finally {
-    setBusy(els.btnRestoreLocal, false);
-  }
+  // 与切换回退同形：带 action=restore，避免部分环境下无 query 的 /restore 路径丢失
+  openCursorProtocol(
+    'cursor://poiig.cursor-team-usage-reporter/switch?action=restore',
+  );
+  toast('已拉起 Cursor IDE，请在弹窗中确认恢复。若无反应，请把 Reporter 更新到 0.2.26+', 8000);
 }
 
 /**
