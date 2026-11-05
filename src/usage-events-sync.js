@@ -185,12 +185,23 @@ export async function fillSnapshotSpendFromLocalEvents(memberId, snapshot, opts 
 }
 
 /**
- * 详情页：用落库 usage_events 校正今日模型 / Top models（避免旧快照 count 或整窗冒充今日）。
+ * 详情/列表：用落库 usage_events 校正今日模型与 spend。
+ * 入参若已挂席位（activeUsers 等），必须保留——toPublicMember 不含这些字段。
  * @param {any} member
  */
 export async function enrichPublicMemberFromEvents(member) {
   if (!member) return null;
-  const pub = toPublicMember(member);
+  const pub = {
+    ...toPublicMember(member),
+    ...(Array.isArray(member.activeUsers)
+      ? {
+          activeUsers: member.activeUsers,
+          activeUserCount: member.activeUserCount,
+          maxUsers: member.maxUsers,
+          capacityFull: member.capacityFull,
+        }
+      : {}),
+  };
   const snap = pub.lastSnapshot;
   if (!snap) return pub;
   try {
