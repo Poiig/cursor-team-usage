@@ -30,6 +30,7 @@ import {
 import {
   ensureMemberUsageEventsSynced,
   enrichPublicMemberFromEvents,
+  fillSnapshotSpendFromLocalEvents,
   loadPreviousCycle,
   persistSnapshotUsageEvents,
 } from './usage-events-sync.js';
@@ -326,11 +327,29 @@ async function refreshOne(id, ctx = {}) {
     const label = memberLogLabel(member);
     try {
       const snapshot = await fetchMemberSnapshotWithRetry(member.cookieValue);
+      const fetchedEvents = Array.isArray(snapshot._usageEvents)
+        ? snapshot._usageEvents.length
+        : 0;
       // 先落事件再存快照，避免 _usageEvents 进 last_snapshot。
       try {
         await persistSnapshotUsageEvents(id, snapshot);
       } catch (eventsErr) {
         console.warn('[usage-events] 刷新落库失败', id, eventsErr?.message || eventsErr);
+      }
+      // Cursor 事件接口 500 时快照会把今日用量写成空；用本地库回填，避免看板归零。
+      if (fetchedEvents === 0) {
+        try {
+          const filled = await fillSnapshotSpendFromLocalEvents(id, snapshot);
+          if (filled.filled) {
+            console.warn(
+              '[usage-events] 官方事件为空，已用本地库回填今日用量',
+              id,
+              `tokens=${filled.todayTokens}`,
+            );
+          }
+        } catch (fillErr) {
+          console.warn('[usage-events] 本地回填失败', id, fillErr?.message || fillErr);
+        }
       }
       const result = await saveSyncResult(id, { snapshot });
       await writeAppLog('刷新', {
@@ -1436,7 +1455,10 @@ const server = http.createServer(async (req, res) => {
             .map((user) => [user.username.toLowerCase(), user.alias]),
         ),
       );
-      const members = named;
+      // 列表也按本地事件校正今日用量（官方事件接口失败时快照可能被写成 0）
+      const members = await Promise.all(
+        named.map((m) => enrichPublicMemberFromEvents(m).then((row) => row || m)),
+      );
       const recommended = recommendSwitchMember(members);
       return sendJson(res, 200, {
         members,

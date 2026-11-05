@@ -4,7 +4,9 @@
 
 import { sessionFromCookie } from './auth.js';
 import {
+  aggregateSpendPeriods,
   fetchUsageEventsMerged,
+  localDayKey,
   summarizeEvents,
   topModelsByTokens,
 } from './cursor-api.js';
@@ -125,6 +127,64 @@ export async function persistSnapshotUsageEvents(memberId, snapshot) {
 }
 
 /**
+ * Cursor 事件接口失败时快照会把 spend.today/daily 写成 0；用本地 usage_events 回填。
+ * 已有今日 tokens 时默认不改，避免覆盖刚拉到的官方数。
+ * @param {string} memberId
+ * @param {any} snapshot
+ * @param {{ nowMs?: number, force?: boolean }} [opts]
+ */
+export async function fillSnapshotSpendFromLocalEvents(memberId, snapshot, opts = {}) {
+  if (!memberId || !snapshot) return { filled: false, reason: 'no-snapshot' };
+  const now = opts.nowMs ?? Date.now();
+  const apiTodayTokens = Number(snapshot.spend?.today?.tokens) || 0;
+  if (!opts.force && apiTodayTokens > 0) return { filled: false, reason: 'api-ok' };
+
+  const rangeStart = localDayStartMs(now) - 29 * 86400000;
+  const events = await listUsageEventsInRange(memberId, rangeStart, now + 1);
+  if (!events.length) return { filled: false, reason: 'no-local' };
+
+  const localSpend = aggregateSpendPeriods(events, now);
+  const todayKey = localDayKey(localDayStartMs(now));
+  const todayModels = topModelsByTokens(events, todayKey, 8);
+  snapshot.spend = {
+    ...(snapshot.spend || {}),
+    today: localSpend.today,
+    yesterday: localSpend.yesterday,
+    last30: localSpend.last30,
+    daily: localSpend.daily,
+    todayModels,
+    todayModelsFallback: false,
+  };
+
+  const hasTokenTop =
+    Array.isArray(snapshot.usage?.topModels) &&
+    snapshot.usage.topModels.some((m) => Number(m?.tokens) > 0);
+  if (!hasTokenTop) {
+    const start = Date.parse(snapshot.window?.startIso || '');
+    const endRaw = Date.parse(snapshot.window?.endIso || '');
+    const end = Number.isFinite(endRaw) ? Math.min(endRaw, now) : now;
+    if (Number.isFinite(start) && end > start) {
+      const cycleEvents = await listUsageEventsInRange(memberId, start, end + 1);
+      const usage = summarizeEvents(cycleEvents);
+      if (usage.topModels?.length) {
+        snapshot.usage = {
+          ...(snapshot.usage || {}),
+          topModels: usage.topModels,
+          totalTokens: Number(snapshot.usage?.totalTokens) || usage.totalTokens,
+          requestCount: Number(snapshot.usage?.requestCount) || usage.requestCount,
+        };
+      }
+    }
+  }
+
+  return {
+    filled: true,
+    todayTokens: Number(localSpend.today?.tokens) || 0,
+    eventCount: events.length,
+  };
+}
+
+/**
  * 详情页：用落库 usage_events 校正今日模型 / Top models（避免旧快照 count 或整窗冒充今日）。
  * @param {any} member
  */
@@ -133,51 +193,8 @@ export async function enrichPublicMemberFromEvents(member) {
   const pub = toPublicMember(member);
   const snap = pub.lastSnapshot;
   if (!snap) return pub;
-  const now = Date.now();
   try {
-    const todayEvents = await listUsageEventsInRange(member.id, localDayStartMs(now), now + 1);
-    const todayModels = topModelsByTokens(todayEvents, '', 8);
-    const todayTokens = todayEvents.reduce(
-      (s, e) => s + (Number(e.totalTokens) || 0),
-      0,
-    );
-    const todayDollars =
-      Math.round(
-        (todayEvents.reduce((s, e) => s + (Number(e.chargedCents) || 0), 0) / 100) * 100,
-      ) / 100;
-    snap.spend = {
-      ...(snap.spend || {}),
-      todayModels,
-      todayModelsFallback: false,
-      today: {
-        ...(snap.spend?.today || {}),
-        tokens: todayTokens,
-        requests: todayEvents.length,
-        dollars: todayDollars,
-        estimated: true,
-      },
-    };
-
-    const hasTokenTop =
-      Array.isArray(snap.usage?.topModels) &&
-      snap.usage.topModels.some((m) => Number(m?.tokens) > 0);
-    if (!hasTokenTop) {
-      const start = Date.parse(snap.window?.startIso || '');
-      const endRaw = Date.parse(snap.window?.endIso || '');
-      const end = Number.isFinite(endRaw) ? Math.min(endRaw, now) : now;
-      if (Number.isFinite(start) && end > start) {
-        const cycleEvents = await listUsageEventsInRange(member.id, start, end + 1);
-        const usage = summarizeEvents(cycleEvents);
-        if (usage.topModels?.length) {
-          snap.usage = {
-            ...(snap.usage || {}),
-            topModels: usage.topModels,
-            totalTokens: Number(snap.usage?.totalTokens) || usage.totalTokens,
-            requestCount: Number(snap.usage?.requestCount) || usage.requestCount,
-          };
-        }
-      }
-    }
+    await fillSnapshotSpendFromLocalEvents(member.id, snap);
   } catch {
     // 读库失败时仍返回原快照，不挡详情页
   }
