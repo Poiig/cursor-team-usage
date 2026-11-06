@@ -145,21 +145,24 @@ export function normalizeUsageEventForStore(e, syncedAt = new Date().toISOString
  */
 export function dedupeNormalizedUsageEvents(events, syncedAt = new Date().toISOString()) {
   /** @type {Map<string, ReturnType<typeof normalizeUsageEventForStore>>} */
-  const byFp = new Map();
+  const byId = new Map();
   for (const raw of Array.isArray(events) ? events : []) {
     const e = normalizeUsageEventForStore(raw, syncedAt);
     if (!e.eventId || !e.tsMs) continue;
-    const fp = `${e.tsMs}|${e.model}|${e.totalTokens}`;
-    const prev = byFp.get(fp);
-    if (!prev) {
-      byFp.set(fp, e);
-      continue;
-    }
-    const prevSyn = isSyntheticEventId(prev.eventId);
-    const curSyn = isSyntheticEventId(e.eventId);
-    if (prevSyn && !curSyn) byFp.set(fp, e);
+    byId.set(e.eventId, e);
   }
-  return [...byFp.values()];
+  const rows = [...byId.values()];
+  const realFingerprints = new Set(
+    rows
+      .filter((e) => !isSyntheticEventId(e.eventId))
+      .map((e) => `${e.tsMs}|${e.model}|${e.totalTokens}`),
+  );
+  // 只在同指纹已有真实 UUID 时删除旧版伪 ID；真实 UUID 即使字段相同也可能是两次独立请求，必须全部保留。
+  return rows.filter(
+    (e) =>
+      !isSyntheticEventId(e.eventId) ||
+      !realFingerprints.has(`${e.tsMs}|${e.model}|${e.totalTokens}`),
+  );
 }
 
 /**

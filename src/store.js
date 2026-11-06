@@ -260,6 +260,11 @@ export async function listAppLogsForHydrate(sinceIso, limit) {
   return api().listAppLogsForHydrate(sinceIso, limit);
 }
 
+/** @param {number} [limit] @param {string[]} [actions] */
+export async function listAppLogs(limit, actions) {
+  return api().listAppLogs(limit, actions);
+}
+
 /** @param {number} [max] */
 export async function pruneLoginEvents(max) {
   return api().pruneLoginEvents(max);

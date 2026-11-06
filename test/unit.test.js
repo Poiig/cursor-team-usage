@@ -50,8 +50,19 @@ import {
   USAGE_EVENTS_STALE_MS,
   computeUsageEventsSyncWindow,
   normalizeUsageEventForStore,
+  dedupeNormalizedUsageEvents,
   usageEventsNeedSync,
 } from '../src/usage-events.js';
+
+test('用量事件去重保留同指纹的不同真实 UUID，仅删除对应伪 ID', () => {
+  const base = { timestamp: 1762400000000, model: 'gpt-5', totalTokens: 100 };
+  const rows = dedupeNormalizedUsageEvents([
+    { ...base, id: 'real-a' },
+    { ...base, id: 'real-b' },
+    { ...base, id: '1762400000000-gpt-5' },
+  ]);
+  assert.deepEqual(rows.map((r) => r.eventId).sort(), ['real-a', 'real-b']);
+});
 import {
   consumeInstallToken,
   getInstallToken,
@@ -1551,7 +1562,8 @@ test('app-log 日期键、账号标签与过期清理', async () => {
     hostname: 'LUKE-PC',
   });
   assert.match(label, /陈瑶/);
-  assert.match(label, /id=abc/);
+  assert.equal(label, '陈瑶');
+  assert.ok(!label.includes('id='));
 
   const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-log-'));
   const oldDay = new Date(2020, 0, 15, 12, 0, 0, 0);

@@ -327,6 +327,23 @@ function createSqliteApi(ctx) {
       }));
     },
 
+    async listAppLogs(limit = 200, actions = []) {
+      const allowed = Array.isArray(actions) ? actions.filter(Boolean) : [];
+      const where = allowed.length
+        ? ` WHERE action IN (${allowed.map(() => '?').join(',')})`
+        : '';
+      return getAll(
+        `SELECT * FROM app_logs${where} ORDER BY created_at DESC LIMIT ?`,
+        [...allowed, limit],
+      ).map((row) => ({
+        id: String(row.id),
+        createdAt: String(row.created_at),
+        action: String(row.action),
+        line: String(row.line || ''),
+        fields: parseJsonObject(row.fields_json),
+      }));
+    },
+
     async pruneLoginEvents(max = LOGIN_EVENTS_MAX) {
       const keep = getAll(
         'SELECT id FROM login_events ORDER BY created_at DESC LIMIT ?',
@@ -684,6 +701,28 @@ function createPgApi(ctx) {
       }));
     },
 
+    async listAppLogs(limit = 200, actions = []) {
+      const allowed = Array.isArray(actions) ? actions.filter(Boolean) : [];
+      const params = [limit];
+      let where = '';
+      if (allowed.length) {
+        params.unshift(allowed);
+        where = ' WHERE action = ANY($1::text[])';
+      }
+      const limitArg = allowed.length ? '$2' : '$1';
+      const { rows } = await query(
+        `SELECT * FROM app_logs${where} ORDER BY created_at DESC LIMIT ${limitArg}`,
+        params,
+      );
+      return rows.map((row) => ({
+        id: String(row.id),
+        createdAt: new Date(row.created_at).toISOString(),
+        action: String(row.action),
+        line: String(row.line || ''),
+        fields: typeof row.fields_json === 'object' ? row.fields_json : parseJsonObject(row.fields_json),
+      }));
+    },
+
     async pruneLoginEvents(max = LOGIN_EVENTS_MAX) {
       await query(
         `DELETE FROM login_events WHERE id NOT IN (
@@ -844,6 +883,21 @@ function createFileApi(ctx) {
         .map((r) => ({
           createdAt: String(r.createdAt),
           action: String(r.action),
+          line: String(r.line || ''),
+          fields: r.fields || parseJsonObject(r.fieldsJson),
+        }));
+    },
+
+    async listAppLogs(limit = 200, actions = []) {
+      const rows = await readJson(paths.appLogs, []);
+      const allowed = new Set(Array.isArray(actions) ? actions.filter(Boolean) : []);
+      return (Array.isArray(rows) ? rows : [])
+        .filter((r) => !allowed.size || allowed.has(r.action))
+        .slice(0, limit)
+        .map((r) => ({
+          id: String(r.id || ''),
+          createdAt: String(r.createdAt || ''),
+          action: String(r.action || ''),
           line: String(r.line || ''),
           fields: r.fields || parseJsonObject(r.fieldsJson),
         }));

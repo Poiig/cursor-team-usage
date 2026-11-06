@@ -51,17 +51,13 @@ function formatTimestamp(d = new Date()) {
 }
 
 /**
- * 账号可读标签，便于日志检索。
+ * 账号可读标签（仅账号名，便于列表展示）。
  * @param {{ id?: string, displayName?: string, email?: string, userId?: string, hostname?: string | null } | null | undefined} member
  */
 export function memberLogLabel(member) {
   if (!member) return '未知账号';
   const name = (member.displayName || member.email || member.userId || member.id || '').trim();
-  const parts = [name || '未命名'];
-  if (member.id) parts.push(`id=${member.id}`);
-  if (member.email && member.email !== name) parts.push(`email=${member.email}`);
-  if (member.hostname) parts.push(`host=${member.hostname}`);
-  return parts.join(' ');
+  return name || '未命名';
 }
 
 /**

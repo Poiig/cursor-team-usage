@@ -58,6 +58,7 @@ import {
   getAllMembersInternal,
   getMemberInternal,
   initStore,
+  listAppLogs,
   listMembers,
   listUsageEvents,
   pruneOperationalData,
@@ -331,11 +332,7 @@ async function refreshOne(id, ctx = {}) {
         ? snapshot._usageEvents.length
         : 0;
       // 先落事件再存快照，避免 _usageEvents 进 last_snapshot。
-      try {
-        await persistSnapshotUsageEvents(id, snapshot);
-      } catch (eventsErr) {
-        console.warn('[usage-events] 刷新落库失败', id, eventsErr?.message || eventsErr);
-      }
+      const persistedEvents = await persistSnapshotUsageEvents(id, snapshot);
       // 落库后按本地事件校正周期（纠正分页截断）；官方今日为空时再回填今日。
       try {
         const filled = await fillSnapshotSpendFromLocalEvents(id, snapshot);
@@ -351,11 +348,21 @@ async function refreshOne(id, ctx = {}) {
         console.warn('[usage-events] 本地回填失败', id, fillErr?.message || fillErr);
       }
       const result = await saveSyncResult(id, { snapshot });
+      const updateBits = ['用量快照'];
+      if (fetchedEvents > 0 || persistedEvents.upserted > 0) {
+        updateBits.push(`事件拉取 ${fetchedEvents} / 落库 ${persistedEvents.upserted}`);
+      }
+      if (Array.isArray(snapshot?.warnings) && snapshot.warnings.length) {
+        updateBits.push(`警告 ${snapshot.warnings.length} 项`);
+      }
       await writeAppLog('刷新', {
         账号: label,
         来源: source,
         触发: trigger || undefined,
         结果: '成功',
+        更新: updateBits.join('；'),
+        拉取记录数: fetchedEvents,
+        落库记录数: persistedEvents.upserted,
         同步时间: result?.lastSyncedAt || snapshot?.syncedAt,
         可选接口警告:
           Array.isArray(snapshot?.warnings) && snapshot.warnings.length
@@ -372,6 +379,7 @@ async function refreshOne(id, ctx = {}) {
         来源: source,
         触发: trigger || undefined,
         结果: keepSnapshot ? '网络抖动(保留上次)' : '失败',
+        更新: keepSnapshot ? '保留上次快照' : '未更新',
         错误: msg,
       });
       return result;
@@ -419,7 +427,8 @@ async function refreshDueMembers(concurrency = 2, ctx = {}) {
     触发: ctx.trigger || '定时扫描',
     到期账号数: due.length,
     总账号数: members.length,
-    账号列表: due.map((m) => memberLogLabel(m)).join('; '),
+    账号: due.map((m) => memberLogLabel(m)).join('、'),
+    更新: `开始刷新 ${due.length} 个到期账号`,
   });
 
   const queue = [...due];
@@ -444,6 +453,7 @@ async function refreshDueMembers(concurrency = 2, ctx = {}) {
     完成: true,
     成功: ok,
     失败: fail,
+    更新: `完成：成功 ${ok} / 失败 ${fail}`,
   });
   return results;
 }
@@ -459,7 +469,8 @@ async function refreshAll(concurrency = 3, ctx = {}) {
     来源: ctx.source || '控制台',
     触发: ctx.trigger || '手动',
     账号数: members.length,
-    账号列表: members.map((m) => memberLogLabel(m)).join('; '),
+    账号: members.map((m) => memberLogLabel(m)).join('、'),
+    更新: `开始刷新全部 ${members.length} 个账号`,
   });
   const queue = [...members];
   const results = [];
@@ -488,6 +499,7 @@ async function refreshAll(concurrency = 3, ctx = {}) {
     完成: true,
     成功: ok,
     失败: results.length - ok,
+    更新: `完成：成功 ${ok} / 失败 ${results.length - ok}`,
   });
   return results;
 }
@@ -1112,6 +1124,13 @@ const server = http.createServer(async (req, res) => {
           };
         }),
       });
+    }
+
+    if (method === 'GET' && pathname === '/api/refresh-logs') {
+      await assertAdmin(req);
+      const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit') || 300)));
+      const logs = await listAppLogs(limit, ['刷新', '自动刷新', '全量刷新']);
+      return sendJson(res, 200, { logs });
     }
 
     if (method === 'GET' && pathname === '/api/reports/switches') {

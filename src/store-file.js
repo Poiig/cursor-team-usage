@@ -110,6 +110,9 @@ export async function insertAppLog(row) {
 export async function listAppLogsForHydrate(sinceIso, limit) {
   return sideApi().listAppLogsForHydrate(sinceIso, limit);
 }
+export async function listAppLogs(limit, actions) {
+  return sideApi().listAppLogs(limit, actions);
+}
 /** @param {number} [max] */
 export async function pruneLoginEvents(max) {
   return sideApi().pruneLoginEvents(max);

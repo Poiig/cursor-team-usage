@@ -1476,14 +1476,17 @@ export function mergeUsageEventsById(...lists) {
       byId.set(id, prev ? prefer(prev, e) : e);
     }
   }
-  /** @type {Map<string, any>} */
-  const byFp = new Map();
-  for (const e of byId.values()) {
-    const fp = eventFingerprint(e);
-    const prev = byFp.get(fp);
-    byFp.set(fp, prev ? prefer(prev, e) : e);
-  }
-  return [...byFp.values()].sort(
+  const rows = [...byId.values()];
+  const realFingerprints = new Set(
+    rows.filter((e) => !isSyntheticEventId(e?.id)).map((e) => eventFingerprint(e)),
+  );
+  // 仅清理与真实 UUID 对应的旧版伪 ID。两个真实 UUID 即使时间、模型、token 相同也不能合并。
+  return rows
+    .filter(
+      (e) =>
+        !isSyntheticEventId(e?.id) || !realFingerprints.has(eventFingerprint(e)),
+    )
+    .sort(
     (a, b) => eventTimestampMs(b.timestamp) - eventTimestampMs(a.timestamp),
   );
 }

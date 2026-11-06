@@ -161,6 +161,7 @@
           <nav class="logs-nav" aria-label="日志类型">
             <button type="button" class="logs-nav-item active" data-log="switches">切换</button>
             <button type="button" class="logs-nav-item admin-only hidden" data-log="reports">上报</button>
+            <button type="button" class="logs-nav-item admin-only hidden" data-log="refreshes">刷新用量</button>
             <button type="button" class="logs-nav-item admin-only hidden" data-log="logins">登录</button>
           </nav>
           <div class="logs-main">
@@ -214,6 +215,14 @@
                     </tr>
                   </thead>
                   <tbody id="loginLogBody"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="logs-pane hidden" data-log-pane="refreshes">
+              <div class="rank-table-wrap logs-table-wrap">
+                <table class="rank-table">
+                  <thead><tr><th>时间</th><th>类型</th><th>账号</th><th>更新内容</th><th>来源 / 触发</th><th>结果</th></tr></thead>
+                  <tbody id="refreshLogBody"></tbody>
                 </table>
               </div>
             </div>

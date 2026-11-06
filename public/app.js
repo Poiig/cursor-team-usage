@@ -102,6 +102,7 @@ const els = {
   switchLogBody: document.getElementById('switchLogBody'),
   reportLogBody: document.getElementById('reportLogBody'),
   loginLogBody: document.getElementById('loginLogBody'),
+  refreshLogBody: document.getElementById('refreshLogBody'),
   btnRefreshLogs: document.getElementById('btnRefreshLogs'),
   btnRefreshReports: document.getElementById('btnRefreshReports'),
   chartTeamUsage: document.getElementById('chartTeamUsage'),
@@ -154,7 +155,7 @@ let currentUser = null;
 let switchLogsCache = [];
 /** @type {object[]} */
 let usersCache = [];
-/** @type {'switches' | 'reports' | 'logins'} */
+/** @type {'switches' | 'reports' | 'refreshes' | 'logins'} */
 let activeLogKind = 'switches';
 let recommendedSwitchId = null;
 let currentCursorMemberId = null;
@@ -993,7 +994,7 @@ function setAccountStatusFilter(next) {
  * #/accounts[/ok|speeding|expiring|error][?sort=&q=] · #/reports · #/logs/<kind> · #/users · #/help
  */
 const ACCOUNT_FILTERS = new Set(['ok', 'speeding', 'expiring', 'error']);
-const LOG_KINDS = new Set(['switches', 'reports', 'logins']);
+const LOG_KINDS = new Set(['switches', 'reports', 'refreshes', 'logins']);
 
 function parseRoute() {
   const raw = location.hash.replace(/^#\/?/, '');
@@ -1132,10 +1133,10 @@ function showView(view) {
   return next;
 }
 
-/** @param {'switches' | 'reports' | 'logins'} kind */
+/** @param {'switches' | 'reports' | 'refreshes' | 'logins'} kind */
 function setLogKind(kind) {
   const next =
-    kind === 'reports' || kind === 'logins'
+    kind === 'reports' || kind === 'refreshes' || kind === 'logins'
       ? isAdmin()
         ? kind
         : 'switches'
@@ -1397,11 +1398,15 @@ async function loadLogs() {
   try {
     const tasks = [api('/api/switch-logs?limit=200')];
     if (isAdmin()) {
-      tasks.push(api('/api/report-logs?limit=200'), api('/api/login-logs?limit=100'));
+      tasks.push(
+        api('/api/report-logs?limit=200'),
+        api('/api/login-logs?limit=100'),
+        api('/api/refresh-logs?limit=300'),
+      );
     }
     // 「切换后新增」最新一段要用账号当前用量，直接打开日志页时账号列表可能还没加载
     const membersTask = membersCache.length ? null : api('/api/members').catch(() => null);
-    const [switchData, reportData, loginData] = await Promise.all(tasks);
+    const [switchData, reportData, loginData, refreshData] = await Promise.all(tasks);
     const mem = await membersTask;
     if (mem?.members) membersCache = mem.members;
     switchLogsCache = switchData.logs || [];
@@ -1450,6 +1455,46 @@ async function loadLogs() {
             )
             .join('')
         : '<tr><td colspan="5" class="muted">暂无登录记录</td></tr>';
+    }
+
+    if (isAdmin() && els.refreshLogBody) {
+      const logs = refreshData?.logs || [];
+      els.refreshLogBody.innerHTML = logs.length
+        ? logs
+            .map((log) => {
+              const f = log.fields || {};
+              const result =
+                f['结果'] ||
+                (f['完成'] ? `成功 ${f['成功'] || 0} / 失败 ${f['失败'] || 0}` : '开始');
+              const resultText = String(result || '');
+              let badgeClass = 'muted';
+              if (resultText === '成功' || /^成功\s/.test(resultText)) badgeClass = 'ok';
+              else if (resultText === '失败' || /失败/.test(resultText)) badgeClass = 'danger';
+              else if (/网络抖动/.test(resultText)) badgeClass = 'warn';
+              const accountRaw = f['账号'] || f['账号列表'] || '';
+              const account = String(accountRaw).split(/\s+id=/)[0].trim() || '—';
+              const update =
+                f['更新'] ||
+                [
+                  f['拉取记录数'] != null ? `拉取 ${f['拉取记录数']}` : '',
+                  f['落库记录数'] != null ? `落库 ${f['落库记录数']}` : '',
+                ]
+                  .filter(Boolean)
+                  .join(' / ') ||
+                (f['完成'] ? resultText : resultText === '开始' ? '开始刷新' : '—');
+              return `<tr>
+              <td>${escapeHtml(formatDateTime(log.createdAt) || log.createdAt || '—')}</td>
+              <td>${escapeHtml(log.action || '—')}</td>
+              <td>${escapeHtml(account)}</td>
+              <td>${escapeHtml(update)}</td>
+              <td>${escapeHtml([f['来源'], f['触发']].filter(Boolean).join(' / ') || '—')}</td>
+              <td><span class="badge ${badgeClass}">${escapeHtml(resultText)}</span>${
+                f['错误'] ? ` <span class="muted">${escapeHtml(f['错误'])}</span>` : ''
+              }</td>
+            </tr>`;
+            })
+            .join('')
+        : '<tr><td colspan="6" class="muted">暂无刷新记录</td></tr>';
     }
   } catch (e) {
     toast(e.message || String(e));
