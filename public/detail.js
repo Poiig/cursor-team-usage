@@ -446,7 +446,8 @@ function renderMember() {
     '#2dd4bf',
     (v) => (v <= 0 ? '0' : formatTokens(v)),
   );
-  const models = (snap?.usage?.topModels || []).slice(0, 8);
+  // 当前周期模型全部展示，容器内滚动；不要截成 Top 8。
+  const models = snap?.usage?.topModels || [];
   const modelsTitle = els.chartModels?.previousElementSibling;
   const weekly =
     snap?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||

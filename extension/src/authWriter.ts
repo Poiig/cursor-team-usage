@@ -177,7 +177,7 @@ function macSpawnDetached(scriptPath: string): void {
 }
 
 /**
- * 与 Windows 同一套约定：进程外脚本等 Cursor 退干净再 open；用户点取消则放弃。
+ * 与 Windows 同一套约定：进程外强杀再 open，绕过 Quit 确认框。
  */
 async function scheduleMacRestart(delaySec: number, waitExitSec: number): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'ctu-restart-'));
@@ -194,6 +194,8 @@ async function scheduleMacRestart(delaySec: number, waitExitSec: number): Promis
     'W() { printf "%s %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$*" >> "$LOG"; }',
     `W "restart script pid=$$ child-run=${runId}"`,
     `sleep ${delaySec}`,
+    'W "force kill Cursor"',
+    '/usr/bin/pkill -x Cursor >/dev/null 2>&1 || true',
     'n=0',
     'while /usr/bin/pgrep -x Cursor >/dev/null 2>&1; do',
     '  n=$((n+1))',
@@ -201,6 +203,7 @@ async function scheduleMacRestart(delaySec: number, waitExitSec: number): Promis
     '    W "cursor still running, skip launch"',
     '    exit 0',
     '  fi',
+    '  /usr/bin/pkill -x Cursor >/dev/null 2>&1 || true',
     '  sleep 1',
     'done',
     'sleep 1',
@@ -273,7 +276,7 @@ function winSpawnViaSchtasks(cmdPath: string): void {
 }
 
 /**
- * 后台拉起重启后退出当前 Cursor。
+ * 后台强杀当前 Cursor 再拉起，绕过 Quit 确认框。
  * Windows 走 WMI，Mac 走 launchd；都要等旧进程退干净再启动，否则新实例会把自己交给旧进程然后退出。
  */
 export async function scheduleCursorRestart(): Promise<void> {
@@ -285,17 +288,20 @@ export async function scheduleCursorRestart(): Promise<void> {
     const log = restartLogPath();
     const exe = cursorExePath() || '';
     const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    // powershell -File 无控制台会静默退出；cmd + WMI 才能活过 Quit
+    // powershell -File 无控制台会静默退出；cmd + WMI 才能活过进程退出
     const cmd = [
       '@echo off',
       'setlocal',
       `set "LOG=${log}"`,
       `echo restart script child-run=${runId}>>"%LOG%"`,
       `timeout /t ${delaySec} /nobreak >nul`,
+      'echo force kill>>"%LOG%"',
+      'taskkill /F /IM Cursor.exe >nul 2>&1',
       'set WAITED=0',
       ':wait',
       'tasklist /FI "IMAGENAME eq Cursor.exe" | find /I "Cursor.exe" >nul',
       'if errorlevel 1 goto launch',
+      'taskkill /F /IM Cursor.exe >nul 2>&1',
       'timeout /t 1 /nobreak >nul',
       'set /a WAITED+=1',
       `if %WAITED% LSS ${waitExitSec} goto wait`,
@@ -350,7 +356,4 @@ export async function scheduleCursorRestart(): Promise<void> {
     const bash = `sleep ${delaySec}; pkill -x cursor || pkill -x Cursor || true; ${waitExit}; (command -v cursor >/dev/null && cursor) || true`;
     spawn('/bin/bash', ['-lc', bash], { detached: true, stdio: 'ignore' }).unref();
   }
-
-  // 脚本已在 Job 外跑着；Quit 会出系统确认框，点 Cancel 则脚本超时后放弃拉起
-  await vscode.commands.executeCommand('workbench.action.quit');
 }

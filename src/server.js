@@ -336,20 +336,19 @@ async function refreshOne(id, ctx = {}) {
       } catch (eventsErr) {
         console.warn('[usage-events] 刷新落库失败', id, eventsErr?.message || eventsErr);
       }
-      // Cursor 事件接口 500 时快照会把今日用量写成空；用本地库回填，避免看板归零。
-      if (fetchedEvents === 0) {
-        try {
-          const filled = await fillSnapshotSpendFromLocalEvents(id, snapshot);
-          if (filled.filled) {
-            console.warn(
-              '[usage-events] 官方事件为空，已用本地库回填今日用量',
-              id,
-              `tokens=${filled.todayTokens}`,
-            );
-          }
-        } catch (fillErr) {
-          console.warn('[usage-events] 本地回填失败', id, fillErr?.message || fillErr);
+      // 落库后按本地事件校正周期（纠正分页截断）；官方今日为空时再回填今日。
+      try {
+        const filled = await fillSnapshotSpendFromLocalEvents(id, snapshot);
+        if (filled.filled && fetchedEvents === 0) {
+          console.warn(
+            '[usage-events] 官方事件为空，已用本地库回填',
+            id,
+            filled.reason,
+            filled.todayTokens != null ? `tokens=${filled.todayTokens}` : '',
+          );
         }
+      } catch (fillErr) {
+        console.warn('[usage-events] 本地回填失败', id, fillErr?.message || fillErr);
       }
       const result = await saveSyncResult(id, { snapshot });
       await writeAppLog('刷新', {

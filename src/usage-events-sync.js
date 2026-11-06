@@ -129,8 +129,61 @@ export async function persistSnapshotUsageEvents(memberId, snapshot) {
 }
 
 /**
+ * 用落库 usage_events 覆盖快照的当前周期 spend / 模型。
+ * 取「本地 vs 快照」更大者，纠正事件分页截断导致的偏低；模型列表全部保留。
+ * @param {any} snapshot
+ * @param {any[]} cycleEvents
+ * @param {boolean} weekly
+ */
+function applyLocalCycleUsage(snapshot, cycleEvents, weekly) {
+  if (!cycleEvents.length) return false;
+  const localUsage = summarizeEvents(cycleEvents);
+  const cycleCell = spendCellFromEvents(cycleEvents);
+  const snapTokens = Number(snapshot.usage?.totalTokens) || 0;
+  const snapReqs = Number(snapshot.usage?.requestCount) || 0;
+  const snapModels = Array.isArray(snapshot.usage?.topModels) ? snapshot.usage.topModels : [];
+  const localTokens = Number(localUsage.totalTokens) || 0;
+  const localReqs = Number(localUsage.requestCount) || 0;
+  const replaceModels =
+    !snapModels.some((m) => Number(m?.tokens) > 0) ||
+    localTokens > snapTokens ||
+    (localUsage.topModels.length > snapModels.length && localTokens >= snapTokens * 0.95);
+
+  snapshot.usage = {
+    ...(snapshot.usage || {}),
+    topModels: replaceModels ? localUsage.topModels : snapModels,
+    totalTokens: Math.max(snapTokens, localTokens),
+    requestCount: Math.max(snapReqs, localReqs),
+    billedDollars: Math.max(Number(snapshot.usage?.billedDollars) || 0, localUsage.billedDollars || 0),
+    tokenValueDollars: Math.max(
+      Number(snapshot.usage?.tokenValueDollars) || 0,
+      localUsage.tokenValueDollars || 0,
+    ),
+  };
+
+  if (cycleCell) {
+    snapshot.spend = {
+      ...(snapshot.spend || {}),
+      cycle: {
+        dollars: Math.max(Number(snapshot.spend?.cycle?.dollars) || 0, cycleCell.dollars || 0),
+        tokens: Math.max(
+          Number(snapshot.spend?.cycle?.tokens) || 0,
+          cycleCell.tokens || 0,
+          Number(snapshot.usage?.totalTokens) || 0,
+        ),
+        requests: Math.max(Number(snapshot.spend?.cycle?.requests) || 0, cycleCell.requests || 0),
+        estimated: true,
+      },
+      cycleLabel: currentCycleSpendLabel(weekly),
+      last30Label: snapshot.spend?.last30Label || 'Last 30 Days',
+    };
+  }
+  return true;
+}
+
+/**
  * Cursor 事件接口失败时快照会把 spend.today/daily 写成 0；用本地 usage_events 回填。
- * 已有今日 tokens 时默认不改，避免覆盖刚拉到的官方数。
+ * 当前周期始终用落库事件校正（纠正分页截断）；今日/近 30 日仅在官方为空时回填。
  * @param {string} memberId
  * @param {any} snapshot
  * @param {{ nowMs?: number, force?: boolean }} [opts]
@@ -146,86 +199,49 @@ export async function fillSnapshotSpendFromLocalEvents(memberId, snapshot, opts 
   // 有效窗右界夹到现在，避免把重置日后的事件算进当前周期。
   const end = Number.isFinite(endRaw) ? Math.min(endRaw, now) : now;
 
-  /** 旧快照缺 cycle 时，只补当前周期，不动 Today / Last 30。 */
-  async function fillCycleOnly() {
-    if (!Number.isFinite(start) || end <= start) return { filled: false, reason: 'no-window' };
+  let cycleFilled = false;
+  if (Number.isFinite(start) && end > start) {
     const cycleEvents = await listUsageEventsInRange(memberId, start, end + 1);
-    const cycleCell = spendCellFromEvents(cycleEvents);
-    if (!cycleCell) return { filled: false, reason: 'no-cycle' };
-    snapshot.spend = {
-      ...(snapshot.spend || {}),
-      cycle: cycleCell,
-      cycleLabel: currentCycleSpendLabel(weekly),
-      last30Label: snapshot.spend?.last30Label || 'Last 30 Days',
-    };
-    const hasTokenTop =
-      Array.isArray(snapshot.usage?.topModels) &&
-      snapshot.usage.topModels.some((m) => Number(m?.tokens) > 0);
-    if (!hasTokenTop) {
-      const usage = summarizeEvents(cycleEvents);
-      if (usage.topModels?.length) {
-        snapshot.usage = {
-          ...(snapshot.usage || {}),
-          topModels: usage.topModels,
-          totalTokens: Number(snapshot.usage?.totalTokens) || usage.totalTokens,
-          requestCount: Number(snapshot.usage?.requestCount) || usage.requestCount,
-        };
-      }
-    }
-    return { filled: true, reason: 'cycle-only', eventCount: cycleEvents.length };
+    cycleFilled = applyLocalCycleUsage(snapshot, cycleEvents, weekly);
   }
 
   const apiTodayTokens = Number(snapshot.spend?.today?.tokens) || 0;
-  const needCycle = !snapshot.spend?.cycle || !(Number(snapshot.spend.cycle.tokens) > 0);
   if (!opts.force && apiTodayTokens > 0) {
-    if (!needCycle) return { filled: false, reason: 'api-ok' };
-    return fillCycleOnly();
+    return {
+      filled: cycleFilled,
+      reason: cycleFilled ? 'cycle-local' : 'api-ok',
+      eventCount: cycleFilled ? undefined : 0,
+    };
   }
 
   const rangeStart = localDayStartMs(now) - 29 * 86400000;
   const events = await listUsageEventsInRange(memberId, rangeStart, now + 1);
   if (!events.length) {
-    if (needCycle) return fillCycleOnly();
-    return { filled: false, reason: 'no-local' };
+    return {
+      filled: cycleFilled,
+      reason: cycleFilled ? 'cycle-local' : 'no-local',
+    };
   }
 
   const localSpend = aggregateSpendPeriods(events, now);
   const todayKey = localDayKey(localDayStartMs(now));
   const todayModels = topModelsByTokens(events, todayKey, 8);
-  let cycleCell = snapshot.spend?.cycle || null;
-  let cycleUsage = null;
-  if (Number.isFinite(start) && end > start) {
-    const cycleEvents = await listUsageEventsInRange(memberId, start, end + 1);
-    cycleUsage = summarizeEvents(cycleEvents);
-    cycleCell = spendCellFromEvents(cycleEvents) || cycleCell;
-  }
   snapshot.spend = {
     ...(snapshot.spend || {}),
     today: localSpend.today,
     yesterday: localSpend.yesterday,
     last30: localSpend.last30,
     last30Label: 'Last 30 Days',
-    cycle: cycleCell,
+    cycle: snapshot.spend?.cycle || null,
     cycleLabel: currentCycleSpendLabel(weekly),
     daily: localSpend.daily,
     todayModels,
     todayModelsFallback: false,
   };
 
-  const hasTokenTop =
-    Array.isArray(snapshot.usage?.topModels) &&
-    snapshot.usage.topModels.some((m) => Number(m?.tokens) > 0);
-  if (!hasTokenTop && cycleUsage?.topModels?.length) {
-    snapshot.usage = {
-      ...(snapshot.usage || {}),
-      topModels: cycleUsage.topModels,
-      totalTokens: Number(snapshot.usage?.totalTokens) || cycleUsage.totalTokens,
-      requestCount: Number(snapshot.usage?.requestCount) || cycleUsage.requestCount,
-    };
-  }
-
   return {
     filled: true,
+    reason: cycleFilled ? 'cycle+today-local' : 'today-local',
     todayTokens: Number(localSpend.today?.tokens) || 0,
     eventCount: events.length,
   };

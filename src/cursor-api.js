@@ -9,7 +9,8 @@ import { isSyntheticEventId as isSyntheticEventIdFromUsage } from './usage-event
 
 const USER_AGENT = 'cursor-team-usage/0.1';
 const PAGE_SIZE = 100;
-const MAX_PAGES = 50;
+/** 单次拉取页数上限；过小会把重度账号周期截成 5000 条，tokens/模型严重偏低。 */
+const MAX_PAGES = 500;
 
 /** cursor.com 对状态变更请求做 Origin 校验，需模拟浏览器 dashboard 头。 */
 const BROWSER_HEADERS = {
@@ -549,10 +550,9 @@ export function summarizeEvents(events) {
   }
 
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-  // 详情「当前周期模型」展示前 8；与 chart 截断一致。
+  // 当前周期模型全部保留，前端滚动展示；截断会导致 Claude/GPT 等被挤掉。
   const topModels = Object.entries(byModel)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 8)
     .map(([model, tokens]) => ({ model, tokens }));
 
   return {
@@ -1177,7 +1177,7 @@ export async function fetchAggregatedUsageEvents(session, startMs, endMs) {
       outputTokens,
       cacheReadTokens,
       cacheWriteTokens: 0,
-      topModels: topModels.slice(0, 8).map(({ model, tokens }) => ({ model, tokens })),
+      topModels: topModels.map(({ model, tokens }) => ({ model, tokens })),
     };
   } catch {
     return null;
@@ -1268,7 +1268,7 @@ export function billingItemToEvent(item) {
  */
 export async function fetchV2BillingItems(session, startIso, endIso, opts = {}) {
   const pageSize = Math.min(100, Math.max(1, Number(opts.pageSize) || 100));
-  const maxPages = Math.min(50, Math.max(1, Number(opts.maxPages) || MAX_PAGES));
+  const maxPages = Math.min(MAX_PAGES, Math.max(1, Number(opts.maxPages) || MAX_PAGES));
   /** @type {ReturnType<typeof billingItemToEvent>[]} */
   const events = [];
   let cursor = '';
@@ -1363,7 +1363,7 @@ export async function fetchV2DailyUsage(session, startIso, endIso, groupBy = ['m
   return {
     totalTokens: num(data?.totalTokens) ?? topModels.reduce((s, m) => s + m.tokens, 0),
     totalIncludedTokens: num(data?.totalIncludedTokens) ?? null,
-    topModels: topModels.slice(0, 8),
+    topModels,
     daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
     modelsByDay,
   };
@@ -1752,17 +1752,17 @@ export async function fetchMemberSnapshot(cookieValue) {
     fetchV2DailyUsage(session, dailyStartIso, dailyEndIso, ['model']),
     null,
   );
-  const hasTokenTopModels =
-    Array.isArray(usage.topModels) &&
-    usage.topModels.some((m) => Number(m?.tokens) > 0);
-  // 事件缺 token 时，只用有效窗内的日用量补当前周期模型，禁止拿近 30 天全窗顶替。
-  if (!hasTokenTopModels && dailyUsage?.modelsByDay) {
-    const fromDaily = topModelsFromDailyUsageInRange(dailyUsage, window.start, cycleEndMs, 8);
-    if (fromDaily.topModels.length) {
+  // 官方按日聚合无分页截断；事件列表再全也可能漏。周期模型/tokens 取二者更大者。
+  if (dailyUsage?.modelsByDay) {
+    const fromDaily = topModelsFromDailyUsageInRange(dailyUsage, window.start, cycleEndMs, 0);
+    if (
+      fromDaily.topModels.length &&
+      (fromDaily.totalTokens > usage.totalTokens || !usage.topModels.length)
+    ) {
       usage = {
         ...usage,
         topModels: fromDaily.topModels,
-        totalTokens: usage.totalTokens || fromDaily.totalTokens || 0,
+        totalTokens: fromDaily.totalTokens,
       };
     }
   }
@@ -1797,16 +1797,17 @@ export async function fetchMemberSnapshot(cookieValue) {
 
   // Last 30 Days 始终近 30 日；当前周期另格（周订=本周有效窗内用量）。
   spend.last30Label = 'Last 30 Days';
-  const cycleCell =
-    spendCellFromEvents(cycleEvents) ||
-    (usage.totalTokens > 0
-      ? {
-          dollars: usage.billedDollars || 0,
-          tokens: usage.totalTokens,
-          requests: usage.requestCount || cycleEvents.length || 0,
-          estimated: true,
-        }
-      : null);
+  let cycleCell = spendCellFromEvents(cycleEvents);
+  if (cycleCell && usage.totalTokens > (cycleCell.tokens || 0)) {
+    cycleCell = { ...cycleCell, tokens: usage.totalTokens };
+  } else if (!cycleCell && usage.totalTokens > 0) {
+    cycleCell = {
+      dollars: usage.billedDollars || 0,
+      tokens: usage.totalTokens,
+      requests: usage.requestCount || cycleEvents.length || 0,
+      estimated: true,
+    };
+  }
   spend.cycle = cycleCell;
   spend.cycleLabel = currentCycleSpendLabel(weekly);
 

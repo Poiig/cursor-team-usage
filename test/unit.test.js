@@ -211,6 +211,23 @@ test('summarizeEvents 汇总花费、token 与模型', () => {
   assert.equal(s.topModels[1].tokens, 10);
 });
 
+test('summarizeEvents 保留全部模型不截成 Top8', () => {
+  const events = Array.from({ length: 12 }, (_, i) => ({
+    chargedCents: null,
+    tokenCents: null,
+    model: `m${i}`,
+    isTokenBasedCall: true,
+    inputTokens: 12 - i,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  }));
+  const s = summarizeEvents(events);
+  assert.equal(s.topModels.length, 12);
+  assert.equal(s.topModels[0].model, 'm0');
+  assert.equal(s.topModels[11].model, 'm11');
+});
+
 test('parseUsageSummary 读取 totalPercentUsed', () => {
   const s = parseUsageSummary({
     membershipType: 'pro_plus',
@@ -420,6 +437,17 @@ test('currentCycleSpendLabel / topModelsFromDailyUsageInRange 只认有效窗', 
     topModelsFromDailyUsageInRange(dailyUsage, start, end, 8).topModels.some((m) => m.model === 'old'),
     false,
   );
+  const all = topModelsFromDailyUsageInRange(
+    {
+      modelsByDay: {
+        '2026-11-05': Array.from({ length: 10 }, (_, i) => ({ model: `x${i}`, tokens: 10 - i })),
+      },
+    },
+    start,
+    end,
+    0,
+  );
+  assert.equal(all.topModels.length, 10);
 });
 
 test('resolveSpendRow 带出当前周期格', () => {

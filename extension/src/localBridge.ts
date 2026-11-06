@@ -158,7 +158,7 @@ export function startLocalBridge(
           writeCorsJson(res, cors, 400, { error: '缺少 ticketId' });
           return;
         }
-        // 先回 202，再异步跑切换（含模态确认 / 写库 / 重启），避免浏览器等太久
+        // 先回 202，再异步跑切换（写库 / 重启），避免浏览器等太久
         writeCorsJson(res, cors, 202, { ok: true, accepted: true, ticketId });
         void Promise.resolve(onSwitch(ticketId)).catch((e) => {
           console.error('[ctu localBridge] switch failed:', e);
