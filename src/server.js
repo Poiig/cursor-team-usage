@@ -253,11 +253,18 @@ async function trustedOperatorName(username, proof) {
  * @param {unknown} data
  * @param {Record<string, string>} [extraHeaders]
  */
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'same-origin',
+};
+
 function sendJson(res, status, data, extraHeaders = {}) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    ...SECURITY_HEADERS,
     ...extraHeaders,
   });
   res.end(body);
@@ -1739,7 +1746,7 @@ const server = http.createServer(async (req, res) => {
       if (file) {
         // 前端无构建版本号：每次协商缓存，发版后浏览器立即拿到新 JS/CSS
         const etag = bufferEtag(file.data);
-        const headers = { 'Content-Type': file.type, 'Cache-Control': 'no-cache', ETag: etag };
+        const headers = { 'Content-Type': file.type, 'Cache-Control': 'no-cache', ETag: etag, ...SECURITY_HEADERS };
         if (req.headers['if-none-match'] === etag) {
           res.writeHead(304, headers);
           res.end();
