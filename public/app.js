@@ -163,7 +163,7 @@ let extensionMeta = null;
 let localExtensionInfo = null;
 let extensionInstallMode = 'install';
 let onboardingStep = 0;
-/** @type {'all' | 'ok' | 'expiring' | 'error'} */
+/** @type {'all' | 'ok' | 'speeding' | 'expiring' | 'error'} */
 let accountStatusFilter = 'all';
 
 /** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」；服务端 env 可改，默认 7。 */
@@ -234,6 +234,12 @@ function switchBlockReason(member) {
 /** 正常：既非异常也非临期。 */
 function isOkMember(member) {
   return !isAbnormalMember(member) && !isExpiringMember(member);
+}
+
+/** 超速：工作日节奏预计撑不到期末（与徽章「超速」同口径）；异常不计。 */
+function isSpeedingMember(member) {
+  if (!member || isAbnormalMember(member)) return false;
+  return computeUsagePace(member)?.status === 'danger';
 }
 
 /** 格式化切换时快照的 Total usage。 */
@@ -686,10 +692,15 @@ function renderSummary(summary) {
     syncedError: 0,
   };
   const okCount = membersCache.filter(isOkMember).length;
+  const speedingCount = membersCache.filter(isSpeedingMember).length;
   const expiringCount = membersCache.filter(isExpiringMember).length;
   const badCount = membersCache.filter(isAbnormalMember).length;
   els.summary.innerHTML = `
-    <article class="stat"><p class="label">账号</p><p class="value">${s.memberCount}</p><p class="note">${money(s.todayBilledDollars)} 今日</p></article>
+    <button type="button" class="stat stat-click" id="btnFilterAll" title="查看全部账号">
+      <p class="label">账号</p>
+      <p class="value">${s.memberCount}</p>
+      <p class="note">${money(s.todayBilledDollars)} 今日</p>
+    </button>
     <button type="button" class="stat stat-click" id="btnTodayUsage" title="查看今日用量排行（按 tokens）">
       <p class="label">今日用量</p>
       <p class="value">${s.todayRequests ?? 0}<span class="unit">次</span></p>
@@ -698,6 +709,11 @@ function renderSummary(summary) {
     <button type="button" class="stat stat-click" id="btnFilterOk" title="只看正常账号">
       <p class="label">正常</p>
       <p class="value">${okCount}</p>
+    </button>
+    <button type="button" class="stat stat-click" id="btnFilterSpeeding" title="只看按工作日节奏预计撑不到期末的账号">
+      <p class="label">超速</p>
+      <p class="value ${speedingCount > 0 ? 'danger' : ''}">${speedingCount}</p>
+      <p class="note">节奏撑不到期末</p>
     </button>
     <button type="button" class="stat stat-click" id="btnFilterExpiring" title="只看十天内额度周期重置的账号">
       <p class="label">临期</p>
@@ -710,8 +726,12 @@ function renderSummary(summary) {
       <p class="note">Token / Free / 额满</p>
     </button>
   `;
+  document.getElementById('btnFilterAll')?.addEventListener('click', () => setAccountStatusFilter('all'));
   document.getElementById('btnTodayUsage')?.addEventListener('click', openTodayRank);
   document.getElementById('btnFilterOk')?.addEventListener('click', () => setAccountStatusFilter('ok'));
+  document
+    .getElementById('btnFilterSpeeding')
+    ?.addEventListener('click', () => setAccountStatusFilter('speeding'));
   document
     .getElementById('btnFilterExpiring')
     ?.addEventListener('click', () => setAccountStatusFilter('expiring'));
@@ -897,12 +917,19 @@ function filteredMembers() {
   const sort = els.sortBy?.value || 'reset';
   const list = membersCache.filter((m) => {
     if (accountStatusFilter === 'ok' && !isOkMember(m)) return false;
+    if (accountStatusFilter === 'speeding' && !isSpeedingMember(m)) return false;
     if (accountStatusFilter === 'expiring' && !isExpiringMember(m)) return false;
     if (accountStatusFilter === 'error' && !isAbnormalMember(m)) return false;
     if (!q) return true;
     return `${m.displayName} ${m.email || ''} ${m.userId || ''}`.toLowerCase().includes(q);
   });
   list.sort((a, b) => {
+    // 超速筛选：优先按预计期末用量从高到低，一眼看到最猛的
+    if (accountStatusFilter === 'speeding' && sort === 'reset') {
+      const ap = computeUsagePace(a)?.projectedEndPercent ?? 0;
+      const bp = computeUsagePace(b)?.projectedEndPercent ?? 0;
+      return bp - ap;
+    }
     if (sort === 'todayTokens') return todayTokensOf(b) - todayTokensOf(a);
     if (sort === 'remaining') {
       const ar = remainingPercent(a);
@@ -935,6 +962,7 @@ function syncStatusFilterUi() {
   const all = membersCache.length;
   const bad = membersCache.filter(isAbnormalMember).length;
   const expiring = membersCache.filter(isExpiringMember).length;
+  const speeding = membersCache.filter(isSpeedingMember).length;
   const ok = membersCache.filter(isOkMember).length;
   els.statusFilter?.querySelectorAll('.filter-tab').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.status === accountStatusFilter);
@@ -942,21 +970,29 @@ function syncStatusFilterUi() {
   els.statusFilter?.querySelectorAll('[data-count]').forEach((el) => {
     const key = el.getAttribute('data-count');
     const n =
-      key === 'ok' ? ok : key === 'expiring' ? expiring : key === 'error' ? bad : all;
+      key === 'ok'
+        ? ok
+        : key === 'speeding'
+          ? speeding
+          : key === 'expiring'
+            ? expiring
+            : key === 'error'
+              ? bad
+              : all;
     el.textContent = String(n);
   });
 }
 
-/** @param {'all' | 'ok' | 'expiring' | 'error'} next */
+/** @param {'all' | 'ok' | 'speeding' | 'expiring' | 'error'} next */
 function setAccountStatusFilter(next) {
   navigate('accounts', next === 'all' ? '' : next, accountRouteParams());
 }
 
 /*
  * 地址路由：每个页面 / 筛选都有自己的 URL，刷新、后退、分享链接都能回到原处。
- * #/accounts[/ok|expiring|error][?sort=&q=] · #/reports · #/logs/<kind> · #/users · #/help
+ * #/accounts[/ok|speeding|expiring|error][?sort=&q=] · #/reports · #/logs/<kind> · #/users · #/help
  */
-const ACCOUNT_FILTERS = new Set(['ok', 'expiring', 'error']);
+const ACCOUNT_FILTERS = new Set(['ok', 'speeding', 'expiring', 'error']);
 const LOG_KINDS = new Set(['switches', 'reports', 'logins']);
 
 function parseRoute() {
@@ -2127,7 +2163,7 @@ els.statusFilter?.addEventListener('click', (event) => {
   const btn = event.target.closest('.filter-tab');
   if (!btn?.dataset.status) return;
   setAccountStatusFilter(
-    /** @type {'all' | 'ok' | 'expiring' | 'error'} */ (btn.dataset.status),
+    /** @type {'all' | 'ok' | 'speeding' | 'expiring' | 'error'} */ (btn.dataset.status),
   );
 });
 
