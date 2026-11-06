@@ -5,8 +5,10 @@
 import { sessionFromCookie } from './auth.js';
 import {
   aggregateSpendPeriods,
+  currentCycleSpendLabel,
   fetchUsageEventsMerged,
   localDayKey,
+  spendCellFromEvents,
   summarizeEvents,
   topModelsByTokens,
 } from './cursor-api.js';
@@ -136,35 +138,30 @@ export async function persistSnapshotUsageEvents(memberId, snapshot) {
 export async function fillSnapshotSpendFromLocalEvents(memberId, snapshot, opts = {}) {
   if (!memberId || !snapshot) return { filled: false, reason: 'no-snapshot' };
   const now = opts.nowMs ?? Date.now();
-  const apiTodayTokens = Number(snapshot.spend?.today?.tokens) || 0;
-  if (!opts.force && apiTodayTokens > 0) return { filled: false, reason: 'api-ok' };
+  const weekly =
+    snapshot?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+    snapshot?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+  const start = Date.parse(snapshot.window?.startIso || '');
+  const endRaw = Date.parse(snapshot.window?.endIso || '');
+  // 有效窗右界夹到现在，避免把重置日后的事件算进当前周期。
+  const end = Number.isFinite(endRaw) ? Math.min(endRaw, now) : now;
 
-  const rangeStart = localDayStartMs(now) - 29 * 86400000;
-  const events = await listUsageEventsInRange(memberId, rangeStart, now + 1);
-  if (!events.length) return { filled: false, reason: 'no-local' };
-
-  const localSpend = aggregateSpendPeriods(events, now);
-  const todayKey = localDayKey(localDayStartMs(now));
-  const todayModels = topModelsByTokens(events, todayKey, 8);
-  snapshot.spend = {
-    ...(snapshot.spend || {}),
-    today: localSpend.today,
-    yesterday: localSpend.yesterday,
-    last30: localSpend.last30,
-    daily: localSpend.daily,
-    todayModels,
-    todayModelsFallback: false,
-  };
-
-  const hasTokenTop =
-    Array.isArray(snapshot.usage?.topModels) &&
-    snapshot.usage.topModels.some((m) => Number(m?.tokens) > 0);
-  if (!hasTokenTop) {
-    const start = Date.parse(snapshot.window?.startIso || '');
-    const endRaw = Date.parse(snapshot.window?.endIso || '');
-    const end = Number.isFinite(endRaw) ? Math.min(endRaw, now) : now;
-    if (Number.isFinite(start) && end > start) {
-      const cycleEvents = await listUsageEventsInRange(memberId, start, end + 1);
+  /** 旧快照缺 cycle 时，只补当前周期，不动 Today / Last 30。 */
+  async function fillCycleOnly() {
+    if (!Number.isFinite(start) || end <= start) return { filled: false, reason: 'no-window' };
+    const cycleEvents = await listUsageEventsInRange(memberId, start, end + 1);
+    const cycleCell = spendCellFromEvents(cycleEvents);
+    if (!cycleCell) return { filled: false, reason: 'no-cycle' };
+    snapshot.spend = {
+      ...(snapshot.spend || {}),
+      cycle: cycleCell,
+      cycleLabel: currentCycleSpendLabel(weekly),
+      last30Label: snapshot.spend?.last30Label || 'Last 30 Days',
+    };
+    const hasTokenTop =
+      Array.isArray(snapshot.usage?.topModels) &&
+      snapshot.usage.topModels.some((m) => Number(m?.tokens) > 0);
+    if (!hasTokenTop) {
       const usage = summarizeEvents(cycleEvents);
       if (usage.topModels?.length) {
         snapshot.usage = {
@@ -175,6 +172,56 @@ export async function fillSnapshotSpendFromLocalEvents(memberId, snapshot, opts 
         };
       }
     }
+    return { filled: true, reason: 'cycle-only', eventCount: cycleEvents.length };
+  }
+
+  const apiTodayTokens = Number(snapshot.spend?.today?.tokens) || 0;
+  const needCycle = !snapshot.spend?.cycle || !(Number(snapshot.spend.cycle.tokens) > 0);
+  if (!opts.force && apiTodayTokens > 0) {
+    if (!needCycle) return { filled: false, reason: 'api-ok' };
+    return fillCycleOnly();
+  }
+
+  const rangeStart = localDayStartMs(now) - 29 * 86400000;
+  const events = await listUsageEventsInRange(memberId, rangeStart, now + 1);
+  if (!events.length) {
+    if (needCycle) return fillCycleOnly();
+    return { filled: false, reason: 'no-local' };
+  }
+
+  const localSpend = aggregateSpendPeriods(events, now);
+  const todayKey = localDayKey(localDayStartMs(now));
+  const todayModels = topModelsByTokens(events, todayKey, 8);
+  let cycleCell = snapshot.spend?.cycle || null;
+  let cycleUsage = null;
+  if (Number.isFinite(start) && end > start) {
+    const cycleEvents = await listUsageEventsInRange(memberId, start, end + 1);
+    cycleUsage = summarizeEvents(cycleEvents);
+    cycleCell = spendCellFromEvents(cycleEvents) || cycleCell;
+  }
+  snapshot.spend = {
+    ...(snapshot.spend || {}),
+    today: localSpend.today,
+    yesterday: localSpend.yesterday,
+    last30: localSpend.last30,
+    last30Label: 'Last 30 Days',
+    cycle: cycleCell,
+    cycleLabel: currentCycleSpendLabel(weekly),
+    daily: localSpend.daily,
+    todayModels,
+    todayModelsFallback: false,
+  };
+
+  const hasTokenTop =
+    Array.isArray(snapshot.usage?.topModels) &&
+    snapshot.usage.topModels.some((m) => Number(m?.tokens) > 0);
+  if (!hasTokenTop && cycleUsage?.topModels?.length) {
+    snapshot.usage = {
+      ...(snapshot.usage || {}),
+      topModels: cycleUsage.topModels,
+      totalTokens: Number(snapshot.usage?.totalTokens) || cycleUsage.totalTokens,
+      requestCount: Number(snapshot.usage?.requestCount) || cycleUsage.requestCount,
+    };
   }
 
   return {

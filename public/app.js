@@ -589,6 +589,7 @@ function renderSpendRow(line) {
       ${cell('Today', line.today)}
       ${cell('Yesterday', line.yesterday)}
       ${cell(line.last30Label || 'Last 30 Days', line.last30)}
+      ${cell(line.cycleLabel || '当前周期', line.cycle)}
     </div>
   `;
 }

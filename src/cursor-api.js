@@ -549,9 +549,10 @@ export function summarizeEvents(events) {
   }
 
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  // 详情「当前周期模型」展示前 8；与 chart 截断一致。
   const topModels = Object.entries(byModel)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
+    .slice(0, 8)
     .map(([model, tokens]) => ({ model, tokens }));
 
   return {
@@ -988,7 +989,11 @@ export async function fetchUserRules(cookieValue) {
  *   meters: Record<string, number | null | undefined>,
  *   quota?: { used: number, limit: number | null } | null,
  *   grokBot?: { usagePercent: number, resetsAt?: string | null, isUnified?: boolean } | null,
- *   spend?: (ReturnType<typeof aggregateSpendPeriods> & { last30Label?: string }) | null,
+ *   spend?: (ReturnType<typeof aggregateSpendPeriods> & {
+ *     last30Label?: string,
+ *     cycle?: { dollars?: number, tokens?: number, requests?: number } | null,
+ *     cycleLabel?: string,
+ *   }) | null,
  *   window?: { resetIso?: string },
  * }} input
  */
@@ -1098,7 +1103,10 @@ export function buildOpenUsagePanelLines(input) {
     today: fmtCell(input.spend?.today),
     yesterday: fmtCell(input.spend?.yesterday),
     last30: fmtCell(input.spend?.last30),
-    last30Label: input.spend?.last30Label || (weekly ? 'This week' : 'Last 30 Days'),
+    // Last 30 Days 固定近 30 自然日；当前周期单独一格（周订=有效周窗，非日历周）
+    last30Label: input.spend?.last30Label || 'Last 30 Days',
+    cycle: fmtCell(input.spend?.cycle),
+    cycleLabel: input.spend?.cycleLabel || currentCycleSpendLabel(weekly),
     estimated: true,
   });
 
@@ -1371,6 +1379,50 @@ export function topModelsForLocalDay(dailyUsage, dayKey, limit = 8) {
   const rows = dailyUsage?.modelsByDay?.[String(dayKey || '')] || [];
   if (!rows.length) return [];
   return limit > 0 ? rows.slice(0, limit) : rows;
+}
+
+/**
+ * 把 v2 日用量按账单有效窗（订阅起点→min(现在, 重置日)）聚合成模型排行。
+ * 避免用近 30 天全窗 topModels 冒充当前周期（周订尤其容易串）。
+ * @param {{ modelsByDay?: Record<string, Array<{ model: string, tokens: number }>> } | null | undefined} dailyUsage
+ * @param {number} startMs
+ * @param {number} endMs
+ * @param {number} [limit]
+ * @returns {{ topModels: Array<{ model: string, tokens: number }>, totalTokens: number }}
+ */
+export function topModelsFromDailyUsageInRange(dailyUsage, startMs, endMs, limit = 8) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+    return { topModels: [], totalTokens: 0 };
+  }
+  const startKey = localDayKey(startMs);
+  const endKey = localDayKey(endMs);
+  /** @type {Record<string, number>} */
+  const byModel = {};
+  let totalTokens = 0;
+  for (const [day, rows] of Object.entries(dailyUsage?.modelsByDay || {})) {
+    if (day < startKey || day > endKey) continue;
+    for (const r of rows || []) {
+      const tokens = Number(r.tokens) || 0;
+      if (tokens <= 0) continue;
+      const model = String(r.model || 'unknown');
+      byModel[model] = (byModel[model] || 0) + tokens;
+      totalTokens += tokens;
+    }
+  }
+  const ranked = Object.entries(byModel).sort((a, b) => b[1] - a[1]);
+  const picked = limit > 0 ? ranked.slice(0, limit) : ranked;
+  return {
+    topModels: picked.map(([model, tokens]) => ({ model, tokens })),
+    totalTokens,
+  };
+}
+
+/**
+ * 当前周期 spend 格标签：周订（xAI / The X）用「本周」，否则「当前周期」。
+ * @param {boolean} weekly
+ */
+export function currentCycleSpendLabel(weekly) {
+  return weekly ? '本周' : '当前周期';
 }
 
 /** @param {unknown} id */
@@ -1690,6 +1742,8 @@ export async function fetchMemberSnapshot(cookieValue) {
     return ts === 0 || (ts >= window.start && ts <= window.end);
   });
   let usage = summarizeEvents(cycleEvents);
+  // 有效窗：订阅起点 → min(现在, 重置/到期)；周订不得按日历周外推。
+  const cycleEndMs = Math.min(window.end, Date.now());
 
   const dailyStartIso = new Date(fetchStart).toISOString();
   const dailyEndIso = new Date(fetchEnd + 86400000).toISOString();
@@ -1701,17 +1755,21 @@ export async function fetchMemberSnapshot(cookieValue) {
   const hasTokenTopModels =
     Array.isArray(usage.topModels) &&
     usage.topModels.some((m) => Number(m?.tokens) > 0);
-  if (dailyUsage?.topModels?.length && (!hasTokenTopModels || weekly)) {
-    usage = {
-      ...usage,
-      topModels: dailyUsage.topModels.map((m) => ({ model: m.model, tokens: m.tokens })),
-      totalTokens: usage.totalTokens || dailyUsage.totalTokens || 0,
-    };
+  // 事件缺 token 时，只用有效窗内的日用量补当前周期模型，禁止拿近 30 天全窗顶替。
+  if (!hasTokenTopModels && dailyUsage?.modelsByDay) {
+    const fromDaily = topModelsFromDailyUsageInRange(dailyUsage, window.start, cycleEndMs, 8);
+    if (fromDaily.topModels.length) {
+      usage = {
+        ...usage,
+        topModels: fromDaily.topModels,
+        totalTokens: usage.totalTokens || fromDaily.totalTokens || 0,
+      };
+    }
   }
   if (usage.totalTokens === 0 && usage.requestCount === 0) {
     const agg = await optional(
       '聚合用量',
-      fetchAggregatedUsageEvents(session, window.start, Math.min(window.end, Date.now())),
+      fetchAggregatedUsageEvents(session, window.start, cycleEndMs),
       null,
     );
     if (agg && (agg.totalTokens > 0 || agg.requestCount > 0)) usage = agg;
@@ -1737,23 +1795,20 @@ export async function fetchMemberSnapshot(cookieValue) {
   spend.todayModels = todayModels;
   spend.todayModelsFallback = false;
 
-  if (weekly) {
-    const weekCell = spendCellFromEvents(cycleEvents);
-    if (weekCell) {
-      spend.last30 = weekCell;
-      spend.last30Label = 'This week';
-    } else if (usage.totalTokens > 0) {
-      spend.last30 = {
-        dollars: usage.billedDollars || 0,
-        tokens: usage.totalTokens,
-        requests: usage.requestCount || cycleEvents.length || 0,
-        estimated: true,
-      };
-      spend.last30Label = 'This week';
-    } else {
-      spend.last30Label = 'Last 30 Days';
-    }
-  }
+  // Last 30 Days 始终近 30 日；当前周期另格（周订=本周有效窗内用量）。
+  spend.last30Label = 'Last 30 Days';
+  const cycleCell =
+    spendCellFromEvents(cycleEvents) ||
+    (usage.totalTokens > 0
+      ? {
+          dollars: usage.billedDollars || 0,
+          tokens: usage.totalTokens,
+          requests: usage.requestCount || cycleEvents.length || 0,
+          estimated: true,
+        }
+      : null);
+  spend.cycle = cycleCell;
+  spend.cycleLabel = currentCycleSpendLabel(weekly);
 
   const quotaPercent =
     quota?.limit != null && quota.limit > 0

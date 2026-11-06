@@ -130,7 +130,7 @@ export function formatTokens(n) {
 }
 
 /**
- * Today / Yesterday / Last 30 单元格文案：金额 · tokens。
+ * Today / Yesterday / Last 30 / 当前周期 单元格文案：金额 · tokens。
  * @param {{ text?: string, dollars?: number | null, tokens?: number | null, requests?: number | null } | null | undefined} part
  */
 export function formatSpendPart(part) {
@@ -140,23 +140,30 @@ export function formatSpendPart(part) {
     const tokenText = tokenLabel === '—' ? '0' : tokenLabel;
     return `$${Number(part.dollars).toFixed(2)} · ${tokenText}`;
   }
+  // 当前周期有时只落了 tokens（本地回填），仍要能显示。
+  if (part.tokens != null && Number.isFinite(Number(part.tokens))) {
+    const tokenLabel = formatTokens(part.tokens);
+    return tokenLabel === '—' ? '0' : tokenLabel;
+  }
   return part.text || 'No data';
 }
 
 /**
  * 优先用 snapshot.spend（含 requests）渲染花费行，不依赖 panelLines 旧文案。
- * @param {{ spend?: { today?: object, yesterday?: object, last30?: object } | null } | null | undefined} snap
+ * @param {{ spend?: { today?: object, yesterday?: object, last30?: object, cycle?: object, cycleLabel?: string } | null } | null | undefined} snap
  * @param {object | null | undefined} panelSpend
  */
 export function resolveSpendRow(snap, panelSpend) {
   const s = snap?.spend;
-  if (s && (s.today || s.yesterday || s.last30)) {
+  if (s && (s.today || s.yesterday || s.last30 || s.cycle)) {
     return {
       type: 'spend-row',
       today: s.today,
       yesterday: s.yesterday,
       last30: s.last30,
       last30Label: s.last30Label || panelSpend?.last30Label || 'Last 30 Days',
+      cycle: s.cycle,
+      cycleLabel: s.cycleLabel || panelSpend?.cycleLabel || '当前周期',
     };
   }
   return panelSpend || null;

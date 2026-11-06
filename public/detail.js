@@ -123,6 +123,7 @@ function renderSpendRow(line) {
       ${cell('Today', line.today)}
       ${cell('Yesterday', line.yesterday)}
       ${cell(line.last30Label || 'Last 30 Days', line.last30)}
+      ${cell(line.cycleLabel || '当前周期', line.cycle)}
     </div>
   `;
 }
@@ -450,8 +451,14 @@ function renderMember() {
   const weekly =
     snap?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
     snap?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+  const cycleTotal =
+    Number(snap?.usage?.totalTokens) ||
+    Number(snap?.spend?.cycle?.tokens) ||
+    models.reduce((s, m) => s + (Number(m.tokens) || 0), 0);
   if (modelsTitle && modelsTitle.tagName === 'H3') {
-    modelsTitle.textContent = weekly ? 'Top models (近期)' : 'Top models (cycle)';
+    const scope = weekly ? '本周' : '当前周期';
+    const totalLabel = cycleTotal > 0 ? ` · 总 ${formatTokens(cycleTotal)}` : '';
+    modelsTitle.textContent = `${scope}模型${totalLabel}`;
   }
   // 只认 tokens；旧快照若仍是 count（调用次数）则显示 0，刷新后会写入 tokens。
   renderHorizontalBars(

@@ -33,8 +33,10 @@ import {
   billingItemToEvent,
   mergeUsageEventsById,
   topModelsForLocalDay,
+  topModelsFromDailyUsageInRange,
+  currentCycleSpendLabel,
 } from '../src/cursor-api.js';
-import { formatPlanLabel, planBadgeClass } from '../public/shared.js';
+import { formatPlanLabel, planBadgeClass, resolveSpendRow, formatSpendPart } from '../public/shared.js';
 import {
   archiveYesterdayPercents,
   dailyPercentDeltas,
@@ -291,7 +293,13 @@ test('周订阅只画 Weekly usage；legacy 仍含 Grok Bot', () => {
       resetsAt: '2026-11-09T05:10:36.797Z',
       isUnified: true,
     },
-    spend: { today: null, yesterday: null, last30: null, last30Label: 'This week' },
+    spend: {
+      today: null,
+      yesterday: null,
+      last30: null,
+      cycle: { dollars: 0.4, tokens: 120000, requests: 3 },
+      cycleLabel: '本周',
+    },
     window: { resetIso: '2026-11-09T05:10:36.797Z' },
   });
   const progress = linesWeekly.filter((l) => l.type === 'progress');
@@ -302,7 +310,10 @@ test('周订阅只画 Weekly usage；legacy 仍含 Grok Bot', () => {
     linesWeekly.some((l) => l.label === 'Other Models' || l.label === 'Grok Bot usage'),
     false,
   );
-  assert.equal(linesWeekly.find((l) => l.type === 'spend-row')?.last30Label, 'This week');
+  const spendWeekly = linesWeekly.find((l) => l.type === 'spend-row');
+  assert.equal(spendWeekly?.last30Label, 'Last 30 Days');
+  assert.equal(spendWeekly?.cycleLabel, '本周');
+  assert.equal(spendWeekly?.cycle?.tokens, 120000);
 
   const linesWeekFallback = buildOpenUsagePanelLines({
     planMeters: {
@@ -321,6 +332,7 @@ test('周订阅只画 Weekly usage；legacy 仍含 Grok Bot', () => {
   });
   const spendFb = linesWeekFallback.find((l) => l.type === 'spend-row');
   assert.equal(spendFb?.last30Label, 'Last 30 Days');
+  assert.equal(spendFb?.cycleLabel, '本周');
   assert.match(String(spendFb?.last30?.text || ''), /1\.05/);
 
   const linesLegacy = buildOpenUsagePanelLines({
@@ -380,6 +392,53 @@ test('mergeUsageEventsById 合并多源并按指纹去掉伪 id 重复', () => {
   assert.equal(merged.length, 3);
   assert.equal(merged.find((e) => e.model === 'default')?.id, '22f73252-801e-4b51-a098-97bab5dfa563');
   assert.equal(merged.find((e) => e.id === 'a')?.inputTokens, 10);
+});
+
+test('currentCycleSpendLabel / topModelsFromDailyUsageInRange 只认有效窗', () => {
+  assert.equal(currentCycleSpendLabel(true), '本周');
+  assert.equal(currentCycleSpendLabel(false), '当前周期');
+  const dailyUsage = {
+    modelsByDay: {
+      '2026-11-01': [{ model: 'old', tokens: 9000 }],
+      '2026-11-05': [
+        { model: 'a', tokens: 100 },
+        { model: 'b', tokens: 50 },
+      ],
+      '2026-11-06': [{ model: 'a', tokens: 20 }],
+      '2026-11-10': [{ model: 'future', tokens: 8000 }],
+    },
+  };
+  const start = Date.parse('2026-11-05T00:00:00+08:00');
+  const end = Date.parse('2026-11-06T23:59:59+08:00');
+  const { topModels, totalTokens } = topModelsFromDailyUsageInRange(dailyUsage, start, end, 8);
+  assert.equal(totalTokens, 170);
+  assert.equal(topModels[0].model, 'a');
+  assert.equal(topModels[0].tokens, 120);
+  assert.equal(topModels[1].model, 'b');
+  assert.equal(topModels[1].tokens, 50);
+  assert.equal(
+    topModelsFromDailyUsageInRange(dailyUsage, start, end, 8).topModels.some((m) => m.model === 'old'),
+    false,
+  );
+});
+
+test('resolveSpendRow 带出当前周期格', () => {
+  const row = resolveSpendRow(
+    {
+      spend: {
+        today: { dollars: 1, tokens: 10 },
+        yesterday: null,
+        last30: { dollars: 9, tokens: 100 },
+        last30Label: 'Last 30 Days',
+        cycle: { dollars: 2, tokens: 30 },
+        cycleLabel: '本周',
+      },
+    },
+    null,
+  );
+  assert.equal(row?.cycleLabel, '本周');
+  assert.equal(row?.cycle?.tokens, 30);
+  assert.equal(formatSpendPart({ tokens: 15000 }), '1.5万');
 });
 
 test('topModelsForLocalDay 只取指定日', () => {
