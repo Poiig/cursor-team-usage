@@ -1021,6 +1021,16 @@ test('countWorkingDaysInclusive / computeUsagePace 按工作日节奏预警', as
   assert.ok(pace.label);
 });
 
+test('isOkAccountFlags：正常排除异常/临期/超速', async () => {
+  const { isOkAccountFlags } = await import('../public/shared.js');
+  assert.equal(isOkAccountFlags({}), true);
+  assert.equal(isOkAccountFlags({ abnormal: false, expiring: false, speeding: false }), true);
+  assert.equal(isOkAccountFlags({ speeding: true }), false);
+  assert.equal(isOkAccountFlags({ expiring: true }), false);
+  assert.equal(isOkAccountFlags({ abnormal: true }), false);
+  assert.equal(isOkAccountFlags({ abnormal: true, speeding: true }), false);
+});
+
 test('buildLocalAuthPayload 从 cookie 抽出本机写入字段', async () => {
   const { buildCookieValue } = await import('../src/auth.js');
   const { buildLocalAuthPayload } = await import('../src/account-switch.js');

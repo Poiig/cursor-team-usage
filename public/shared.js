@@ -409,6 +409,14 @@ export function computeUsagePace(member, nowMs = Date.now()) {
 }
 
 /**
+ * 看板「正常」口径：非异常、非临期、非超速（与 public/app.js isOkMember 一致）。
+ * @param {{ abnormal?: boolean, expiring?: boolean, speeding?: boolean }} flags
+ */
+export function isOkAccountFlags(flags = {}) {
+  return !flags.abnormal && !flags.expiring && !flags.speeding;
+}
+
+/**
  * 有效时间展示：2026-09-16 11.00（本地时区）。
  * @param {string | null | undefined} iso
  */

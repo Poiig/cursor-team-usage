@@ -6,6 +6,7 @@ import {
   accountIdentity,
   api,
   computeUsagePace,
+  isOkAccountFlags,
   createToast,
   daysUntil,
   deltaVsYesterday,
@@ -232,9 +233,13 @@ function switchBlockReason(member) {
   return '';
 }
 
-/** 正常：既非异常也非临期。 */
+/** 正常 = 非异常、非临期、非超速。 */
 function isOkMember(member) {
-  return !isAbnormalMember(member) && !isExpiringMember(member);
+  return isOkAccountFlags({
+    abnormal: isAbnormalMember(member),
+    expiring: isExpiringMember(member),
+    speeding: isSpeedingMember(member),
+  });
 }
 
 /** 超速：工作日节奏预计撑不到期末（与徽章「超速」同口径）；异常不计。 */
@@ -1072,15 +1077,24 @@ function renderList() {
     els.list.innerHTML = '';
     return;
   }
-  // 「全部」时按正常 / 临期 / 异常分区，临期夹在中间便于扫
+  // 「全部」时按正常 / 超速 / 临期 / 异常分区，临期夹在中间便于扫
   if (accountStatusFilter === 'all') {
     const ok = list.filter(isOkMember);
+    // 超速且不临期的单独成区，避免被 isOkMember 排除后从「全部」里消失
+    const speeding = list.filter((m) => isSpeedingMember(m) && !isExpiringMember(m));
     const expiring = list.filter(isExpiringMember);
     const bad = list.filter(isAbnormalMember);
     const parts = [];
     if (ok.length) {
       parts.push(
         `<div class="account-section"><h3 class="account-section-title">正常 <span class="muted">${ok.length}</span></h3>${ok
+          .map(renderAccountRow)
+          .join('')}</div>`,
+      );
+    }
+    if (speeding.length) {
+      parts.push(
+        `<div class="account-section account-section--speeding"><h3 class="account-section-title">超速 <span class="muted">${speeding.length}</span></h3>${speeding
           .map(renderAccountRow)
           .join('')}</div>`,
       );

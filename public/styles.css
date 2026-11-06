@@ -444,6 +444,10 @@ h3 {
   color: var(--red);
 }
 
+.account-section--speeding .account-section-title {
+  color: var(--red);
+}
+
 .account-section--expiring .account-section-title {
   color: var(--amber);
 }
