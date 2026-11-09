@@ -31,6 +31,8 @@ services:
     volumes:
       # sqlite 与运行时数据
       - ./data:/app/data
+      # 在线「设置」读写 /app/.env；仅靠 env_file 注入时容器内没有真实文件
+      - ./.env:/app/.env
     # depends_on:
     #   - postgres
 

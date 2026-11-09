@@ -1988,6 +1988,13 @@ td.cell-time {
   resize: vertical;
 }
 
+#settingsEnvText {
+  width: 100%;
+  min-height: 320px;
+  box-sizing: border-box;
+  line-height: 1.55;
+}
+
 .hint {
   margin: 0;
   color: var(--muted);

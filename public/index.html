@@ -35,6 +35,7 @@
             <button type="button" class="nav-item" data-tab="logs">日志</button>
             <button type="button" class="nav-item admin-only hidden" data-tab="users">用户</button>
             <button type="button" class="nav-item" data-tab="help">说明</button>
+            <button type="button" class="nav-item admin-only hidden" id="btnSettings" title="在线编辑 .env 并热重载">设置</button>
             <span class="nav-session">
               <span id="currentUsername" class="nav-user">—</span>
               <button type="button" class="btn-link-inline" id="btnLogout">退出</button>
@@ -277,7 +278,7 @@
           </li>
           <li>
             <strong>服务配置</strong>：改服务器上的 <code>.env</code>（模板
-            <code>.env.example</code>），改完重启；无网页设置页。
+            <code>.env.example</code>），改完重启；管理员也可点顶栏「设置」在线编辑并热重载。
           </li>
           <li>
             <strong>录入账号</strong>：本机导入 / 粘贴 Token / 邮箱验证码入池；多机用 Reporter 扩展定时上报（显示名默认机器名）。
@@ -390,6 +391,24 @@
           <div class="sheet-footer-right">
             <button type="button" class="btn primary" id="btnRulesDownload" disabled>下载规则</button>
             <button type="button" class="btn" id="btnRulesCancel">关闭</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="settingsDialog" class="sheet sheet-wide">
+      <div class="sheet-body">
+        <header>
+          <h3>服务设置</h3>
+          <button type="button" class="icon-close" id="btnSettingsClose" aria-label="关闭">×</button>
+        </header>
+        <p class="hint" id="settingsHint">直接编辑服务器上的 <code>.env</code>，保存后立即热重载。存储驱动 / 监听地址 / 会话密钥等改动需重启进程才生效。</p>
+        <textarea id="settingsEnvText" rows="20" spellcheck="false" aria-label=".env 内容"></textarea>
+        <p class="hint error-hint hidden" id="settingsError"></p>
+        <footer class="sheet-footer">
+          <div class="sheet-footer-right">
+            <button type="button" class="btn" id="btnSettingsCancel">关闭</button>
+            <button type="button" class="btn primary" id="btnSettingsSave">保存并重载</button>
           </div>
         </footer>
       </div>

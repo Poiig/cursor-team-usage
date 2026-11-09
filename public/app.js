@@ -100,6 +100,14 @@ const els = {
   btnRulesDownload: document.getElementById('btnRulesDownload'),
   btnRulesClose: document.getElementById('btnRulesClose'),
   btnRulesCancel: document.getElementById('btnRulesCancel'),
+  settingsDialog: document.getElementById('settingsDialog'),
+  settingsEnvText: document.getElementById('settingsEnvText'),
+  settingsHint: document.getElementById('settingsHint'),
+  settingsError: document.getElementById('settingsError'),
+  btnSettings: document.getElementById('btnSettings'),
+  btnSettingsSave: document.getElementById('btnSettingsSave'),
+  btnSettingsClose: document.getElementById('btnSettingsClose'),
+  btnSettingsCancel: document.getElementById('btnSettingsCancel'),
   switchLogBody: document.getElementById('switchLogBody'),
   reportLogBody: document.getElementById('reportLogBody'),
   loginLogBody: document.getElementById('loginLogBody'),
@@ -171,8 +179,18 @@ let accountStatusFilter = 'all';
 /** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」；服务端 env 可改，默认 7。 */
 let EXPIRING_WITHIN_DAYS = 7;
 
+/** 服务端 BLOCK_SPEEDING_SWITCH：开启后超速账号不可切换。 */
+let serverBlockSpeedingSwitch = false;
+/** 服务端 BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT：管理员是否可仍切换超速号。 */
+let serverBlockSpeedingSwitchAdminExempt = true;
+
 function isAdmin() {
   return currentUser?.role === 'admin';
+}
+
+/** 当前用户是否豁免「禁止切换超速账号」。 */
+function isSpeedingSwitchAdminExempt() {
+  return isAdmin() && serverBlockSpeedingSwitchAdminExempt;
 }
 
 /** Free 套餐：归入异常，便于从可用池里清出去。 */
@@ -230,6 +248,9 @@ function switchBlockReason(member) {
     return `使用人数已满（${member.activeUserCount}/${member.maxUsers}）`;
   }
   if (member.id === currentCursorMemberId) return '当前正在使用';
+  if (serverBlockSpeedingSwitch && !isSpeedingSwitchAdminExempt() && isSpeedingMember(member)) {
+    return '账号超速，暂不可切换';
+  }
   return '';
 }
 
@@ -1321,6 +1342,8 @@ async function ensurePasswordPolicy() {
     };
     const days = Number(me.expiringWithinDays);
     if (Number.isFinite(days) && days >= 0) EXPIRING_WITHIN_DAYS = Math.floor(days);
+    serverBlockSpeedingSwitch = Boolean(me.blockSpeedingSwitch);
+    serverBlockSpeedingSwitchAdminExempt = me.blockSpeedingSwitchAdminExempt !== false;
     applyRoleUi();
     // 按地址恢复页面；面板显隐只走 showView，避免 admin-only 把用户管理挂在账号列表下方
     applyRoute();
@@ -2213,7 +2236,8 @@ async function importLocalCursor(displayName) {
 
 document.querySelectorAll('.nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
-    const tab = btn.dataset.tab || 'accounts';
+    const tab = btn.dataset.tab;
+    if (!tab) return;
     navigate(tab, tab === 'logs' ? activeLogKind : '');
   });
 });
@@ -2790,6 +2814,79 @@ els.list.addEventListener('click', async (event) => {
 
   location.href = `/detail.html?id=${encodeURIComponent(id)}`;
 });
+
+/** 打开服务设置：拉取当前 .env 原文填入编辑框。 */
+async function openSettingsDialog() {
+  if (!isAdmin() || !els.settingsDialog) return;
+  if (els.settingsError) {
+    els.settingsError.classList.add('hidden');
+    els.settingsError.textContent = '';
+  }
+  if (els.settingsEnvText) els.settingsEnvText.value = '正在加载…';
+  els.settingsDialog.showModal();
+  try {
+    const data = await api('/api/config');
+    if (els.settingsEnvText) els.settingsEnvText.value = data.text || '';
+    if (els.settingsHint) {
+      els.settingsHint.textContent = `编辑服务器上的 .env（${data.path || ''}），保存后立即热重载。存储驱动 / 监听地址 / 会话密钥等改动需重启进程才生效。`;
+    }
+  } catch (e) {
+    if (els.settingsError) {
+      els.settingsError.textContent = e.message || String(e);
+      els.settingsError.classList.remove('hidden');
+    }
+    if (els.settingsEnvText) els.settingsEnvText.value = '';
+  }
+}
+
+function closeSettingsDialog() {
+  if (els.settingsDialog?.open) els.settingsDialog.close();
+}
+
+async function saveEnvSettings() {
+  if (!isAdmin()) return;
+  const text = els.settingsEnvText?.value ?? '';
+  if (els.settingsError) {
+    els.settingsError.classList.add('hidden');
+    els.settingsError.textContent = '';
+  }
+  setBusy(els.btnSettingsSave, true, '保存中…');
+  try {
+    const data = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    });
+    const restart = Array.isArray(data.restartRequired) ? data.restartRequired : [];
+    if (typeof data.blockSpeedingSwitch === 'boolean') {
+      serverBlockSpeedingSwitch = data.blockSpeedingSwitch;
+    }
+    if (typeof data.blockSpeedingSwitchAdminExempt === 'boolean') {
+      serverBlockSpeedingSwitchAdminExempt = data.blockSpeedingSwitchAdminExempt;
+    }
+    toast(
+      restart.length
+        ? `已保存并热重载；以下改动需重启生效：${restart.join('、')}`
+        : '已保存并热重载',
+      restart.length ? 6000 : 3600,
+    );
+    closeSettingsDialog();
+    await load();
+  } catch (e) {
+    if (els.settingsError) {
+      els.settingsError.textContent = e.message || String(e);
+      els.settingsError.classList.remove('hidden');
+    } else {
+      toast(e.message || String(e));
+    }
+  } finally {
+    setBusy(els.btnSettingsSave, false);
+  }
+}
+
+els.btnSettings?.addEventListener('click', () => void openSettingsDialog());
+els.btnSettingsSave?.addEventListener('click', () => void saveEnvSettings());
+els.btnSettingsClose?.addEventListener('click', closeSettingsDialog);
+els.btnSettingsCancel?.addEventListener('click', closeSettingsDialog);
 
 applySettingsToForm();
 ensurePasswordPolicy()

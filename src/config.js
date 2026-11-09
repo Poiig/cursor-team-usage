@@ -22,6 +22,8 @@ const DEFAULT_SQLITE = path.join(DATA_DIR, 'app.sqlite');
 export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
 
 /**
+ * @typedef {{ normal: number, expiring: number }} SeatLimit
+ *
  * @typedef {{
  *   storeDriver: 'sqlite' | 'postgres' | 'file',
  *   databaseUrl: string,
@@ -30,16 +32,21 @@ export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
  *   autoRefreshSec: number,
  *   sessionSecret: string,
  *   logRetentionDays: number,
- *   proMaxUsers: number,
- *   proPlusMaxUsers: number,
- *   xMaxUsers: number,
+ *   proMaxUsers: SeatLimit,
+ *   proPlusMaxUsers: SeatLimit,
+ *   xMaxUsers: SeatLimit,
  *   notifyChannel: string,
  *   notifyBotId: string,
  *   notifyHour: number,
  *   notifyMinute: number,
  *   expiringWithinDays: number,
+ *   blockSpeedingSwitch: boolean,
+ *   blockSpeedingSwitchAdminExempt: boolean,
  * }} AppConfig
  */
+
+/** 首次从 .env 文件读到的键；reload 时只回写这些键，避免覆盖外部注入（Docker/CI）变量。 */
+let fileEnvKeys = new Set();
 
 /** @type {AppConfig} */
 let runtime = {
@@ -50,14 +57,16 @@ let runtime = {
   autoRefreshSec: 900,
   sessionSecret: '',
   logRetentionDays: 30,
-  proMaxUsers: 3,
-  proPlusMaxUsers: 5,
-  xMaxUsers: 3,
+  proMaxUsers: { normal: 3, expiring: 3 },
+  proPlusMaxUsers: { normal: 5, expiring: 5 },
+  xMaxUsers: { normal: 3, expiring: 3 },
   notifyChannel: '',
   notifyBotId: '',
   notifyHour: 9,
   notifyMinute: 30,
   expiringWithinDays: 7,
+  blockSpeedingSwitch: false,
+  blockSpeedingSwitchAdminExempt: true,
 };
 
 /**
@@ -101,6 +110,37 @@ export function normalizeStoreDriver(value) {
   return 'sqlite';
 }
 
+/**
+ * 解析席位上限：支持「正常,临期」两档（如 "2,3"）或单值（"3" 两档同用）。
+ * 非法 / 空值回退到默认档。
+ * @param {unknown} raw
+ * @param {number} fallbackNormal
+ * @returns {SeatLimit}
+ */
+export function parseSeatLimit(raw, fallbackNormal) {
+  const fallback = { normal: fallbackNormal, expiring: fallbackNormal };
+  const text = String(raw ?? '').trim();
+  if (!text) return fallback;
+  const parts = text.split(',').map((s) => s.trim());
+  const normal = Number(parts[0]);
+  const expiringRaw = parts[1] != null && parts[1] !== '' ? parts[1] : parts[0];
+  const expiring = Number(expiringRaw);
+  const out = {
+    normal: Number.isFinite(normal) && normal > 0 ? Math.floor(normal) : fallbackNormal,
+    expiring:
+      Number.isFinite(expiring) && expiring > 0 ? Math.floor(expiring) : fallbackNormal,
+  };
+  return out;
+}
+
+/** 解析布尔型开关：true / 1 / on / yes → true，其余 false（推荐写 true/false）。 */
+export function parseBoolFlag(value) {
+  const s = String(value ?? '')
+    .trim()
+    .toLowerCase();
+  return s === '1' || s === 'true' || s === 'on' || s === 'yes';
+}
+
 /** @returns {AppConfig} */
 function defaults() {
   return {
@@ -111,14 +151,16 @@ function defaults() {
     autoRefreshSec: 900, // 每账号距上次同步的刷新间隔（秒）
     sessionSecret: '',
     logRetentionDays: 30, // data/log 下日志保留天数，0=不自动删除
-    proMaxUsers: 3,
-    proPlusMaxUsers: 5,
-    xMaxUsers: 3,
+    proMaxUsers: { normal: 3, expiring: 3 },
+    proPlusMaxUsers: { normal: 5, expiring: 5 },
+    xMaxUsers: { normal: 3, expiring: 3 },
     notifyChannel: '',
     notifyBotId: '',
     notifyHour: 9,
     notifyMinute: 30,
     expiringWithinDays: 7,
+    blockSpeedingSwitch: false,
+    blockSpeedingSwitchAdminExempt: true,
   };
 }
 
@@ -175,18 +217,26 @@ function configFromProcessEnv() {
     if (Number.isFinite(n) && n >= 0) next.logRetentionDays = Math.floor(n);
   }
   if (process.env.PRO_MAX_USERS != null && process.env.PRO_MAX_USERS !== '') {
-    const n = Number(process.env.PRO_MAX_USERS);
-    if (Number.isFinite(n) && n > 0) next.proMaxUsers = Math.floor(n);
+    next.proMaxUsers = parseSeatLimit(process.env.PRO_MAX_USERS, 3);
   }
   if (process.env.PRO_PLUS_MAX_USERS != null && process.env.PRO_PLUS_MAX_USERS !== '') {
-    const n = Number(process.env.PRO_PLUS_MAX_USERS);
-    if (Number.isFinite(n) && n > 0) next.proPlusMaxUsers = Math.floor(n);
+    next.proPlusMaxUsers = parseSeatLimit(process.env.PRO_PLUS_MAX_USERS, 5);
   }
   // The X Subscription（Plus / Premium / Super / Ultra）席位；兼容 PREMIUM_MAX_USERS
   const xRaw = process.env.X_MAX_USERS ?? process.env.PREMIUM_MAX_USERS;
   if (xRaw != null && xRaw !== '') {
-    const n = Number(xRaw);
-    if (Number.isFinite(n) && n > 0) next.xMaxUsers = Math.floor(n);
+    next.xMaxUsers = parseSeatLimit(xRaw, 3);
+  }
+  if (process.env.BLOCK_SPEEDING_SWITCH != null && process.env.BLOCK_SPEEDING_SWITCH !== '') {
+    next.blockSpeedingSwitch = parseBoolFlag(process.env.BLOCK_SPEEDING_SWITCH);
+  }
+  if (
+    process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT != null &&
+    process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT !== ''
+  ) {
+    next.blockSpeedingSwitchAdminExempt = parseBoolFlag(
+      process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT,
+    );
   }
   if (process.env.NOTIFY_CHANNEL != null) {
     next.notifyChannel = String(process.env.NOTIFY_CHANNEL).trim().toLowerCase();
@@ -257,7 +307,9 @@ export async function loadAppConfig() {
   await ensureEnvFile();
   try {
     const raw = await readFile(ENV_PATH, 'utf8');
-    applyParsedEnv(parseEnvFile(raw));
+    const vars = parseEnvFile(raw);
+    fileEnvKeys = new Set(Object.keys(vars));
+    applyParsedEnv(vars);
   } catch (e) {
     if (!e || e.code !== 'ENOENT') throw e;
   }
@@ -267,6 +319,45 @@ export async function loadAppConfig() {
 
   if (!runtime.sessionSecret) {
     const secret = randomBytes(24).toString('hex');
+    runtime.sessionSecret = secret;
+    process.env.SESSION_SECRET = secret;
+    await persistSessionSecret(secret);
+  }
+
+  return getAppConfig();
+}
+
+/**
+ * 在线重载 .env：重新读取文件，回写「首次来自文件」的键后重建运行时配置。
+ * 仅覆盖来自文件的键，外部注入（Docker/CI）的环境变量仍优先；SESSION_SECRET 缺省沿用当前值避免登录态失效。
+ * 存储驱动 / 监听地址等需重启才生效的项不在本函数内处理（由调用方提示）。
+ * @returns {Promise<AppConfig>}
+ */
+export async function reloadAppConfig() {
+  let vars = {};
+  try {
+    const raw = await readFile(ENV_PATH, 'utf8');
+    vars = parseEnvFile(raw);
+  } catch (e) {
+    if (!e || e.code !== 'ENOENT') throw e;
+  }
+  // 回写之前来自文件的键（新增或更新），文件里删掉的键从 process.env 摘掉
+  for (const key of fileEnvKeys) {
+    if (key in vars) process.env[key] = vars[key];
+    else delete process.env[key];
+  }
+  // 文件里新出现的键也写入
+  for (const [key, value] of Object.entries(vars)) {
+    if (!fileEnvKeys.has(key)) process.env[key] = value;
+  }
+  fileEnvKeys = new Set(Object.keys(vars));
+
+  const prevSecret = runtime.sessionSecret;
+  runtime = configFromProcessEnv();
+  runtime.sqlitePath = resolveDataPath(runtime.sqlitePath);
+
+  if (!runtime.sessionSecret) {
+    const secret = prevSecret || randomBytes(24).toString('hex');
     runtime.sessionSecret = secret;
     process.env.SESSION_SECRET = secret;
     await persistSessionSecret(secret);
@@ -327,10 +418,20 @@ export function getLogRetentionDays() {
 export function getAccountUserLimits() {
   const config = getAppConfig();
   return {
-    pro: config.proMaxUsers,
-    proPlus: config.proPlusMaxUsers,
-    x: config.xMaxUsers,
+    pro: { ...config.proMaxUsers },
+    proPlus: { ...config.proPlusMaxUsers },
+    x: { ...config.xMaxUsers },
   };
+}
+
+/** 是否禁止切换到超速账号；默认关闭。 */
+export function getBlockSpeedingSwitch() {
+  return Boolean(getAppConfig().blockSpeedingSwitch);
+}
+
+/** 管理员是否豁免「禁止切换超速账号」；默认开启。 */
+export function getBlockSpeedingSwitchAdminExempt() {
+  return Boolean(getAppConfig().blockSpeedingSwitchAdminExempt);
 }
 
 /** 额度重置「临期」阈值（天，含到期日）；看板筛选与企微推送共用。 */

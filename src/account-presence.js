@@ -7,7 +7,7 @@
 import { readFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getAccountUserLimits } from './config.js';
+import { getAccountUserLimits, getExpiringWithinDays } from './config.js';
 import {
   listAppLogsForHydrate,
   listStoredReportEvents,
@@ -74,6 +74,16 @@ async function persist() {
   return writeChain;
 }
 
+/** 距额度重置日的天数（含到期日）；无有效 resetIso 返回 null。 */
+function daysUntilReset(iso, nowMs = Date.now()) {
+  if (!iso) return null;
+  const t = new Date(String(iso)).getTime();
+  if (Number.isNaN(t)) return null;
+  const ms = t - nowMs;
+  if (ms <= 0) return 0;
+  return Math.max(1, Math.ceil(ms / 86400000));
+}
+
 /** @param {any} member */
 export function maxUsersForMember(member) {
   const plan = String(
@@ -86,24 +96,32 @@ export function maxUsersForMember(member) {
     .trim()
     .toLowerCase();
   const limits = getAccountUserLimits();
+  /** @type {{ normal: number, expiring: number } | null} */
+  let tier = null;
   if (plan.includes('pro+') || plan.includes('pro plus') || plan.includes('pro_plus')) {
-    return limits.proPlus;
+    tier = limits.proPlus;
+  } else if (plan === 'pro' || /\bpro\b/.test(plan)) {
+    tier = limits.pro;
+  } else {
+    // The X Subscription：Plus / Premium / Super / Ultra（周额度）
+    const weekly =
+      member?.lastSnapshot?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+      member?.lastSnapshot?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+    if (
+      plan === 'plus' ||
+      plan.includes('premium') ||
+      plan.includes('super') ||
+      (plan.includes('ultra') && weekly) ||
+      weekly
+    ) {
+      tier = limits.x;
+    }
   }
-  if (plan === 'pro' || /\bpro\b/.test(plan)) return limits.pro;
-  // The X Subscription：Plus / Premium / Super / Ultra（周额度）
-  const weekly =
-    member?.lastSnapshot?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
-    member?.lastSnapshot?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
-  if (
-    plan === 'plus' ||
-    plan.includes('premium') ||
-    plan.includes('super') ||
-    (plan.includes('ultra') && weekly) ||
-    weekly
-  ) {
-    return limits.x;
-  }
-  return null;
+  if (!tier) return null;
+  // 临期账号用第二档（更宽松）；与看板「临期」同口径
+  const days = daysUntilReset(member?.lastSnapshot?.window?.resetIso);
+  const expiring = days != null && days <= getExpiringWithinDays();
+  return expiring ? tier.expiring : tier.normal;
 }
 
 /**

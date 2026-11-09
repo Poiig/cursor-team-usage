@@ -168,6 +168,80 @@ test('sessionFromCookie 抽出 userId', () => {
   assert.ok(maskToken(s.cookieValue).includes('••••'));
 });
 
+test('parseSeatLimit 解析两档与单值', async () => {
+  const { parseSeatLimit } = await import('../src/config.js');
+  assert.deepEqual(parseSeatLimit('3', 3), { normal: 3, expiring: 3 });
+  assert.deepEqual(parseSeatLimit('2,3', 3), { normal: 2, expiring: 3 });
+  assert.deepEqual(parseSeatLimit(' 2 , 4 ', 3), { normal: 2, expiring: 4 });
+  assert.deepEqual(parseSeatLimit('', 5), { normal: 5, expiring: 5 });
+  assert.deepEqual(parseSeatLimit('0,3', 3), { normal: 3, expiring: 3 });
+  assert.deepEqual(parseSeatLimit('2,', 3), { normal: 2, expiring: 2 });
+});
+
+test('parseBoolFlag 解析布尔开关', async () => {
+  const { parseBoolFlag } = await import('../src/config.js');
+  assert.equal(parseBoolFlag('true'), true);
+  assert.equal(parseBoolFlag('TRUE'), true);
+  assert.equal(parseBoolFlag('1'), true);
+  assert.equal(parseBoolFlag('on'), true);
+  assert.equal(parseBoolFlag('yes'), true);
+  assert.equal(parseBoolFlag('false'), false);
+  assert.equal(parseBoolFlag('0'), false);
+  assert.equal(parseBoolFlag(''), false);
+});
+
+test('getBlockSpeedingSwitch 读取 BLOCK_SPEEDING_SWITCH', async () => {
+  const { getBlockSpeedingSwitch } = await import('../src/config.js');
+  const prev = process.env.BLOCK_SPEEDING_SWITCH;
+  process.env.BLOCK_SPEEDING_SWITCH = 'true';
+  try {
+    await loadAppConfig();
+    assert.equal(getBlockSpeedingSwitch(), true);
+  } finally {
+    if (prev === undefined) delete process.env.BLOCK_SPEEDING_SWITCH;
+    else process.env.BLOCK_SPEEDING_SWITCH = prev;
+    await loadAppConfig();
+  }
+});
+
+test('getBlockSpeedingSwitchAdminExempt 读取 BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT', async () => {
+  const { getBlockSpeedingSwitchAdminExempt } = await import('../src/config.js');
+  const prev = process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT;
+  try {
+    delete process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT;
+    await loadAppConfig();
+    assert.equal(getBlockSpeedingSwitchAdminExempt(), true);
+    process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT = 'false';
+    await loadAppConfig();
+    assert.equal(getBlockSpeedingSwitchAdminExempt(), false);
+  } finally {
+    if (prev === undefined) delete process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT;
+    else process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT = prev;
+    await loadAppConfig();
+  }
+});
+
+test('maxUsersForMember 临期账号用第二档席位', async () => {
+  const { maxUsersForMember } = await import('../src/account-presence.js');
+  const prev = process.env.PRO_MAX_USERS;
+  process.env.PRO_MAX_USERS = '2,4';
+  try {
+    await loadAppConfig();
+    // 无 resetIso → 非临期 → 正常档 2
+    assert.equal(maxUsersForMember({ planName: 'Pro' }), 2);
+    // 重置日距今 3 天 → 临期 → 第二档 4
+    const resetIso = new Date(Date.now() + 3 * 86400000).toISOString();
+    assert.equal(
+      maxUsersForMember({ planName: 'Pro', lastSnapshot: { window: { resetIso } } }),
+      4,
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PRO_MAX_USERS;
+    else process.env.PRO_MAX_USERS = prev;
+    await loadAppConfig();
+  }
+});
+
 test('parseQuotaResponse 优先 gpt-4 桶', () => {
   const q = parseQuotaResponse({
     startOfMonth: '2026-09-01T00:00:00.000Z',

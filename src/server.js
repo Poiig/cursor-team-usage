@@ -4,18 +4,25 @@
  */
 
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_ACCESS_KEY,
   getAccessKey,
+  getAccountUserLimits,
+  getConfigPath,
   getExpiringWithinDays,
   getListenConfig,
   getLogRetentionDays,
+  getNotifyConfig,
   getServerAutoRefreshSec,
+  getBlockSpeedingSwitch,
+  getBlockSpeedingSwitchAdminExempt,
   getStoreDriver,
   loadAppConfig,
+  parseEnvFile,
+  reloadAppConfig,
 } from './config.js';
 import { assertAccessKey, isAccessKeyConfigured } from './access-key.js';
 import {
@@ -665,6 +672,7 @@ function requiresConsoleAuth(pathname, method) {
  * @param {string} method
  */
 function requiresAdmin(pathname, method) {
+  if (pathname === '/api/config') return true;
   if (pathname === '/api/members' && method === 'POST') return true;
   if (pathname.startsWith('/api/members/email-login')) return true;
   if (pathname === '/api/export/accounts') return true;
@@ -678,6 +686,36 @@ function requiresAdmin(pathname, method) {
   // 管理员手动移除账号使用人席位
   if (pathname.match(/^\/api\/members\/[^/]+\/presence$/) && method === 'DELETE') return true;
   return false;
+}
+
+/** 这些键改动后需重启进程才生效（存储 / 监听 / 会话签名）。 */
+const RESTART_REQUIRED_KEYS = new Set([
+  'STORE_DRIVER',
+  'DATABASE_URL',
+  'PGHOST',
+  'PGPORT',
+  'PGUSER',
+  'PGPASSWORD',
+  'PGDATABASE',
+  'SQLITE_PATH',
+  'HOST',
+  'PORT',
+  'SESSION_SECRET',
+]);
+
+/**
+ * 对比 .env 前后内容，返回本次改动中需重启才生效的键名。
+ * @param {string} beforeText
+ * @param {string} afterText
+ */
+function restartRequiredKeys(beforeText, afterText) {
+  const before = parseEnvFile(beforeText);
+  const after = parseEnvFile(afterText);
+  const changed = [];
+  for (const key of RESTART_REQUIRED_KEYS) {
+    if ((before[key] ?? '') !== (after[key] ?? '')) changed.push(key);
+  }
+  return changed;
 }
 
 /**
@@ -957,6 +995,65 @@ const server = http.createServer(async (req, res) => {
         mustChangePassword: await mustChangePasswordFor(me.username),
         guideCompleted: me.guideCompleted,
         expiringWithinDays: getExpiringWithinDays(),
+        blockSpeedingSwitch: getBlockSpeedingSwitch(),
+        blockSpeedingSwitchAdminExempt: getBlockSpeedingSwitchAdminExempt(),
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/config') {
+      const configPath = getConfigPath();
+      let text = '';
+      try {
+        text = await readFile(configPath, 'utf8');
+      } catch {
+        /* 文件缺失时返回空文本，前端仍可填写 */
+      }
+      return sendJson(res, 200, {
+        path: configPath,
+        text,
+        blockSpeedingSwitch: getBlockSpeedingSwitch(),
+        blockSpeedingSwitchAdminExempt: getBlockSpeedingSwitchAdminExempt(),
+        seatLimits: getAccountUserLimits(),
+        expiringWithinDays: getExpiringWithinDays(),
+        autoRefreshSec: getServerAutoRefreshSec(),
+        logRetentionDays: getLogRetentionDays(),
+        notify: getNotifyConfig(),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/config') {
+      const body = await readBody(req);
+      const text = String(body?.text ?? '');
+      const configPath = getConfigPath();
+      let beforeText = '';
+      try {
+        beforeText = await readFile(configPath, 'utf8');
+      } catch {
+        /* 首次尚无 .env */
+      }
+      const restartKeys = restartRequiredKeys(beforeText, text);
+      try {
+        await copyFile(configPath, `${configPath}.bak`);
+      } catch {
+        /* 无旧文件可备份时忽略 */
+      }
+      await writeFile(configPath, text, 'utf8');
+      await reloadAppConfig();
+      setupServerAutoRefresh();
+      setupLogPruneSchedule();
+      setupExpiringNotifySchedule();
+      await writeAppLog('更新配置', {
+        操作者: req.consoleUser,
+        文件: configPath,
+        需重启: restartKeys.length ? restartKeys.join('、') : undefined,
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        blockSpeedingSwitch: getBlockSpeedingSwitch(),
+        blockSpeedingSwitchAdminExempt: getBlockSpeedingSwitchAdminExempt(),
+        seatLimits: getAccountUserLimits(),
+        expiringWithinDays: getExpiringWithinDays(),
+        restartRequired: restartKeys,
       });
     }
 

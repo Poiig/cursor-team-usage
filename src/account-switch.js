@@ -5,6 +5,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { computeUsagePace } from '../public/shared.js';
+import {
+  getBlockSpeedingSwitch,
+  getBlockSpeedingSwitchAdminExempt,
+} from './config.js';
 import { decodeJwtPayload, jwtFromCookie, sessionFromCookie } from './auth.js';
 import { getMemberCapacity } from './account-presence.js';
 import { getPublicUser } from './users.js';
@@ -202,12 +206,22 @@ export function isFreePlanMember(member) {
   return plan === 'free' || /\bfree\b/.test(plan);
 }
 
+/** 超速：工作日节奏预计撑不到期末（与看板徽章同口径）。 */
+function isSpeedingMember(member) {
+  if (!member || member.lastError || isFreePlanMember(member)) return false;
+  const used = usageTotalPercentOf(member);
+  if (used != null && used >= 100) return false;
+  return computeUsagePace(member)?.status === 'danger';
+}
+
 /**
  * 切换前的统一可用性检查。额度已用完、尚无额度数据、同步异常或 Free 都不能切换。
+ * 开启 BLOCK_SPEEDING_SWITCH 时，超速账号也不可切换（管理员可按配置豁免）。
  * @param {any} member
+ * @param {{ isAdmin?: boolean }} [opts]
  * @returns {string | null}
  */
-export function switchBlockReason(member) {
+export function switchBlockReason(member, opts = {}) {
   if (!member) return '成员不存在';
   if (isFreePlanMember(member)) return 'Free 套餐不可用，请换号';
   if (member.lastError) return '该账号同步异常，请先更新 Token 后再切换';
@@ -219,6 +233,12 @@ export function switchBlockReason(member) {
     Number(member.activeUserCount || 0) >= Number(member.maxUsers)
   ) {
     return `当前使用人数已满（${member.activeUserCount}/${member.maxUsers}）`;
+  }
+  if (getBlockSpeedingSwitch()) {
+    const adminExempt = Boolean(opts.isAdmin) && getBlockSpeedingSwitchAdminExempt();
+    if (!adminExempt && isSpeedingMember(member)) {
+      return '该账号超速，暂不可切换';
+    }
   }
   return null;
 }
@@ -323,7 +343,9 @@ export async function createAccountSwitch(input) {
   const member = await getMemberInternal(input.memberId);
   const capacity = member ? await getMemberCapacity(member) : {};
   const checkedMember = member ? { ...member, ...capacity } : null;
-  const blocked = switchBlockReason(checkedMember);
+  const blocked = switchBlockReason(checkedMember, {
+    isAdmin: operator.role === 'admin',
+  });
   if (blocked) {
     const err = new Error(blocked);
     err.status = 400;
