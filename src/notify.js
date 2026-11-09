@@ -6,7 +6,7 @@
 import { computeUsagePace } from '../public/shared.js';
 import { enrichMembersWithPresence } from './account-presence.js';
 import { switchBlockReason, usageTotalPercentOf } from './account-switch.js';
-import { getExpiringWithinDays, getNotifyConfig } from './config.js';
+import { getExpiringWithinDaysForSnapshot, getNotifyConfig } from './config.js';
 import { listMembers } from './store.js';
 import { writeAppLog } from './app-log.js';
 
@@ -76,7 +76,7 @@ export function isExpiringSwitchableMember(member, nowMs = Date.now()) {
     return false;
   }
   const days = daysUntilReset(member.lastSnapshot?.window?.resetIso, nowMs);
-  return days != null && days <= getExpiringWithinDays();
+  return days != null && days <= getExpiringWithinDaysForSnapshot(member.lastSnapshot);
 }
 
 /**

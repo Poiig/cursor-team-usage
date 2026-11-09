@@ -7,7 +7,7 @@
 import { readFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getAccountUserLimits, getExpiringWithinDays } from './config.js';
+import { getAccountUserLimits, getExpiringWithinDaysForSnapshot } from './config.js';
 import {
   listAppLogsForHydrate,
   listStoredReportEvents,
@@ -118,9 +118,10 @@ export function maxUsersForMember(member) {
     }
   }
   if (!tier) return null;
-  // 临期账号用第二档（更宽松）；与看板「临期」同口径
+  // 临期账号用第二档（更宽松）；与看板「临期」同口径（周订用独立阈值）
   const days = daysUntilReset(member?.lastSnapshot?.window?.resetIso);
-  const expiring = days != null && days <= getExpiringWithinDays();
+  const expiring =
+    days != null && days <= getExpiringWithinDaysForSnapshot(member?.lastSnapshot);
   return expiring ? tier.expiring : tier.normal;
 }
 

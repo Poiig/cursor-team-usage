@@ -12,7 +12,15 @@ import {
   maskToken,
   tokenExpiresAtIso,
 } from '../src/auth.js';
-import { getStoreDriver, loadAppConfig, getAccessKey } from '../src/config.js';
+import {
+  getStoreDriver,
+  loadAppConfig,
+  getAccessKey,
+  getExpiringWithinDays,
+  getExpiringWithinDaysWeekly,
+  getExpiringWithinDaysForSnapshot,
+  isWeeklyUsageSnapshot,
+} from '../src/config.js';
 import {
   parseQuotaResponse,
   computeResetIso,
@@ -238,6 +246,79 @@ test('maxUsersForMember 临期账号用第二档席位', async () => {
   } finally {
     if (prev === undefined) delete process.env.PRO_MAX_USERS;
     else process.env.PRO_MAX_USERS = prev;
+    await loadAppConfig();
+  }
+});
+
+test('周订临期阈值独立于月订（默认 4 天）', async () => {
+  const { maxUsersForMember } = await import('../src/account-presence.js');
+  const { isExpiringSwitchableMember } = await import('../src/notify.js');
+  const prevMonthly = process.env.EXPIRING_WITHIN_DAYS;
+  const prevWeekly = process.env.EXPIRING_WITHIN_DAYS_WEEKLY;
+  const prevX = process.env.X_MAX_USERS;
+  process.env.EXPIRING_WITHIN_DAYS = '7';
+  process.env.EXPIRING_WITHIN_DAYS_WEEKLY = '4';
+  process.env.X_MAX_USERS = '2,5';
+  try {
+    await loadAppConfig();
+    assert.equal(getExpiringWithinDays(), 7);
+    assert.equal(getExpiringWithinDaysWeekly(), 4);
+
+    const weeklySnap = {
+      plan: { includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY' },
+      planMeters: { includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY' },
+    };
+    assert.equal(isWeeklyUsageSnapshot(weeklySnap), true);
+    assert.equal(getExpiringWithinDaysForSnapshot(weeklySnap), 4);
+    assert.equal(getExpiringWithinDaysForSnapshot({}), 7);
+
+    const now = Date.parse('2026-11-09T08:00:00+08:00');
+    const resetIn5d = new Date(now + 5 * 86400000).toISOString();
+    const resetIn3d = new Date(now + 3 * 86400000).toISOString();
+
+    // 剩 5 天：月订临期，周订未临期
+    const monthlyFar = {
+      id: 'm5',
+      planName: 'Pro',
+      totalPercentUsed: 20,
+      lastSnapshot: {
+        window: { resetIso: resetIn5d },
+        meters: { totalPercentUsed: 20 },
+      },
+    };
+    const weeklyFar = {
+      id: 'w5',
+      planName: 'Premium',
+      totalPercentUsed: 20,
+      lastSnapshot: {
+        ...weeklySnap,
+        window: { resetIso: resetIn5d },
+        meters: { totalPercentUsed: 20 },
+      },
+    };
+    assert.equal(isExpiringSwitchableMember(monthlyFar, now), true);
+    assert.equal(isExpiringSwitchableMember(weeklyFar, now), false);
+    assert.equal(maxUsersForMember(weeklyFar), 2);
+
+    // 剩 3 天：周订也临期 → 席位第二档
+    const weeklyNear = {
+      ...weeklyFar,
+      id: 'w3',
+      lastSnapshot: {
+        ...weeklySnap,
+        window: { resetIso: resetIn3d },
+        meters: { totalPercentUsed: 20 },
+      },
+    };
+    assert.equal(isExpiringSwitchableMember(weeklyNear, now), true);
+    assert.equal(maxUsersForMember(weeklyNear), 5);
+  } finally {
+    if (prevMonthly === undefined) delete process.env.EXPIRING_WITHIN_DAYS;
+    else process.env.EXPIRING_WITHIN_DAYS = prevMonthly;
+    if (prevWeekly === undefined) delete process.env.EXPIRING_WITHIN_DAYS_WEEKLY;
+    else process.env.EXPIRING_WITHIN_DAYS_WEEKLY = prevWeekly;
+    if (prevX === undefined) delete process.env.X_MAX_USERS;
+    else process.env.X_MAX_USERS = prevX;
     await loadAppConfig();
   }
 });

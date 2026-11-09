@@ -40,6 +40,7 @@ export const DEFAULT_ACCESS_KEY = 'ctu-change-me';
  *   notifyHour: number,
  *   notifyMinute: number,
  *   expiringWithinDays: number,
+ *   expiringWithinDaysWeekly: number,
  *   blockSpeedingSwitch: boolean,
  *   blockSpeedingSwitchAdminExempt: boolean,
  * }} AppConfig
@@ -65,6 +66,7 @@ let runtime = {
   notifyHour: 9,
   notifyMinute: 30,
   expiringWithinDays: 7,
+  expiringWithinDaysWeekly: 4,
   blockSpeedingSwitch: false,
   blockSpeedingSwitchAdminExempt: true,
 };
@@ -159,6 +161,7 @@ function defaults() {
     notifyHour: 9,
     notifyMinute: 30,
     expiringWithinDays: 7,
+    expiringWithinDaysWeekly: 4,
     blockSpeedingSwitch: false,
     blockSpeedingSwitchAdminExempt: true,
   };
@@ -255,6 +258,13 @@ function configFromProcessEnv() {
   if (process.env.EXPIRING_WITHIN_DAYS != null && process.env.EXPIRING_WITHIN_DAYS !== '') {
     const n = Number(process.env.EXPIRING_WITHIN_DAYS);
     if (Number.isFinite(n) && n >= 0) next.expiringWithinDays = Math.floor(n);
+  }
+  if (
+    process.env.EXPIRING_WITHIN_DAYS_WEEKLY != null &&
+    process.env.EXPIRING_WITHIN_DAYS_WEEKLY !== ''
+  ) {
+    const n = Number(process.env.EXPIRING_WITHIN_DAYS_WEEKLY);
+    if (Number.isFinite(n) && n >= 0) next.expiringWithinDaysWeekly = Math.floor(n);
   }
   return next;
 }
@@ -434,10 +444,31 @@ export function getBlockSpeedingSwitchAdminExempt() {
   return Boolean(getAppConfig().blockSpeedingSwitchAdminExempt);
 }
 
-/** 额度重置「临期」阈值（天，含到期日）；看板筛选与企微推送共用。 */
+/** 额度重置「临期」阈值（天，含到期日）；月订 / 非周池；看板筛选与企微推送共用。 */
 export function getExpiringWithinDays() {
   const n = getAppConfig().expiringWithinDays;
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 7;
+}
+
+/** 周额度（The X / xAI）「临期」阈值（天，含到期日）；默认 4，避免整周都算临期。 */
+export function getExpiringWithinDaysWeekly() {
+  const n = getAppConfig().expiringWithinDaysWeekly;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 4;
+}
+
+/** 快照是否周额度周期。 */
+export function isWeeklyUsageSnapshot(snapshot) {
+  return (
+    String(snapshot?.plan?.includedUsagePeriod || '') === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+    String(snapshot?.planMeters?.includedUsagePeriod || '') === 'INCLUDED_USAGE_PERIOD_WEEKLY'
+  );
+}
+
+/** 按快照周期取临期天数：周订用 WEEKLY 阈值，其余用普通阈值。 */
+export function getExpiringWithinDaysForSnapshot(snapshot) {
+  return isWeeklyUsageSnapshot(snapshot)
+    ? getExpiringWithinDaysWeekly()
+    : getExpiringWithinDays();
 }
 
 /**

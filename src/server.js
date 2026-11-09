@@ -13,6 +13,7 @@ import {
   getAccountUserLimits,
   getConfigPath,
   getExpiringWithinDays,
+  getExpiringWithinDaysWeekly,
   getListenConfig,
   getLogRetentionDays,
   getNotifyConfig,
@@ -995,6 +996,7 @@ const server = http.createServer(async (req, res) => {
         mustChangePassword: await mustChangePasswordFor(me.username),
         guideCompleted: me.guideCompleted,
         expiringWithinDays: getExpiringWithinDays(),
+        expiringWithinDaysWeekly: getExpiringWithinDaysWeekly(),
         blockSpeedingSwitch: getBlockSpeedingSwitch(),
         blockSpeedingSwitchAdminExempt: getBlockSpeedingSwitchAdminExempt(),
       });
@@ -1015,6 +1017,7 @@ const server = http.createServer(async (req, res) => {
         blockSpeedingSwitchAdminExempt: getBlockSpeedingSwitchAdminExempt(),
         seatLimits: getAccountUserLimits(),
         expiringWithinDays: getExpiringWithinDays(),
+        expiringWithinDaysWeekly: getExpiringWithinDaysWeekly(),
         autoRefreshSec: getServerAutoRefreshSec(),
         logRetentionDays: getLogRetentionDays(),
         notify: getNotifyConfig(),
@@ -1053,6 +1056,7 @@ const server = http.createServer(async (req, res) => {
         blockSpeedingSwitchAdminExempt: getBlockSpeedingSwitchAdminExempt(),
         seatLimits: getAccountUserLimits(),
         expiringWithinDays: getExpiringWithinDays(),
+        expiringWithinDaysWeekly: getExpiringWithinDaysWeekly(),
         restartRequired: restartKeys,
       });
     }

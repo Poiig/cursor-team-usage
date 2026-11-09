@@ -176,8 +176,10 @@ let onboardingStep = 0;
 /** @type {'all' | 'ok' | 'speeding' | 'expiring' | 'error'} */
 let accountStatusFilter = 'all';
 
-/** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」；服务端 env 可改，默认 7。 */
+/** 额度重置日临期阈值：剩余天数 ≤ 此值（含已到期）算「临期」；服务端 env 可改。 */
 let EXPIRING_WITHIN_DAYS = 7;
+/** 周订（The X / xAI）临期阈值；默认 4，避免整周都算临期。 */
+let EXPIRING_WITHIN_DAYS_WEEKLY = 4;
 
 /** 服务端 BLOCK_SPEEDING_SWITCH：开启后超速账号不可切换。 */
 let serverBlockSpeedingSwitch = false;
@@ -224,6 +226,20 @@ function isAbnormalMember(member) {
   );
 }
 
+/** 周额度账号（The X / xAI）。 */
+function isWeeklyMember(member) {
+  const snap = member?.lastSnapshot;
+  return (
+    snap?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+    snap?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY'
+  );
+}
+
+/** 该账号适用的临期天数：周订用 WEEKLY 阈值。 */
+function expiringWithinDaysFor(member) {
+  return isWeeklyMember(member) ? EXPIRING_WITHIN_DAYS_WEEKLY : EXPIRING_WITHIN_DAYS;
+}
+
 /**
  * 非异常且额度周期在临期阈值内重置（含已到期）→ 临期。
  * 异常优先归异常，不重复计入临期。
@@ -231,7 +247,7 @@ function isAbnormalMember(member) {
 function isExpiringMember(member) {
   if (!member || isAbnormalMember(member)) return false;
   const days = daysUntil(member.lastSnapshot?.window?.resetIso);
-  return days != null && days <= EXPIRING_WITHIN_DAYS;
+  return days != null && days <= expiringWithinDaysFor(member);
 }
 
 function switchBlockReason(member) {
@@ -745,7 +761,7 @@ function renderSummary(summary) {
     <button type="button" class="stat stat-click" id="btnFilterExpiring" title="只看十天内额度周期重置的账号">
       <p class="label">临期</p>
       <p class="value ${expiringCount > 0 ? 'warn' : ''}">${expiringCount}</p>
-      <p class="note">额度重置 ≤${EXPIRING_WITHIN_DAYS} 天</p>
+      <p class="note">月订 ≤${EXPIRING_WITHIN_DAYS} 天 · 周订 ≤${EXPIRING_WITHIN_DAYS_WEEKLY} 天</p>
     </button>
     <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号（同步失败、Free 或有效期内额满）">
       <p class="label">异常</p>
@@ -1342,6 +1358,10 @@ async function ensurePasswordPolicy() {
     };
     const days = Number(me.expiringWithinDays);
     if (Number.isFinite(days) && days >= 0) EXPIRING_WITHIN_DAYS = Math.floor(days);
+    const weeklyDays = Number(me.expiringWithinDaysWeekly);
+    if (Number.isFinite(weeklyDays) && weeklyDays >= 0) {
+      EXPIRING_WITHIN_DAYS_WEEKLY = Math.floor(weeklyDays);
+    }
     serverBlockSpeedingSwitch = Boolean(me.blockSpeedingSwitch);
     serverBlockSpeedingSwitchAdminExempt = me.blockSpeedingSwitchAdminExempt !== false;
     applyRoleUi();
