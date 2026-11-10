@@ -2135,14 +2135,10 @@ test('wecom expiring notify: filter and body', async () => {
   assert.ok(delay > 0 && delay < 2 * 3600 * 1000);
 });
 
-test('isMemberDue：常规间隔与额度重置前后优先补刷', async () => {
-  const {
-    RESET_REFRESH_AHEAD_MS,
-    RESET_REFRESH_MIN_GAP_MS,
-    isMemberDue,
-  } = await import('../src/refresh-due.js');
+test('isMemberDue：同步周期与重置后补偿', async () => {
+  const { isMemberDue } = await import('../src/refresh-due.js');
 
-  const intervalSec = 900;
+  const intervalSec = 600;
   const now = Date.parse('2026-11-10T09:27:00+08:00');
   const resetIso = '2026-11-10T09:23:38+08:00';
   const resetMs = Date.parse(resetIso);
@@ -2150,7 +2146,7 @@ test('isMemberDue：常规间隔与额度重置前后优先补刷', async () => 
   // 从未同步 → 到期
   assert.equal(isMemberDue({}, intervalSec, now), true);
 
-  // 常规间隔未到、且不临近重置
+  // 周期未到
   assert.equal(
     isMemberDue(
       {
@@ -2165,7 +2161,22 @@ test('isMemberDue：常规间隔与额度重置前后优先补刷', async () => 
     false,
   );
 
-  // 重置已过、上次同步仍早于重置 → 立刻补刷（截图场景）
+  // 周期已到
+  assert.equal(
+    isMemberDue(
+      {
+        lastSyncedAt: new Date(now - intervalSec * 1000).toISOString(),
+        lastSnapshot: {
+          window: { resetIso: new Date(now + 5 * 86400000).toISOString() },
+        },
+      },
+      intervalSec,
+      now,
+    ),
+    true,
+  );
+
+  // 重置已过、上次同步仍早于重置 → 补偿刷
   assert.equal(
     isMemberDue(
       {
@@ -2178,7 +2189,7 @@ test('isMemberDue：常规间隔与额度重置前后优先补刷', async () => 
     true,
   );
 
-  // 重置后已刷过 → 走常规间隔
+  // 重置后已刷过 → 走常规周期
   assert.equal(
     isMemberDue(
       {
@@ -2191,25 +2202,12 @@ test('isMemberDue：常规间隔与额度重置前后优先补刷', async () => 
     false,
   );
 
-  // 快到重置：距重置不到 ahead、且距上次同步超过 min gap → 提前刷
-  const nearReset = resetMs - Math.floor(RESET_REFRESH_AHEAD_MS / 2);
+  // 重置前不再提前刷（即使很近）
+  const nearReset = resetMs - 5 * 60 * 1000;
   assert.equal(
     isMemberDue(
       {
-        lastSyncedAt: new Date(nearReset - RESET_REFRESH_MIN_GAP_MS - 1000).toISOString(),
-        lastSnapshot: { window: { resetIso } },
-      },
-      intervalSec,
-      nearReset,
-    ),
-    true,
-  );
-
-  // 快到重置但刚刷过 → 不狂刷
-  assert.equal(
-    isMemberDue(
-      {
-        lastSyncedAt: new Date(nearReset - 10 * 1000).toISOString(),
+        lastSyncedAt: new Date(nearReset - 2 * 60 * 1000).toISOString(),
         lastSnapshot: { window: { resetIso } },
       },
       intervalSec,

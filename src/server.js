@@ -406,13 +406,13 @@ async function refreshOne(id, ctx = {}) {
 }
 
 /**
- * 是否已到自动刷新时机：瞬时错误优先、常规间隔、额度重置前后补刷。
+ * 是否已到自动刷新时机：同步周期到期、重置后补偿，或瞬时错误尽快再试。
  * @param {{ lastSyncedAt?: string | null, lastError?: string | null, lastSnapshot?: any }} member
  * @param {number} intervalSec
  * @param {number} nowMs
  */
 function isMemberDue(member, intervalSec, nowMs = Date.now()) {
-  // 已在看板上的超时红条尽快再刷，不必等满 AUTO_REFRESH_SEC
+  // 瞬时错误红条尽快再试，不必等满同步周期
   if (member.lastError && isTransientCursorError({ message: member.lastError })) return true;
   return isMemberDueByInterval(member, intervalSec, nowMs);
 }
@@ -588,8 +588,13 @@ function setupUsagePercentArchiveSchedule() {
   }, delay);
 }
 
+/** 内部扫描间隔：只负责醒来检查谁到期，不是用户配置。 */
+const AUTO_REFRESH_SCAN_SEC = 30;
+
 /**
- * 短周期扫描到期账号；AUTO_REFRESH_SEC 表示「每个账号距上次同步」的间隔，而非全员齐刷周期。
+ * 定时扫描到期账号。
+ * AUTO_REFRESH_SEC = 每个账号同步用量/events 的周期；点「刷新用量」会立刻刷并重置该周期。
+ * 额度重置已过且尚未补刷时会插队补偿。
  */
 function setupServerAutoRefresh() {
   if (autoRefreshTimer) {
@@ -601,14 +606,12 @@ function setupServerAutoRefresh() {
     console.log('服务端自动刷新：已关闭');
     return;
   }
-  // 扫描周期远短于账号间隔，便于按各自 lastSyncedAt 错开触发。
-  const tickSec = Math.min(60, Math.max(15, Math.floor(sec / 12) || 15));
-  console.log(`服务端自动刷新：每账号间隔 ${sec} 秒（扫描周期 ${tickSec} 秒）`);
+  console.log(`服务端自动刷新：每账号周期 ${sec} 秒（扫描 ${AUTO_REFRESH_SCAN_SEC} 秒）`);
   autoRefreshTimer = setInterval(() => {
     refreshDueMembers(2, { trigger: '定时扫描' }).catch((e) =>
       writeAppLog('自动刷新', { 结果: '异常', 错误: e?.message || String(e) }),
     );
-  }, tickSec * 1000);
+  }, AUTO_REFRESH_SCAN_SEC * 1000);
   setTimeout(() => {
     refreshDueMembers(2, { trigger: '启动补刷' }).catch((e) =>
       writeAppLog('自动刷新', { 结果: '启动补刷异常', 错误: e?.message || String(e) }),

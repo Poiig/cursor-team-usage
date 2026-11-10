@@ -55,7 +55,7 @@ let runtime = {
   databaseUrl: '',
   sqlitePath: DEFAULT_SQLITE,
   accessKey: DEFAULT_ACCESS_KEY,
-  autoRefreshSec: 900,
+  autoRefreshSec: 600,
   sessionSecret: '',
   logRetentionDays: 30,
   proMaxUsers: { normal: 3, expiring: 3 },
@@ -150,7 +150,7 @@ function defaults() {
     databaseUrl: '',
     sqlitePath: DEFAULT_SQLITE,
     accessKey: DEFAULT_ACCESS_KEY,
-    autoRefreshSec: 900, // 每账号距上次同步的刷新间隔（秒）
+    autoRefreshSec: 600, // 每账号同步用量/events 的周期（秒）
     sessionSecret: '',
     logRetentionDays: 30, // data/log 下日志保留天数，0=不自动删除
     proMaxUsers: { normal: 3, expiring: 3 },

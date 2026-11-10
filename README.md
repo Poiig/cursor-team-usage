@@ -27,7 +27,7 @@
 | 控制台 | 默认 `admin` / `admin`，首次登录强制改密；支持多用户 |
 | 配置 | 仓库根目录 `.env`（模板 `.env.example`），**无网页设置页**，改完重启 |
 | 存储 | 默认本地 SQLite（`data/app.sqlite`，含名册、控制台账号、使用人席位）；可选 PostgreSQL；`file` 为遗留 JSON |
-| 刷新 | 服务端按 `AUTO_REFRESH_SEC` 后台定时刷新（默认 15 分钟）；「刷新用量」按最久未更新顺序逐个刷新 |
+| 刷新 | 每个账号按 `AUTO_REFRESH_SEC` 周期同步用量与 events（默认 10 分钟）；「刷新用量」立刻刷并重置该周期；额度重置后会补偿刷一次 |
 
 ## 快速开始
 
@@ -63,7 +63,7 @@ npm run dev    # 热重载
 | `SQLITE_PATH` | SQLite 库路径，默认 `data/app.sqlite` |
 | `DATABASE_URL` | PG 连接串；也可用 `PGHOST` 等拆分变量 |
 | `ACCESS_KEY` | Reporter 扩展上报密钥；默认 `ctu-change-me`（**生产请改**）；显式设空则关闭上报 |
-| `AUTO_REFRESH_SEC` | 服务端定时刷全员用量（秒），默认 `900`（15 分钟），`0`=关 |
+| `AUTO_REFRESH_SEC` | 每个账号同步用量 / events 的周期（秒），默认 `600`（10 分钟），`0`=关；非全员齐刷 |
 | `PRO_MAX_USERS` / `PRO_PLUS_MAX_USERS` | Pro / Pro+ 同时活跃使用人数上限，默认 `3` / `5` |
 | `PUBLIC_BASE_URL` | 看板对外地址，用于一键安装脚本与插件配置 |
 | `SESSION_SECRET` | 登录 Cookie 签名；空则首次启动自动生成并写入 `.env` |
