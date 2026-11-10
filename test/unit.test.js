@@ -298,7 +298,18 @@ test('周订临期阈值独立于月订（默认 4 天）', async () => {
     };
     assert.equal(isExpiringSwitchableMember(monthlyFar, now), true);
     assert.equal(isExpiringSwitchableMember(weeklyFar, now), false);
-    assert.equal(maxUsersForMember(weeklyFar), 2);
+    // maxUsersForMember 按真实 Date.now() 算临期，不能用上面写死的 now
+    assert.equal(
+      maxUsersForMember({
+        ...weeklyFar,
+        lastSnapshot: {
+          ...weeklySnap,
+          window: { resetIso: new Date(Date.now() + 5 * 86400000).toISOString() },
+          meters: { totalPercentUsed: 20 },
+        },
+      }),
+      2,
+    );
 
     // 剩 3 天：周订也临期 → 席位第二档
     const weeklyNear = {
@@ -311,7 +322,17 @@ test('周订临期阈值独立于月订（默认 4 天）', async () => {
       },
     };
     assert.equal(isExpiringSwitchableMember(weeklyNear, now), true);
-    assert.equal(maxUsersForMember(weeklyNear), 5);
+    assert.equal(
+      maxUsersForMember({
+        ...weeklyNear,
+        lastSnapshot: {
+          ...weeklySnap,
+          window: { resetIso: new Date(Date.now() + 3 * 86400000).toISOString() },
+          meters: { totalPercentUsed: 20 },
+        },
+      }),
+      5,
+    );
   } finally {
     if (prevMonthly === undefined) delete process.env.EXPIRING_WITHIN_DAYS;
     else process.env.EXPIRING_WITHIN_DAYS = prevMonthly;
