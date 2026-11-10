@@ -2114,6 +2114,90 @@ test('wecom expiring notify: filter and body', async () => {
   assert.ok(delay > 0 && delay < 2 * 3600 * 1000);
 });
 
+test('isMemberDue：常规间隔与额度重置前后优先补刷', async () => {
+  const {
+    RESET_REFRESH_AHEAD_MS,
+    RESET_REFRESH_MIN_GAP_MS,
+    isMemberDue,
+  } = await import('../src/refresh-due.js');
+
+  const intervalSec = 900;
+  const now = Date.parse('2026-11-10T09:27:00+08:00');
+  const resetIso = '2026-11-10T09:23:38+08:00';
+  const resetMs = Date.parse(resetIso);
+
+  // 从未同步 → 到期
+  assert.equal(isMemberDue({}, intervalSec, now), true);
+
+  // 常规间隔未到、且不临近重置
+  assert.equal(
+    isMemberDue(
+      {
+        lastSyncedAt: new Date(now - 60 * 1000).toISOString(),
+        lastSnapshot: {
+          window: { resetIso: new Date(now + 5 * 86400000).toISOString() },
+        },
+      },
+      intervalSec,
+      now,
+    ),
+    false,
+  );
+
+  // 重置已过、上次同步仍早于重置 → 立刻补刷（截图场景）
+  assert.equal(
+    isMemberDue(
+      {
+        lastSyncedAt: new Date(resetMs - 8 * 60 * 1000).toISOString(),
+        lastSnapshot: { window: { resetIso } },
+      },
+      intervalSec,
+      now,
+    ),
+    true,
+  );
+
+  // 重置后已刷过 → 走常规间隔
+  assert.equal(
+    isMemberDue(
+      {
+        lastSyncedAt: new Date(resetMs + 30 * 1000).toISOString(),
+        lastSnapshot: { window: { resetIso } },
+      },
+      intervalSec,
+      now,
+    ),
+    false,
+  );
+
+  // 快到重置：距重置不到 ahead、且距上次同步超过 min gap → 提前刷
+  const nearReset = resetMs - Math.floor(RESET_REFRESH_AHEAD_MS / 2);
+  assert.equal(
+    isMemberDue(
+      {
+        lastSyncedAt: new Date(nearReset - RESET_REFRESH_MIN_GAP_MS - 1000).toISOString(),
+        lastSnapshot: { window: { resetIso } },
+      },
+      intervalSec,
+      nearReset,
+    ),
+    true,
+  );
+
+  // 快到重置但刚刷过 → 不狂刷
+  assert.equal(
+    isMemberDue(
+      {
+        lastSyncedAt: new Date(nearReset - 10 * 1000).toISOString(),
+        lastSnapshot: { window: { resetIso } },
+      },
+      intervalSec,
+      nearReset,
+    ),
+    false,
+  );
+});
+
 test('上个账单周期：窗口、收尾使用率留存与按模型汇总', async () => {
   const {
     carryCycleHistory,

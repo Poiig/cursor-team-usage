@@ -209,15 +209,13 @@ function isFreePlanMember(member) {
   return plan === 'free' || /\bfree\b/.test(plan);
 }
 
-/** 有效期内额度已用尽：重置日未到，但 Total usage ≥ 100%。 */
+/** 额度已用尽（≥100%）→ 异常；含重置日当天 / 已过重置但尚未刷到新周期。 */
 function isQuotaExhaustedInPeriod(member) {
   const used = usedPercent(member);
-  if (used == null || used < 100) return false;
-  const days = daysUntil(member?.lastSnapshot?.window?.resetIso);
-  return days != null && days > 0;
+  return used != null && used >= 100;
 }
 
-/** 同步失败、Free，或有效期内额满 → 异常（不可切换，也不进临期）。 */
+/** 同步失败、Free，或额满 → 异常（不可切换，也不进临期）。 */
 function isAbnormalMember(member) {
   return (
     Boolean(member?.lastError) ||
@@ -429,7 +427,7 @@ function statusBadgeHtml(member) {
       : isFreePlanMember(member)
         ? 'Free 套餐，请更换可用账号'
         : isQuotaExhaustedInPeriod(member)
-          ? '有效期内额度已用完'
+          ? '额度已用完'
           : '';
     return `<span class="badge danger" title="${escapeHtml(tip)}">异常</span>`;
   }
@@ -463,7 +461,7 @@ function paceOnlyBadgeHtml(member) {
       : isFreePlanMember(member)
         ? 'Free 套餐，请更换可用账号'
         : isQuotaExhaustedInPeriod(member)
-          ? '有效期内额度已用完'
+          ? '额度已用完'
           : '';
     return `<span class="badge danger" title="${escapeHtml(tip)}">异常</span>`;
   }
@@ -763,7 +761,7 @@ function renderSummary(summary) {
       <p class="value ${expiringCount > 0 ? 'warn' : ''}">${expiringCount}</p>
       <p class="note">月订 ≤${EXPIRING_WITHIN_DAYS} 天 · 周订 ≤${EXPIRING_WITHIN_DAYS_WEEKLY} 天</p>
     </button>
-    <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号（同步失败、Free 或有效期内额满）">
+    <button type="button" class="stat stat-click stat-error" id="btnFilterError" title="只看异常账号（同步失败、Free 或额满）">
       <p class="label">异常</p>
       <p class="value ${badCount > 0 ? 'danger' : ''}">${badCount}</p>
       <p class="note">Token / Free / 额满</p>

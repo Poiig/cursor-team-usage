@@ -35,6 +35,7 @@ import {
   probeCursorSessionAuth,
   uselessReportReason,
 } from './cursor-api.js';
+import { isMemberDue as isMemberDueByInterval } from './refresh-due.js';
 import {
   ensureMemberUsageEventsSynced,
   enrichPublicMemberFromEvents,
@@ -405,18 +406,15 @@ async function refreshOne(id, ctx = {}) {
 }
 
 /**
- * 是否已超过「距上次同步」的刷新间隔；从未同步的账号视为到期。
- * @param {{ lastSyncedAt?: string | null }} member
+ * 是否已到自动刷新时机：瞬时错误优先、常规间隔、额度重置前后补刷。
+ * @param {{ lastSyncedAt?: string | null, lastError?: string | null, lastSnapshot?: any }} member
  * @param {number} intervalSec
  * @param {number} nowMs
  */
 function isMemberDue(member, intervalSec, nowMs = Date.now()) {
   // 已在看板上的超时红条尽快再刷，不必等满 AUTO_REFRESH_SEC
   if (member.lastError && isTransientCursorError({ message: member.lastError })) return true;
-  if (!member.lastSyncedAt) return true;
-  const t = Date.parse(member.lastSyncedAt);
-  if (!Number.isFinite(t)) return true;
-  return nowMs - t >= intervalSec * 1000;
+  return isMemberDueByInterval(member, intervalSec, nowMs);
 }
 
 /**
