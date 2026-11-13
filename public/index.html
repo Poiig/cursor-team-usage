@@ -84,14 +84,14 @@
             <button type="button" class="btn" id="btnRestoreLocal" title="恢复首次切换前记下的本机 Cursor 账号">恢复本机账号</button>
             <button type="button" class="btn admin-only hidden" id="btnExport" title="导出账号列表 JSON">导出</button>
             <button type="button" class="btn" id="btnRefreshAll" title="从额度更新时间最早的账号开始逐个刷新">刷新用量</button>
-            <button type="button" class="btn primary admin-only hidden" id="btnAdd">+ 添加账号</button>
+            <button type="button" class="btn primary" id="btnAdd">+ 添加账号</button>
           </div>
         </div>
         <div id="memberList" class="account-list"></div>
         <div id="emptyState" class="empty hidden">
           <h3>还没有账号</h3>
-          <p>管理员可添加账号；普通用户可在账号卡片上点「切换」唤起本机 Cursor。</p>
-          <div class="empty-actions admin-only hidden">
+          <p>可用本机 Cursor 导入或 OAuth 登录添加账号；卡片上可点「切换」唤起本机 Cursor。</p>
+          <div class="empty-actions">
             <button type="button" class="btn primary" id="btnEmptyAdd">+ 添加账号</button>
           </div>
         </div>
@@ -281,7 +281,7 @@
             <code>.env.example</code>），改完重启；管理员也可点顶栏「设置」在线编辑并热重载。
           </li>
           <li>
-            <strong>录入账号</strong>：本机导入 / 粘贴 Token / 邮箱验证码入池；多机用 Reporter 扩展定时上报（显示名默认机器名）。
+            <strong>录入账号</strong>：所有登录用户可用本机 Cursor 导入或 OAuth 浏览器登录入池；多机用 Reporter 扩展定时上报（显示名默认机器名）。编辑 / 删除仍仅管理员。
           </li>
           <li>
             <strong>插件安装</strong>：登录后在账号页点「安装插件」。安装包绑定当前用户并写入签名；用户页能看到版本。地址只认 <code>PUBLIC_BASE_URL</code>。优先本机桥 <code>:3781</code>，否则会打开备用命令窗口，点击复制后在 PowerShell 或 macOS 终端执行。macOS 命令会自动寻找常见的 Cursor 安装路径。扩展启动会检查更新。
@@ -421,55 +421,45 @@
           <button type="button" class="icon-close" id="btnDialogClose" aria-label="关闭">×</button>
         </header>
         <div class="filter-tabs member-method-tabs" id="memberMethodTabs" role="tablist">
-          <button type="button" class="filter-tab active" data-method="token">粘贴 Token</button>
-          <button type="button" class="filter-tab" data-method="email">邮箱验证码</button>
+          <button type="button" class="filter-tab active" data-method="local">本机导入</button>
+          <button type="button" class="filter-tab" data-method="oauth">OAuth 登录</button>
         </div>
         <label>
           显示名
-          <input id="fieldDisplayName" maxlength="64" placeholder="例如：小王（邮箱入池可留空）" autocomplete="off" />
+          <input id="fieldDisplayName" maxlength="64" placeholder="例如：小王（可留空，默认用邮箱）" autocomplete="off" />
         </label>
-        <div id="memberMethodToken">
-          <label>
-            会话 Token
-            <textarea
-              id="fieldSessionToken"
-              rows="5"
-              placeholder="粘贴 WorkosCursorSessionToken 的完整值&#10;&#10;获取步骤：&#10;1. 浏览器打开 https://cursor.com/dashboard 并登录目标账号&#10;2. F12 → Application（应用）→ Cookies → https://cursor.com&#10;3. 找到 WorkosCursorSessionToken，复制 Value&#10;4. 整段粘贴到这里（可含 user_xxx%3A%3AeyJ… 或 name=value）"
-              autocomplete="off"
-              spellcheck="false"
-            ></textarea>
-          </label>
+        <div id="memberMethodLocal">
+          <p class="hint" id="localSessionHint">正在检测本机 Cursor 登录态…</p>
           <p class="hint">
-            Token 等同登录态，保存在服务端名册。本机已登录 Cursor 时可直接点「从本机 Cursor 导入」，无需粘贴。
+            读取本机 Cursor 的 <code>state.vscdb</code> 登录态；过期或临期会自动换票后再入池。
           </p>
         </div>
-        <div id="memberMethodEmail" class="hidden">
-          <label>
-            Cursor 邮箱
-            <input id="fieldMemberEmail" type="email" maxlength="120" placeholder="账号邮箱" autocomplete="off" />
-          </label>
-          <div class="email-code-row">
-            <label class="email-code-field">
-              验证码
-              <input
-                id="fieldMemberEmailCode"
-                maxlength="6"
-                inputmode="numeric"
-                placeholder="6 位数字"
-                autocomplete="one-time-code"
-              />
-            </label>
-            <button type="button" class="btn" id="btnSendMemberEmailCode">发送验证码</button>
-          </div>
-          <p class="hint" id="memberEmailHint">
-            向该邮箱发送 Cursor 登录验证码，填入后即可入池；用户无需本机登录再上报。若服务端被 Cloudflare 拦截，请改回粘贴 Token。
+        <div id="memberMethodOauth" class="hidden">
+          <p class="hint" id="oauthLoginHint">
+            将打开 Cursor 登录页；在浏览器完成登录后，看板会自动入池（约 5 分钟内有效）。
           </p>
         </div>
         <footer class="sheet-footer">
-          <button type="button" class="btn" id="btnImportInDialog">从本机 Cursor 导入</button>
+          <button type="button" class="btn hidden" id="btnSaveDisplayNameOnly">仅保存显示名</button>
           <div class="sheet-footer-right">
             <button type="button" class="btn" id="btnDialogCancel">取消</button>
-            <button type="button" class="btn primary" id="btnSaveMember">保存并同步</button>
+            <button type="button" class="btn primary" id="btnSaveMember">导入并同步</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="oauthResultDialog" class="sheet">
+      <div class="sheet-body">
+        <header>
+          <h3 id="oauthResultTitle">OAuth 登录结果</h3>
+          <button type="button" class="icon-close" id="btnOauthResultClose" aria-label="关闭">×</button>
+        </header>
+        <div id="oauthResultBody" class="oauth-result-body"></div>
+        <footer class="sheet-footer">
+          <div class="sheet-footer-right">
+            <button type="button" class="btn" id="btnOauthResultDismiss">关闭</button>
+            <button type="button" class="btn primary" id="btnOauthResultDetail">查看详情</button>
           </div>
         </footer>
       </div>

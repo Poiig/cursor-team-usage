@@ -18,9 +18,9 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 多账号 | 网页添加 / 本机导入 / 粘贴 Token / 邮箱验证码入池；或用 Reporter 扩展自动上报 |
+| 多账号 | 所有登录用户可用本机 Cursor 导入 / OAuth 浏览器登录入池；或用 Reporter 扩展自动上报 |
 | 一键切换 | 网页点「切换」唤起本机 Cursor，首次记下本机账号再写入目标并重启；可「恢复本机账号」；记入切换日志 |
-| 多用户 | 管理员可创建普通用户；普通用户可看用量、刷新、切换；名册与用户管理仅管理员 |
+| 多用户 | 管理员可创建普通用户；普通用户可看用量、刷新、切换、添加账号；编辑/删除名册与用户管理仅管理员 |
 | 用量总览 | Total / Cursor Models / Other Models；剩余额度、额度重置、Token 有效至 |
 | 详情页 | Grok Bot、日花费 / tokens 图、Top models、请求明细（可 Export CSV） |
 | 隐私模式 | 列表邮箱脱敏 |
@@ -109,24 +109,21 @@ cd D:\AppData\wslc\cursor-team-usage
 
 ## 如何录入账号
 
-四种方式，可混用：
-
 | 方式 | 适用 | 做法 |
 | --- | --- | --- |
-| 本机导入 | 看板跑在装了 Cursor 的同一台机器 | 网页点「本机导入」（读 `state.vscdb`，需本机 Python 3） |
-| 粘贴 Token | 任意机器临时加号 | Cookie 里复制 `WorkosCursorSessionToken` |
-| **邮箱验证码** | 管理员代登入池，用户无需本机登录再上报 | 「添加账号」→「邮箱验证码」→ 填邮箱收码 → 登录并入池 |
+| **本机导入** | 看板跑在装了 Cursor 的同一台机器 | 「添加账号」→「本机导入」（读 `state.vscdb`；过期/临期自动换票） |
+| **OAuth 登录** | 任意机器、任意 Cursor 账号 | 「添加账号」→「OAuth 登录」→ 浏览器完成 Cursor 登录后自动入池 |
 | **Reporter 扩展（多机推荐）** | 各开发机自动续报 | Windows 用 `install-reporter.ps1`，macOS 用 `install-reporter.sh` 下载成品安装；看板一键安装会自动配置地址与 `accessKey` |
 
-邮箱验证码走 `authenticator.cursor.sh` 的 magic-code 流程，入池后仍只存会话 Token（不存 Cursor 密码）。若服务端 IP 被 Cloudflare / 人机验证拦截，接口会报错，请改回粘贴 Token 或本机导入。仅用于自有 / 已授权账号。
+OAuth 走 Cursor 官方 `loginDeepControl` + PKCE 轮询（与 OpenUsage 同口径），入池后只存会话 Token。仅用于自有 / 已授权账号。
 
-网页添加的账号标记为「人工」；插件上报新建的为「上报」。同账号再上报时**仍会续 Token**（用户切号后本机 Cursor 会换新 JWT，插件带回号池），但**不覆盖**人工改的显示名 / 主机名。看板本身不会主动刷新 Token。
+网页添加的账号标记为「人工」；插件上报新建的为「上报」。同账号再上报时**仍会续 Token**（用户切号后本机 Cursor 会换新 JWT，插件带回号池），但**不覆盖**人工改的显示名 / 主机名。
 
 ### Token 能用多久？
 
-落盘的是 Cursor access JWT，有过期时间（列表显示「Token 有效至」）。看板**不会**自己刷新 Token。
+落盘的是 Cursor access JWT，有过期时间（列表显示「Token 有效至」）。刷新用量时若临期（约 7 天内）或鉴权失败，看板会用 JWT 自身向 `oauth/token` 换新票并写回名册。
 
-- **本机导入 / 粘贴 / 邮箱验证码**：过期后需再导入、再粘贴，或再走一遍邮箱验证码。Cursor IDE 保持登录时会把新 Token 写回本地库，再点一次「本机导入」即可。
+- **本机导入 / OAuth**：过期后可再导入，或再走一遍 OAuth。Cursor IDE 保持登录时会把新 Token 写回本地库，再点一次「本机导入」即可。
 - **Reporter 扩展**：Cursor 开着时按间隔把当前会话上报到看板，过期前一般会带上续期后的 Token；关机或未登录期间不会续。换 Token 前服务端会向用量接口确认会话有效，确认失败或无法确认则拒绝覆盖。写入后若刷新仍鉴权失败，自动回滚到上一份 Token。
 
 ### Reporter 扩展

@@ -4,13 +4,23 @@
  * 拉取计划、请求额度、花费上限与账单周期用量。
  */
 
-import { jwtFromCookie, sessionFromCookie } from './auth.js';
+import {
+  buildCookieValue,
+  decodeJwtPayload,
+  jwtFromCookie,
+  sessionFromCookie,
+  userIdFromSub,
+} from './auth.js';
 import { isSyntheticEventId as isSyntheticEventIdFromUsage } from './usage-events.js';
 
 const USER_AGENT = 'cursor-team-usage/0.1';
 const PAGE_SIZE = 100;
 /** 单次拉取页数上限；过小会把重度账号周期截成 5000 条，tokens/模型严重偏低。 */
 const MAX_PAGES = 500;
+/** 与 OpenUsage 一致：Cursor 桌面 OAuth client，JWT 自身兼作 refresh_token。 */
+const CURSOR_OAUTH_CLIENT_ID = 'KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB';
+/** 到期前一周主动换票，避免机器休眠跨过 exp。 */
+export const CURSOR_REFRESH_LEAD_MS = 7 * 86400000;
 
 /** cursor.com 对状态变更请求做 Origin 校验，需模拟浏览器 dashboard 头。 */
 const BROWSER_HEADERS = {
@@ -219,6 +229,201 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Stripe customerBalance：负值表示预付余额（美分），正值是欠款忽略。
+ * @param {any} stripeBody
+ */
+export function stripePrepaidCents(stripeBody) {
+  const balance = num(stripeBody?.customerBalance);
+  if (balance == null || balance >= 0) return 0;
+  return Math.abs(balance);
+}
+
+/**
+ * usage-summary 的 onDemand 桶：个人优先，不可用再回退 team。
+ * @param {any} bucket
+ * @param {'individual' | 'team'} source
+ */
+export function parseOnDemandBucket(bucket, source) {
+  if (!bucket || typeof bucket !== 'object') return null;
+  const usedCents = num(bucket.used) ?? 0;
+  const limitCents = num(bucket.limit);
+  const remainingCents = num(bucket.remaining);
+  // 有上限或已花费才算可用；空壳 individual 不能挡住 team 回退。
+  if (!((limitCents != null && limitCents > 0) || usedCents > 0)) return null;
+  return {
+    enabled: Boolean(bucket.enabled) || usedCents > 0,
+    usedCents,
+    limitCents,
+    remainingCents,
+    source,
+  };
+}
+
+/**
+ * GetCurrentPeriodUsage.spendLimitUsage → On-demand。
+ * spend 与 limit 必须同预算（individual / pooled），对齐 OpenUsage #1661。
+ * @param {any} spendLimitUsage
+ */
+export function resolveOnDemandFromSpendLimit(spendLimitUsage) {
+  if (!spendLimitUsage || typeof spendLimitUsage !== 'object') return null;
+  const individualLimit = num(spendLimitUsage.individualLimit);
+  const pooledLimit = num(spendLimitUsage.pooledLimit) ?? 0;
+  const pooledUsed = num(spendLimitUsage.pooledUsed) ?? 0;
+  const limitType = String(spendLimitUsage.limitType || '').toLowerCase();
+  const isTeamByShape = limitType === 'team' || pooledLimit > 0;
+  const hasTeamSpend = isTeamByShape || pooledUsed > 0;
+
+  /** @type {number} */
+  let limit;
+  /** @type {string[]} */
+  let spentKeys;
+  /** @type {string | null} */
+  let remainingKey;
+  /** @type {'individual' | 'team'} */
+  let source;
+
+  if (individualLimit != null) {
+    limit = individualLimit;
+    spentKeys = hasTeamSpend ? ['individualUsed'] : ['individualUsed', 'totalSpend'];
+    remainingKey = 'individualRemaining';
+    source = 'individual';
+  } else if (pooledLimit > 0) {
+    limit = pooledLimit;
+    spentKeys = ['pooledUsed'];
+    remainingKey = 'pooledRemaining';
+    source = 'team';
+  } else {
+    limit = 0;
+    spentKeys = ['individualUsed', 'pooledUsed', 'totalSpend'];
+    remainingKey = null;
+    source = isTeamByShape ? 'team' : 'individual';
+  }
+
+  const reported = spentKeys.map((k) => num(spendLimitUsage[k])).filter((n) => n != null);
+  const remaining = remainingKey ? num(spendLimitUsage[remainingKey]) : null;
+  let usedCents = 0;
+  const positive = reported.find((n) => n > 0);
+  if (positive != null) usedCents = positive;
+  else {
+    const inferred = remaining != null ? Math.max(0, limit - remaining) : 0;
+    usedCents = inferred > 0 ? inferred : (reported[0] ?? 0);
+  }
+
+  if (!(limit > 0) && !(usedCents > 0)) return null;
+  return {
+    enabled: true,
+    usedCents,
+    limitCents: limit > 0 ? limit : null,
+    remainingCents: remaining,
+    source,
+  };
+}
+
+/**
+ * period 的 spendLimitUsage 优先；否则用 summary（含 team 回退）。
+ * @param {ReturnType<typeof resolveOnDemandFromSpendLimit> | null | undefined} periodOd
+ * @param {ReturnType<typeof parseOnDemandBucket> | null | undefined} summaryOd
+ */
+export function preferOnDemand(periodOd, summaryOd) {
+  if (periodOd && ((periodOd.limitCents ?? 0) > 0 || (periodOd.usedCents ?? 0) > 0)) {
+    return periodOd;
+  }
+  return summaryOd || periodOd || null;
+}
+
+/**
+ * 信用赠额 + Stripe 预付 → 剩余可用 Credits（美元）。
+ * @param {any} creditGrants GetCreditGrantsBalance 响应
+ * @param {number} stripeBalanceCents
+ */
+export function combineCredits(creditGrants, stripeBalanceCents = 0) {
+  const hasCreditGrants = creditGrants?.hasCreditGrants === true;
+  const grantTotalCents = hasCreditGrants ? (num(creditGrants.totalCents) ?? 0) : 0;
+  const grantUsedCents = hasCreditGrants ? (num(creditGrants.usedCents) ?? 0) : 0;
+  const hasValidGrantData = hasCreditGrants && grantTotalCents > 0;
+  const stripe = Math.max(0, Number(stripeBalanceCents) || 0);
+  const combinedTotalCents = (hasValidGrantData ? grantTotalCents : 0) + stripe;
+  const remainingCents = Math.max(
+    0,
+    combinedTotalCents - (hasValidGrantData ? grantUsedCents : 0),
+  );
+  if (combinedTotalCents <= 0 && !hasValidGrantData) return null;
+  return {
+    remainingDollars: Math.round((remainingCents / 100) * 100) / 100,
+    totalCents: combinedTotalCents,
+    usedCents: hasValidGrantData ? grantUsedCents : 0,
+  };
+}
+
+/**
+ * 用 refresh_token（通常即当前 JWT）换新 access_token。
+ * @param {string} refreshToken
+ */
+export async function refreshCursorAccessToken(refreshToken) {
+  const token = String(refreshToken || '').trim();
+  if (!token) throw new Error('缺少 refresh_token');
+  const data = await fetchJson('https://api2.cursor.sh/oauth/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': USER_AGENT,
+    },
+    body: JSON.stringify({
+      grant_type: 'refresh_token',
+      client_id: CURSOR_OAUTH_CLIENT_ID,
+      refresh_token: token,
+    }),
+  });
+  if (data?.shouldLogout === true) {
+    const err = new Error('会话已失效，需重新登录');
+    err.status = 401;
+    throw err;
+  }
+  const accessToken = data?.access_token;
+  if (!accessToken || typeof accessToken !== 'string') {
+    throw new Error('刷新 Token 未返回 access_token');
+  }
+  return {
+    accessToken,
+    refreshToken:
+      typeof data.refresh_token === 'string' && data.refresh_token
+        ? data.refresh_token
+        : accessToken,
+  };
+}
+
+/**
+ * 已过期或进入临期窗口时换票并拼回 cookie；无需换或失败时返回 null。
+ * @param {string} cookieValue
+ * @param {{ force?: boolean, leadMs?: number, refreshToken?: string | null }} [opts]
+ */
+export async function renewCookieIfNeeded(cookieValue, opts = {}) {
+  const session = sessionFromCookie(cookieValue);
+  const jwt = jwtFromCookie(cookieValue);
+  if (!session || !jwt) return null;
+  const payload = decodeJwtPayload(jwt);
+  const expMs = Number(payload?.exp) * 1000;
+  const leadMs = opts.leadMs ?? CURSOR_REFRESH_LEAD_MS;
+  const due =
+    opts.force === true ||
+    !Number.isFinite(expMs) ||
+    expMs - Date.now() <= leadMs;
+  if (!due) return null;
+  try {
+    const refreshWith = String(opts.refreshToken || jwt).trim() || jwt;
+    const tokens = await refreshCursorAccessToken(refreshWith);
+    const newPayload = decodeJwtPayload(tokens.accessToken);
+    const userId = newPayload?.sub
+      ? userIdFromSub(String(newPayload.sub))
+      : session.userId;
+    return buildCookieValue(userId, tokens.accessToken);
+  } catch (error) {
+    if (opts.force) throw error;
+    return null;
+  }
+}
+
 /** 毫秒时间戳 → ISO；非法则 null。 */
 function msToIso(v) {
   const n = num(v);
@@ -393,7 +598,36 @@ export async function fetchStripeProfile(session) {
     daysRemainingOnTrial: num(data?.daysRemainingOnTrial),
     teamId: num(data?.teamId),
     isTeamMember: Boolean(data?.isTeamMember),
+    customerBalance: num(data?.customerBalance),
+    stripePrepaidCents: stripePrepaidCents(data),
   };
+}
+
+/**
+ * Connect RPC 信用赠额余额（可选；企业座常无字段）。
+ * @param {{ cookieValue: string }} session
+ */
+export async function fetchCreditGrantsBalance(session) {
+  const jwt = jwtFromCookie(session.cookieValue);
+  if (!jwt) return null;
+  try {
+    const data = await fetchJson(
+      'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCreditGrantsBalance',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          'Content-Type': 'application/json',
+          'Connect-Protocol-Version': '1',
+          'User-Agent': USER_AGENT,
+        },
+        body: '{}',
+      },
+    );
+    return data && typeof data === 'object' ? data : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -618,14 +852,17 @@ export async function fetchCurrentPeriodUsage(session) {
 export function parseUsageSummary(data) {
   if (!data || typeof data !== 'object') return null;
   const individual = data.individualUsage || {};
+  const team = data.teamUsage || {};
   const plan = individual.plan || {};
-  const onDemand = individual.onDemand || {};
   const totalPercentUsed = num(plan.totalPercentUsed);
   const autoPercentUsed = num(plan.autoPercentUsed);
   const apiPercentUsed = num(plan.apiPercentUsed);
   const planUsedCents = num(plan.used);
   const planLimitCents = num(plan.limit);
   const planRemainingCents = num(plan.remaining);
+  const onDemand =
+    parseOnDemandBucket(individual.onDemand, 'individual') ||
+    parseOnDemandBucket(team.onDemand, 'team');
 
   return {
     membershipType: data.membershipType ? String(data.membershipType).toLowerCase() : undefined,
@@ -647,12 +884,7 @@ export function parseUsageSummary(data) {
           total: num(plan.breakdown.total) ?? 0,
         }
       : null,
-    onDemand: {
-      enabled: Boolean(onDemand.enabled),
-      usedCents: num(onDemand.used),
-      limitCents: num(onDemand.limit),
-      remainingCents: num(onDemand.remaining),
-    },
+    onDemand,
   };
 }
 
@@ -674,6 +906,7 @@ export function parsePeriodUsage(data) {
     billingCycleStartMs: num(data.billingCycleStart),
     billingCycleEndMs: num(data.billingCycleEnd),
     enabled: data.enabled !== false,
+    onDemand: resolveOnDemandFromSpendLimit(data.spendLimitUsage),
   };
 }
 
@@ -728,7 +961,7 @@ export function mergePlanMeters(summary, period, opts = {}) {
     displayMessage: summary?.displayMessage || period?.displayMessage || null,
     billingCycleStart,
     billingCycleEnd,
-    onDemand: summary?.onDemand || null,
+    onDemand: preferOnDemand(period?.onDemand, summary?.onDemand),
     planBreakdown: summary?.planBreakdown || null,
     includedUsagePeriod: weekly ? 'INCLUDED_USAGE_PERIOD_WEEKLY' : null,
   };
@@ -989,6 +1222,7 @@ export async function fetchUserRules(cookieValue) {
  *   meters: Record<string, number | null | undefined>,
  *   quota?: { used: number, limit: number | null } | null,
  *   grokBot?: { usagePercent: number, resetsAt?: string | null, isUnified?: boolean } | null,
+ *   credits?: { remainingDollars: number } | null,
  *   spend?: (ReturnType<typeof aggregateSpendPeriods> & {
  *     last30Label?: string,
  *     cycle?: { dollars?: number, tokens?: number, requests?: number } | null,
@@ -1020,7 +1254,7 @@ export function buildOpenUsagePanelLines(input) {
   if (weekly) {
     pushPercent('Weekly usage', pm.totalPercentUsed);
   } else {
-    // 展示顺序：Total → Cursor Models → Other Models → Grok → On-demand → spend tiles
+    // 展示顺序：Total → Cursor Models → Other Models → Grok → On-demand → Credits → spend
     if (pm.totalPercentUsed != null) {
       pushPercent('Total usage', pm.totalPercentUsed);
     } else if (input.quota?.limit != null && input.quota.limit > 0) {
@@ -1052,24 +1286,35 @@ export function buildOpenUsagePanelLines(input) {
   }
 
   const od = pm.onDemand;
-  if (od?.enabled && od.limitCents != null && od.limitCents > 0) {
+  const odLabel = od?.source === 'team' ? 'Team Spend' : 'On-demand';
+  if (od && (od.enabled || (od.usedCents ?? 0) > 0) && od.limitCents != null && od.limitCents > 0) {
     const used = (od.usedCents ?? 0) / 100;
     const limit = od.limitCents / 100;
     lines.push({
       type: 'progress',
-      label: 'On-demand',
+      label: odLabel,
       used: Math.round(used * 100) / 100,
       limit: Math.round(limit * 100) / 100,
       format: 'dollars',
       resetsAt,
     });
-  } else if (od?.enabled && (od.usedCents ?? 0) > 0) {
+  } else if (od && (od.enabled || (od.usedCents ?? 0) > 0) && (od.usedCents ?? 0) > 0) {
     lines.push({
       type: 'values',
-      label: 'On-demand',
+      label: odLabel,
       dollars: Math.round(((od.usedCents || 0) / 100) * 100) / 100,
       tokens: null,
       text: `$${((od.usedCents || 0) / 100).toFixed(2)}`,
+    });
+  }
+
+  const credits = input.credits;
+  if (credits && Number.isFinite(credits.remainingDollars)) {
+    lines.push({
+      type: 'values',
+      label: 'Credits',
+      dollars: credits.remainingDollars,
+      text: `$${Number(credits.remainingDollars).toFixed(2)} left`,
     });
   }
 
@@ -1663,7 +1908,7 @@ export async function fetchMemberSnapshot(cookieValue) {
     }
   };
 
-  const [me, plan, quota, hardLimit, usageSummary, periodUsage, grokBot, planInfo] =
+  const [me, plan, quota, hardLimit, usageSummary, periodUsage, grokBot, planInfo, creditGrants] =
     await Promise.all([
       fetchMe(session),
       optional('套餐', fetchStripeProfile(session), {
@@ -1671,6 +1916,8 @@ export async function fetchMemberSnapshot(cookieValue) {
         daysRemainingOnTrial: null,
         teamId: null,
         isTeamMember: false,
+        customerBalance: null,
+        stripePrepaidCents: 0,
       }),
       optional('请求额度', fetchPlanQuota(session), null),
       optional('按量上限', fetchHardLimit(session), null),
@@ -1678,7 +1925,10 @@ export async function fetchMemberSnapshot(cookieValue) {
       fetchCurrentPeriodUsage(session),
       fetchGrokBotUsage(session),
       fetchPlanInfo(session),
+      optional('积分余额', fetchCreditGrantsBalance(session), null),
     ]);
+
+  const credits = combineCredits(creditGrants, plan?.stripePrepaidCents || 0);
 
   const weekly = isWeeklyIncludedUsage(planInfo?.includedUsagePeriod);
   let planMeters = mergePlanMeters(usageSummary, periodUsage, {
@@ -1835,6 +2085,7 @@ export async function fetchMemberSnapshot(cookieValue) {
     meters: { primaryPercent, quotaPercent, spendPercent },
     quota,
     grokBot,
+    credits,
     spend,
     window: windowMeta,
   });
@@ -1854,6 +2105,7 @@ export async function fetchMemberSnapshot(cookieValue) {
     hardLimit,
     planMeters,
     grokBot,
+    credits,
     spend,
     panelLines,
     window: windowMeta,

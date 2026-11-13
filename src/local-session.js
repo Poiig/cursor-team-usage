@@ -2,6 +2,7 @@
  * 从本机 Cursor 的 state.vscdb 读取已登录会话。
  * 读 Cursor 本地 state.vscdb 的 ItemTable（cursorAuth/*），免去手动粘贴 Cookie。
  * 大库（数 GB）不能整文件进内存，因此优先 sqlite3 CLI，其次用系统 Python 的 sqlite3。
+ * accessToken 过期时用 refreshToken（缺省即 accessToken 自身）换票，对齐 OpenUsage。
  */
 
 import { execFile } from 'node:child_process';
@@ -16,6 +17,7 @@ import {
   userIdFromSub,
 } from './auth.js';
 import { unwrapCursorAuthToken } from './cursor-safe-storage.js';
+import { renewCookieIfNeeded } from './cursor-api.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -130,12 +132,20 @@ async function readItemTableValues(dbPath, keys) {
 }
 
 /**
- * 解析本机 Cursor 登录态；过期 token 直接丢弃。
- * @returns {Promise<{ cookieValue: string, userId: string, email?: string, exp?: number, source: 'ide', dbPath: string } | null>}
+ * 读本机 cursorAuth 全量（不过滤过期），供导入前换票。
+ * @returns {Promise<{
+ *   dbPath: string,
+ *   accessToken: string,
+ *   refreshToken: string,
+ *   userId: string,
+ *   email?: string,
+ *   exp?: number,
+ * } | null>}
  */
-export async function resolveLocalCursorSession() {
+export async function readLocalCursorAuth() {
   const keys = [
     'cursorAuth/accessToken',
+    'cursorAuth/refreshToken',
     'cursorAuth/cachedEmail',
     'cursorAuth/stripeMembershipAuthId',
   ];
@@ -153,18 +163,56 @@ export async function resolveLocalCursorSession() {
         ? membershipId
         : '';
     if (!sub) continue;
-    if (payload?.exp && payload.exp * 1000 < Date.now()) continue;
     const userId = userIdFromSub(sub);
+    const rawRefresh = values.get('cursorAuth/refreshToken') || rawToken;
+    const refreshToken = unwrapCursorAuthToken(rawRefresh) || rawRefresh;
     return {
-      cookieValue: buildCookieValue(userId, token),
+      dbPath,
+      accessToken: token,
+      refreshToken:
+        refreshToken && !refreshToken.startsWith('cursor-safe-storage:')
+          ? refreshToken
+          : token,
       userId,
       email: values.get('cursorAuth/cachedEmail'),
       exp: typeof payload?.exp === 'number' ? payload.exp : undefined,
-      source: 'ide',
-      dbPath,
     };
   }
   return null;
+}
+
+/**
+ * 解析本机 Cursor 登录态；过期或临期时先换票再返回。
+ * @returns {Promise<{ cookieValue: string, userId: string, email?: string, exp?: number, source: 'ide', dbPath: string, renewed?: boolean } | null>}
+ */
+export async function resolveLocalCursorSession() {
+  const auth = await readLocalCursorAuth();
+  if (!auth) return null;
+  let cookieValue = buildCookieValue(auth.userId, auth.accessToken);
+  let exp = auth.exp;
+  let renewed = false;
+  const next = await renewCookieIfNeeded(cookieValue, {
+    refreshToken: auth.refreshToken,
+  });
+  if (next && next !== cookieValue) {
+    cookieValue = next;
+    renewed = true;
+    const jwt = cookieValue.split('%3A%3A')[1];
+    const payload = jwt ? decodeJwtPayload(jwt) : null;
+    exp = typeof payload?.exp === 'number' ? payload.exp : exp;
+  } else if (typeof exp === 'number' && exp * 1000 < Date.now()) {
+    // 已过期且换票失败：不能导入死票
+    return null;
+  }
+  return {
+    cookieValue,
+    userId: auth.userId,
+    email: auth.email,
+    exp,
+    source: 'ide',
+    dbPath: auth.dbPath,
+    renewed,
+  };
 }
 
 /**
@@ -181,6 +229,7 @@ export async function probeLocalCursorSession() {
       userId: session.userId,
       email: session.email,
       expiresAt: session.exp ? new Date(session.exp * 1000).toISOString() : null,
+      renewed: Boolean(session.renewed),
     };
   } catch (e) {
     return { available: false, reason: e?.message || String(e) };

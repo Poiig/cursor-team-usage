@@ -108,6 +108,22 @@ function renderProgressLine(line, history) {
   `;
 }
 
+function renderValuesLine(line) {
+  const text =
+    line.text ||
+    (line.dollars != null && Number.isFinite(Number(line.dollars))
+      ? `$${Number(line.dollars).toFixed(2)}`
+      : '');
+  return `
+    <div class="panel-line panel-line--values">
+      <div class="panel-line-head">
+        <span class="panel-line-label">${escapeHtml(line.label)}</span>
+        <span class="panel-line-value">${escapeHtml(text)}</span>
+      </div>
+    </div>
+  `;
+}
+
 function renderSpendRow(line) {
   const cell = (label, part) => {
     const text = formatSpendPart(part);
@@ -130,12 +146,14 @@ function renderSpendRow(line) {
 
 function splitLines(lines) {
   const progress = [];
+  const values = [];
   let spend = null;
   for (const line of lines || []) {
     if (line.type === 'spend-row') spend = line;
     else if (line.type === 'progress') progress.push(line);
+    else if (line.type === 'values') values.push(line);
   }
-  return { progress, spend };
+  return { progress, values, spend };
 }
 
 /**
@@ -408,11 +426,12 @@ function renderMember() {
     }
   }
 
-  const { progress, spend: panelSpend } = splitLines(snap?.panelLines);
+  const { progress, values, spend: panelSpend } = splitLines(snap?.panelLines);
   const spend = resolveSpendRow(snap, panelSpend);
   const history = member.usagePercentHistory;
   els.meters.innerHTML =
     progress.map((line) => renderProgressLine(line, history)).join('') +
+    values.map((line) => renderValuesLine(line)).join('') +
     (spend ? renderSpendRow(spend) : '');
 
   const daily = snap?.spend?.daily || [];

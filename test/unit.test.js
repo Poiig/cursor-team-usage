@@ -43,6 +43,10 @@ import {
   topModelsForLocalDay,
   topModelsFromDailyUsageInRange,
   currentCycleSpendLabel,
+  resolveOnDemandFromSpendLimit,
+  preferOnDemand,
+  combineCredits,
+  stripePrepaidCents,
 } from '../src/cursor-api.js';
 import { formatPlanLabel, planBadgeClass, resolveSpendRow, formatSpendPart } from '../public/shared.js';
 import {
@@ -435,6 +439,97 @@ test('parseUsageSummary 读取 totalPercentUsed', () => {
   const m = mergePlanMeters(s, null);
   assert.equal(m.totalPercentUsed, 8.1);
   assert.equal(m.planLimitDollars, 70);
+});
+
+test('usage-summary 个人 onDemand 空壳时回退 team；spendLimit 同预算', () => {
+  const summary = parseUsageSummary({
+    membershipType: 'enterprise',
+    individualUsage: {
+      plan: { totalPercentUsed: 12 },
+      onDemand: { enabled: false, used: 0 },
+    },
+    teamUsage: {
+      onDemand: { enabled: true, used: 1500, limit: 50000, remaining: 48500 },
+    },
+  });
+  assert.equal(summary?.onDemand?.source, 'team');
+  assert.equal(summary?.onDemand?.usedCents, 1500);
+  assert.equal(summary?.onDemand?.limitCents, 50000);
+
+  const individualBudget = resolveOnDemandFromSpendLimit({
+    limitType: 'user',
+    individualLimit: 10000,
+    individualUsed: 0,
+    individualRemaining: 10000,
+    pooledLimit: 500000,
+    pooledUsed: 12000,
+    totalSpend: 99999,
+  });
+  // 有 team 池 spend 时，individual 上限不得混用 pooledUsed / totalSpend
+  assert.equal(individualBudget?.source, 'individual');
+  assert.equal(individualBudget?.limitCents, 10000);
+  assert.equal(individualBudget?.usedCents, 0);
+
+  const teamBudget = resolveOnDemandFromSpendLimit({
+    limitType: 'team',
+    pooledLimit: 500000,
+    pooledUsed: 12000,
+    pooledRemaining: 488000,
+  });
+  assert.equal(teamBudget?.source, 'team');
+  assert.equal(teamBudget?.usedCents, 12000);
+  assert.equal(teamBudget?.limitCents, 500000);
+
+  const period = parsePeriodUsage({
+    planUsage: { totalPercentUsed: 12 },
+    spendLimitUsage: {
+      limitType: 'team',
+      pooledLimit: 500000,
+      pooledUsed: 12000,
+      pooledRemaining: 488000,
+    },
+  });
+  const merged = mergePlanMeters(summary, period);
+  assert.equal(merged.onDemand?.source, 'team');
+  assert.equal(merged.onDemand?.usedCents, 12000);
+  assert.equal(preferOnDemand(null, summary.onDemand)?.source, 'team');
+});
+
+test('Credits：赠额 + Stripe 预付；负 customerBalance 才算余额', () => {
+  assert.equal(stripePrepaidCents({ customerBalance: -2500 }), 2500);
+  assert.equal(stripePrepaidCents({ customerBalance: 100 }), 0);
+  assert.equal(stripePrepaidCents({}), 0);
+
+  const combined = combineCredits(
+    { hasCreditGrants: true, totalCents: 1000, usedCents: 200 },
+    2500,
+  );
+  assert.equal(combined?.remainingDollars, 33);
+  assert.equal(combineCredits(null, 0), null);
+  assert.equal(combineCredits({ hasCreditGrants: false }, 500)?.remainingDollars, 5);
+
+  const lines = buildOpenUsagePanelLines({
+    planMeters: {
+      totalPercentUsed: 10,
+      autoPercentUsed: 10,
+      apiPercentUsed: 0,
+      onDemand: {
+        enabled: true,
+        usedCents: 1200,
+        limitCents: 50000,
+        source: 'team',
+      },
+    },
+    meters: {},
+    credits: { remainingDollars: 12.5 },
+    spend: null,
+    window: { resetIso: '2026-12-01T00:00:00.000Z' },
+  });
+  assert.equal(lines.some((l) => l.label === 'Team Spend'), true);
+  assert.equal(lines.some((l) => l.label === 'On-demand'), false);
+  const credits = lines.find((l) => l.label === 'Credits');
+  assert.equal(credits?.type, 'values');
+  assert.equal(credits?.text, '$12.50 left');
 });
 
 test('The X Subscription 周额度：优先 period，不看 summary 的月窗 0%', () => {
@@ -1566,6 +1661,34 @@ test('使用人席位：别名优先，老插件回退主机中文备注', async
   );
 });
 
+test('席位：切换后粘住，仅切换之后启动的上报可覆盖', async () => {
+  const {
+    isStaleReportVsSwitch,
+    latestSuccessfulSwitchFinishedAt,
+  } = await import('../src/account-presence.js');
+
+  const t0 = '2026-11-13T08:00:00.000Z';
+  const t1 = '2026-11-13T08:00:05.000Z';
+  const t2 = '2026-11-13T08:00:10.000Z';
+
+  // 上报在切换前开读 → 丢弃席位
+  assert.equal(isStaleReportVsSwitch(t0, t1), true);
+  // 上报在切换后开读 → 按上报
+  assert.equal(isStaleReportVsSwitch(t2, t1), false);
+  // 旧插件无时间戳 → 不判陈旧
+  assert.equal(isStaleReportVsSwitch(null, t1), false);
+  assert.equal(isStaleReportVsSwitch(t0, null), false);
+
+  const logs = [
+    { status: 'failed', hostname: 'PC-A', finishedAt: t2 },
+    { status: 'success', hostname: 'PC-B', finishedAt: t2 },
+    { status: 'success', hostname: 'PC-A', finishedAt: t0 },
+    { status: 'success', hostname: 'pc-a', finishedAt: t1 },
+  ];
+  assert.equal(latestSuccessfulSwitchFinishedAt(logs, 'PC-A'), t1);
+  assert.equal(latestSuccessfulSwitchFinishedAt(logs, 'other'), null);
+});
+
 test('使用人席位：上报粘性占有，不因断报清空；可手动移除', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
@@ -1987,6 +2110,109 @@ test('成员来源归一化与操作者别名展示', async () => {
   const { formatOperatorLabel } = await import('../public/shared.js');
   assert.equal(formatOperatorLabel('chenyao', '陈瑶'), 'chenyao（陈瑶）');
   assert.equal(formatOperatorLabel('chenyao', ''), 'chenyao');
+});
+
+test('Cursor OAuth：PKCE 与 poll Token 解析', async () => {
+  const {
+    generatePkce,
+    buildCursorAuthorizeUrl,
+    parseCursorPollTokens,
+  } = await import('../src/cursor-oauth-login.js');
+  const { createHash } = await import('node:crypto');
+  const pkce = generatePkce();
+  assert.equal(typeof pkce.verifier, 'string');
+  assert.ok(pkce.verifier.length >= 40);
+  const expected = createHash('sha256')
+    .update(pkce.verifier)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+  assert.equal(pkce.challenge, expected);
+  const url = buildCursorAuthorizeUrl({ challenge: pkce.challenge, uuid: 'u-1' });
+  assert.match(url, /^https:\/\/cursor\.com\/loginDeepControl\?/);
+  assert.match(url, /challenge=/);
+  assert.match(url, /uuid=u-1/);
+  assert.match(url, /mode=login/);
+  assert.match(url, /redirectTarget=cli/);
+  assert.equal(parseCursorPollTokens({ accessToken: 'a', refreshToken: 'r' })?.accessToken, 'a');
+  assert.equal(parseCursorPollTokens({ access_token: 'a2' })?.accessToken, 'a2');
+  assert.equal(parseCursorPollTokens({}), null);
+});
+
+test('Cursor OAuth：优先 POST poll，无路由时回退 GET', async () => {
+  const {
+    startCursorOAuthLogin,
+    pollCursorOAuthLogin,
+    beginClaimCursorOAuthLogin,
+    setOAuthFetchForTests,
+    resetOAuthLoginsForTests,
+  } = await import('../src/cursor-oauth-login.js');
+  /** 造一个带 sub 的假 JWT，仅供 cookie 组装。 */
+  function fakeJwt(sub) {
+    const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ sub })).toString('base64url');
+    return `${header}.${payload}.x`;
+  }
+
+  resetOAuthLoginsForTests();
+  const started = startCursorOAuthLogin({ displayName: '测' });
+  /** @type {string[]} */
+  const calls = [];
+  setOAuthFetchForTests(async (url, init) => {
+    const u = String(url);
+    const method = String(init?.method || 'GET').toUpperCase();
+    calls.push(`${method} ${u.includes('auth/poll') ? '/auth/poll' : u}`);
+    if (u.includes('/auth/poll') && method === 'POST') {
+      // 模拟旧后端：无 POST 路由（正文不是 pending 的 "Not found"）
+      return new Response('Cannot POST /auth/poll', { status: 404 });
+    }
+    if (u.includes('/auth/poll') && method === 'GET') {
+      return Response.json({
+        accessToken: fakeJwt('auth0|user_oauth_test'),
+        refreshToken: 'r',
+      });
+    }
+    if (u.includes('/api/auth/me')) {
+      return Response.json({ email: 'oauth@example.com', name: 'O' });
+    }
+    return new Response('nope', { status: 404 });
+  });
+
+  try {
+    const pending = await pollCursorOAuthLogin(started.loginId);
+    // 第一次：POST→回退 GET→拿到票
+    assert.equal(pending.status, 'done');
+    assert.ok(calls.some((c) => c.startsWith('POST ')));
+    assert.ok(calls.some((c) => c.startsWith('GET ')));
+    assert.match(String(pending.cookieValue || ''), /user_oauth_test/);
+
+    const claim = beginClaimCursorOAuthLogin(started.loginId);
+    assert.equal(claim?.status, 'ok');
+    assert.equal(beginClaimCursorOAuthLogin(started.loginId)?.status, 'busy');
+    claim.release();
+    const again = beginClaimCursorOAuthLogin(started.loginId);
+    assert.equal(again?.status, 'ok');
+    again.consume();
+    assert.equal(beginClaimCursorOAuthLogin(started.loginId), null);
+
+    // 纯 pending：正文 "Not found" 不触发 GET 回退
+    resetOAuthLoginsForTests();
+    calls.length = 0;
+    const s2 = startCursorOAuthLogin({});
+    setOAuthFetchForTests(async (url, init) => {
+      const method = String(init?.method || 'GET').toUpperCase();
+      calls.push(method);
+      if (method === 'POST') return new Response('Not found', { status: 404 });
+      return new Response('should-not-get', { status: 500 });
+    });
+    const wait = await pollCursorOAuthLogin(s2.loginId);
+    assert.equal(wait.status, 'pending');
+    assert.deepEqual(calls, ['POST']);
+  } finally {
+    setOAuthFetchForTests(null);
+    resetOAuthLoginsForTests();
+  }
 });
 
 test('邮箱登录：解析 AuthKit 页、auth code 与会话 Cookie', async () => {

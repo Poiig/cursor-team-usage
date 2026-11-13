@@ -50,14 +50,11 @@ const els = {
   onboardingProgress: document.getElementById('onboardingProgress'),
   onboardingContent: document.getElementById('onboardingContent'),
   displayName: document.getElementById('fieldDisplayName'),
-  sessionToken: document.getElementById('fieldSessionToken'),
   memberMethodTabs: document.getElementById('memberMethodTabs'),
-  memberMethodToken: document.getElementById('memberMethodToken'),
-  memberMethodEmail: document.getElementById('memberMethodEmail'),
-  memberEmail: document.getElementById('fieldMemberEmail'),
-  memberEmailCode: document.getElementById('fieldMemberEmailCode'),
-  memberEmailHint: document.getElementById('memberEmailHint'),
-  btnSendMemberEmailCode: document.getElementById('btnSendMemberEmailCode'),
+  memberMethodLocal: document.getElementById('memberMethodLocal'),
+  memberMethodOauth: document.getElementById('memberMethodOauth'),
+  localSessionHint: document.getElementById('localSessionHint'),
+  oauthLoginHint: document.getElementById('oauthLoginHint'),
   dialogTitle: document.getElementById('dialogTitle'),
   toast: document.getElementById('toast'),
   searchInput: document.getElementById('searchInput'),
@@ -74,7 +71,6 @@ const els = {
   tabHelp: document.getElementById('tabHelp'),
   btnAdd: document.getElementById('btnAdd'),
   btnEmptyAdd: document.getElementById('btnEmptyAdd'),
-  btnImportInDialog: document.getElementById('btnImportInDialog'),
   btnRefreshAll: document.getElementById('btnRefreshAll'),
   btnRestoreLocal: document.getElementById('btnRestoreLocal'),
   btnSwitchRecommended: document.getElementById('btnSwitchRecommended'),
@@ -88,8 +84,15 @@ const els = {
   btnLogout: document.getElementById('btnLogout'),
   btnHelp: document.getElementById('btnHelp'),
   btnSaveMember: document.getElementById('btnSaveMember'),
+  btnSaveDisplayNameOnly: document.getElementById('btnSaveDisplayNameOnly'),
   btnDialogClose: document.getElementById('btnDialogClose'),
   btnDialogCancel: document.getElementById('btnDialogCancel'),
+  oauthResultDialog: document.getElementById('oauthResultDialog'),
+  oauthResultTitle: document.getElementById('oauthResultTitle'),
+  oauthResultBody: document.getElementById('oauthResultBody'),
+  btnOauthResultClose: document.getElementById('btnOauthResultClose'),
+  btnOauthResultDismiss: document.getElementById('btnOauthResultDismiss'),
+  btnOauthResultDetail: document.getElementById('btnOauthResultDetail'),
   todayRankDialog: document.getElementById('todayRankDialog'),
   todayRankBody: document.getElementById('todayRankBody'),
   btnTodayRankClose: document.getElementById('btnTodayRankClose'),
@@ -531,7 +534,7 @@ function metaChips(member) {
       : `<span class="chip ${chipClassForTokenExp(member.tokenExpiresAt)}" title="会话 Token 有效至">Token ${escapeHtml(tokenExpText)}</span>`;
   const sourceChip =
     member.source === 'manual'
-      ? '<span class="chip neutral" title="网页添加 / 粘贴 Token / 邮箱入池 / 本机导入；仅改显示名不会标人工">人工</span>'
+      ? '<span class="chip neutral" title="本机导入 / OAuth 登录入池；仅改显示名不会标人工">人工</span>'
       : '';
   const syncedChip =
     syncedText == null
@@ -620,6 +623,22 @@ function renderProgressLine(line, history) {
   `;
 }
 
+function renderValuesLine(line) {
+  const text =
+    line.text ||
+    (line.dollars != null && Number.isFinite(Number(line.dollars))
+      ? `$${Number(line.dollars).toFixed(2)}`
+      : '');
+  return `
+    <div class="panel-line panel-line--values">
+      <div class="panel-line-head">
+        <span class="panel-line-label">${escapeHtml(line.label)}</span>
+        <span class="panel-line-value">${escapeHtml(text)}</span>
+      </div>
+    </div>
+  `;
+}
+
 function renderSpendRow(line) {
   const cell = (label, part) => {
     const text = formatSpendPart(part);
@@ -643,15 +662,18 @@ function renderSpendRow(line) {
 
 function splitLines(lines, { includeGrok = true } = {}) {
   const progress = [];
+  const values = [];
   let spend = null;
   for (const line of lines || []) {
     if (line.type === 'spend-row') spend = line;
     else if (line.type === 'progress') {
       if (!includeGrok && line.label === 'Grok Bot usage') continue;
       progress.push(line);
+    } else if (line.type === 'values') {
+      values.push(line);
     }
   }
-  return { progress, spend };
+  return { progress, values, spend };
 }
 
 function renderAccountRow(member) {
@@ -669,13 +691,18 @@ function renderAccountRow(member) {
     ? `<div class="error-box">${escapeHtml(member.lastError)}</div>`
     : '';
 
-  const { progress, spend: panelSpend } = splitLines(snap?.panelLines, { includeGrok: false });
+  const { progress, values, spend: panelSpend } = splitLines(snap?.panelLines, {
+    includeGrok: false,
+  });
   const spend = resolveSpendRow(snap, panelSpend);
   const history = member.usagePercentHistory;
-  const meters =
-    progress.length > 0
-      ? `<div class="panel-lines">${progress.map((line) => renderProgressLine(line, history)).join('')}</div>`
-      : `<p class="muted" style="margin-top:10px">尚无面板数据</p>`;
+  const meterHtml = [
+    ...progress.map((line) => renderProgressLine(line, history)),
+    ...values.map((line) => renderValuesLine(line)),
+  ].join('');
+  const meters = meterHtml
+    ? `<div class="panel-lines">${meterHtml}</div>`
+    : `<p class="muted" style="margin-top:10px">尚无面板数据</p>`;
   const spendHtml = spend ? renderSpendRow(spend) : '';
 
   const stateClass = isAbnormalMember(member)
@@ -709,7 +736,7 @@ function renderAccountRow(member) {
           <button type="button" class="btn icon" data-action="refresh" title="刷新">↻</button>
           ${
             isAdmin()
-              ? `<button type="button" class="btn icon" data-action="edit" title="更新 Token">✎</button>
+              ? `<button type="button" class="btn icon" data-action="edit" title="更新账号">✎</button>
           <button type="button" class="btn sm danger" data-action="delete">删除</button>`
               : ''
           }
@@ -1269,8 +1296,8 @@ function onboardingSteps() {
       kicker: '第 4 步 · 开始使用',
       title: '切换账号与查看帮助',
       text: isAdmin()
-        ? '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。管理员还能添加账号、查看报表和管理用户。'
-        : '账号列表的「推荐切换」会选择当前最适合切入的账号；也可在任一账号卡片点击「切换」。首次切换会记下本机账号，之后可「恢复本机账号」。',
+        ? '可用「添加账号」本机导入或 OAuth 入池；「推荐切换」会选当前最适合切入的账号。管理员还可查看报表和管理用户。'
+        : '可用「添加账号」本机导入或 OAuth 入池；「推荐切换」会选当前最适合切入的账号。首次切换会记下本机账号，之后可「恢复本机账号」。',
       warning: '恢复本机账号会用 cursor:// 拉起 IDE；切换在桥不可用时同样拉起。请在 Cursor 弹窗里确认，并先装好 Reporter 插件。',
       note: '以后可在「说明」页面点击「重新打开引导」，随时回看这些步骤。',
     },
@@ -2164,6 +2191,10 @@ async function switchMember(id, btn) {
     if (bridge.ok) {
       toast(`已通知本机 Cursor（桥 :${bridge.port}）切换到「${label}」，请在弹窗中确认`);
       void loadLogs();
+      // 切换回报落盘后刷新席位；间隔覆盖确认+重启前的窗口
+      for (const ms of [2500, 6000, 12000]) {
+        setTimeout(() => void load(), ms);
+      }
       return;
     }
 
@@ -2179,6 +2210,9 @@ async function switchMember(id, btn) {
       /* 无剪贴板权限时忽略 */
     }
     void loadLogs();
+    for (const ms of [2500, 6000, 12000]) {
+      setTimeout(() => void load(), ms);
+    }
   } catch (e) {
     toast(e.message || String(e));
   } finally {
@@ -2195,50 +2229,100 @@ async function switchRecommendedMember() {
   await switchMember(member.id, els.btnSwitchRecommended);
 }
 
-/** 添加账号对话框：token | email */
-let memberMethod = 'token';
-/** @type {{ loginId: string, email: string, expiresAt: string } | null} */
-let emailLoginPending = null;
+/** 添加账号对话框：local | oauth */
+let memberMethod = 'local';
+/** @type {{ available: boolean, email?: string, expiresAt?: string | null, renewed?: boolean, reason?: string } | null} */
+let localSessionProbe = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let oauthPollTimer = null;
+/** 避免重复点「打开浏览器登录」叠多轮轮询。 */
+let oauthBusy = false;
+
+function stopOauthPoll() {
+  if (oauthPollTimer) {
+    clearInterval(oauthPollTimer);
+    oauthPollTimer = null;
+  }
+  oauthBusy = false;
+}
 
 function closeMemberDialog() {
+  stopOauthPoll();
   if (els.dialog.open) els.dialog.close();
-  emailLoginPending = null;
+  localSessionProbe = null;
+  if (els.oauthLoginHint) {
+    els.oauthLoginHint.textContent =
+      '将打开 Cursor 登录页；在浏览器完成登录后，看板会自动入池（约 5 分钟内有效）。';
+  }
 }
 
 /**
- * 切换「粘贴 Token / 邮箱验证码」录入方式。
- * @param {'token' | 'email'} method
+ * 探测结果文案：给操作者看能否一键导入。
+ * @param {{ available: boolean, email?: string, expiresAt?: string | null, renewed?: boolean, reason?: string }} probe
+ */
+function formatLocalSessionHint(probe) {
+  if (!probe?.available) {
+    return probe?.reason || '未找到有效的 Cursor 登录态，请先在本机登录 Cursor';
+  }
+  const email = probe.email || '已登录账号';
+  const exp = probe.expiresAt ? formatDateTime(probe.expiresAt) : null;
+  const bits = [`已检测到 ${email}`];
+  if (exp) bits.push(`Token 有效至 ${exp}`);
+  if (probe.renewed) bits.push('已自动续期');
+  bits.push('可直接导入');
+  return bits.join(' · ');
+}
+
+/** 打开本机导入页时探测一次登录态。 */
+async function refreshLocalSessionHint() {
+  if (!els.localSessionHint) return;
+  els.localSessionHint.textContent = '正在检测本机 Cursor 登录态…';
+  try {
+    localSessionProbe = await api('/api/local-session');
+    els.localSessionHint.textContent = formatLocalSessionHint(localSessionProbe);
+  } catch (e) {
+    localSessionProbe = { available: false, reason: e?.message || String(e) };
+    els.localSessionHint.textContent = formatLocalSessionHint(localSessionProbe);
+  }
+}
+
+/**
+ * 切换「本机导入 / OAuth 登录」。
+ * @param {'local' | 'oauth'} method
  */
 function setMemberMethod(method) {
-  memberMethod = method === 'email' ? 'email' : 'token';
+  stopOauthPoll();
+  memberMethod = method === 'oauth' ? 'oauth' : 'local';
   els.memberMethodTabs?.querySelectorAll('.filter-tab').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.method === memberMethod);
   });
-  els.memberMethodToken?.classList.toggle('hidden', memberMethod !== 'token');
-  els.memberMethodEmail?.classList.toggle('hidden', memberMethod !== 'email');
-  els.btnImportInDialog?.classList.toggle(
-    'hidden',
-    memberMethod !== 'token' || Boolean(editing?.id),
-  );
+  els.memberMethodLocal?.classList.toggle('hidden', memberMethod !== 'local');
+  els.memberMethodOauth?.classList.toggle('hidden', memberMethod !== 'oauth');
+  els.btnSaveDisplayNameOnly?.classList.toggle('hidden', !editing?.id);
   if (els.btnSaveMember) {
     els.btnSaveMember.textContent =
-      memberMethod === 'email' ? '登录并入池' : editing?.id ? '保存并同步' : '保存并同步';
+      memberMethod === 'oauth'
+        ? editing?.id
+          ? '打开浏览器更新'
+          : '打开浏览器登录'
+        : editing?.id
+          ? '导入并更新'
+          : '导入并同步';
   }
+  if (memberMethod === 'local') void refreshLocalSessionHint();
 }
 
 function openMemberDialog(member = null) {
   editing = member;
-  emailLoginPending = null;
+  localSessionProbe = null;
+  stopOauthPoll();
   els.dialogTitle.textContent = member ? '更新账号' : '添加账号';
   els.displayName.value = member?.displayName || '';
-  els.sessionToken.value = '';
-  if (els.memberEmail) els.memberEmail.value = member?.email || '';
-  if (els.memberEmailCode) els.memberEmailCode.value = '';
-  if (els.memberEmailHint) {
-    els.memberEmailHint.textContent =
-      '向该邮箱发送 Cursor 登录验证码，填入后即可入池；用户无需本机登录再上报。若服务端被 Cloudflare 拦截，请改用粘贴 Token。';
+  if (els.oauthLoginHint) {
+    els.oauthLoginHint.textContent =
+      '将打开 Cursor 登录页；在浏览器完成登录后，看板会自动入池（约 5 分钟内有效）。';
   }
-  setMemberMethod('token');
+  setMemberMethod(member ? 'oauth' : 'local');
   els.dialog.showModal();
   els.displayName.focus();
 }
@@ -2247,9 +2331,161 @@ async function importLocalCursor(displayName) {
   const body = { fromLocalCursor: true };
   const name = (displayName || '').trim();
   if (name) body.displayName = name;
-  await api('/api/members', { method: 'POST', body: JSON.stringify(body) });
-  toast('已导入本机 Cursor 账号');
+  if (editing?.id) body.memberId = editing.id;
+  const data = await api('/api/members', { method: 'POST', body: JSON.stringify(body) });
+  const renewed = Boolean(data?.local?.renewed);
+  const created = data?.created !== false && !editing?.id;
+  toast(
+    created
+      ? renewed
+        ? '已导入本机 Cursor 账号（Token 已续期）'
+        : '已导入本机 Cursor 账号'
+      : renewed
+        ? '名册已有该账号，已更新 Token（已续期）'
+        : '名册已有该账号，已更新 Token',
+  );
   await load();
+}
+
+/** @type {string | null} */
+let oauthResultMemberId = null;
+
+function closeOauthResultDialog() {
+  oauthResultMemberId = null;
+  if (els.oauthResultDialog?.open) els.oauthResultDialog.close();
+}
+
+/**
+ * OAuth 成功后的结果弹窗（新建 / 更新一目了然）。
+ * @param {{
+ *   created?: boolean,
+ *   email?: string | null,
+ *   member?: {
+ *     id?: string,
+ *     displayName?: string,
+ *     email?: string,
+ *     lastSnapshot?: { email?: string, plan?: { planName?: string, membershipType?: string } },
+ *   } | null,
+ * }} polled
+ */
+function showOauthResultDialog(polled) {
+  const member = polled?.member || {};
+  const created = polled?.created !== false && !editing?.id;
+  const email =
+    polled?.email || member.email || member.lastSnapshot?.email || '';
+  const name = member.displayName || email || member.id || '—';
+  const planRaw =
+    member.lastSnapshot?.plan?.planName ||
+    member.lastSnapshot?.plan?.membershipType ||
+    '';
+  const plan = planRaw ? formatPlanLabel(planRaw) : '';
+  oauthResultMemberId = member.id || null;
+  if (els.oauthResultTitle) {
+    els.oauthResultTitle.textContent = created ? '已加入名册' : '已更新名册账号';
+  }
+  if (els.oauthResultBody) {
+    els.oauthResultBody.innerHTML = `
+      <ul class="oauth-result-facts">
+        <li><span class="k">结果</span><strong>${created ? '新建账号' : '更新已有账号 Token'}</strong></li>
+        <li><span class="k">显示名</span><strong>${escapeHtml(name)}</strong></li>
+        <li><span class="k">邮箱</span><strong>${escapeHtml(email || '—')}</strong></li>
+        ${plan ? `<li><span class="k">套餐</span><strong>${escapeHtml(plan)}</strong></li>` : ''}
+      </ul>
+      <p class="hint">用量已开始同步；可在列表刷新或打开详情查看。</p>
+    `;
+  }
+  if (els.btnOauthResultDetail) {
+    els.btnOauthResultDetail.classList.toggle('hidden', !oauthResultMemberId);
+  }
+  els.oauthResultDialog?.showModal();
+}
+
+/**
+ * 发起 OAuth：打开浏览器并轮询，成功后入池/更新。
+ */
+async function startOauthMemberLogin() {
+  if (oauthBusy) return;
+  oauthBusy = true;
+  const displayName = els.displayName.value.trim();
+  setBusy(els.btnSaveMember, true, '等待登录…');
+  if (els.oauthLoginHint) {
+    els.oauthLoginHint.textContent = '正在打开浏览器，请在 Cursor 登录页完成登录…';
+  }
+  try {
+    const body = {};
+    if (displayName) body.displayName = displayName;
+    if (editing?.id) body.memberId = editing.id;
+    const started = await api('/api/members/oauth/start', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    if (started?.authorizeUrl) {
+      window.open(started.authorizeUrl, '_blank', 'noopener,noreferrer');
+    }
+    const loginId = started?.loginId;
+    if (!loginId) throw new Error('未能创建 OAuth 登录会话');
+    const deadline = started.expiresAt ? Date.parse(started.expiresAt) : Date.now() + 5 * 60 * 1000;
+
+    const polled = await new Promise((resolve, reject) => {
+      let settled = false;
+      let inFlight = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        stopOauthPoll();
+        fn(value);
+      };
+      const tick = async () => {
+        if (settled || inFlight) return;
+        if (Date.now() > deadline) {
+          finish(reject, new Error('登录超时，请重试'));
+          return;
+        }
+        inFlight = true;
+        try {
+          const row = await api(
+            `/api/members/oauth/poll?loginId=${encodeURIComponent(loginId)}`,
+          );
+          if (settled) return;
+          if (row?.status === 'pending') {
+            if (els.oauthLoginHint) {
+              els.oauthLoginHint.textContent = '等待浏览器完成登录…';
+            }
+            return;
+          }
+          if (row?.status === 'expired' || row?.status === 'error') {
+            finish(reject, new Error(row.error || '登录失败'));
+            return;
+          }
+          if (row?.status === 'done') {
+            finish(resolve, row);
+          }
+        } catch (e) {
+          finish(reject, e);
+        } finally {
+          inFlight = false;
+        }
+      };
+      oauthPollTimer = setInterval(() => void tick(), 2000);
+      void tick();
+    });
+    closeMemberDialog();
+    showOauthResultDialog(polled);
+    // 用量在服务端后台刷新；稍后多刷几次列表
+    void load();
+    for (const ms of [3000, 8000, 20000]) {
+      setTimeout(() => void load(), ms);
+    }
+  } catch (e) {
+    stopOauthPoll();
+    if (els.oauthLoginHint) {
+      els.oauthLoginHint.textContent = e?.message || String(e);
+    }
+    throw e;
+  } finally {
+    setBusy(els.btnSaveMember, false);
+    oauthBusy = false;
+  }
 }
 
 document.querySelectorAll('.nav-item').forEach((btn) => {
@@ -2437,6 +2673,17 @@ els.userTableBody?.addEventListener('click', async (event) => {
 });
 els.btnDialogClose.addEventListener('click', closeMemberDialog);
 els.btnDialogCancel.addEventListener('click', closeMemberDialog);
+els.btnOauthResultClose?.addEventListener('click', closeOauthResultDialog);
+els.btnOauthResultDismiss?.addEventListener('click', closeOauthResultDialog);
+els.btnOauthResultDetail?.addEventListener('click', () => {
+  const id = oauthResultMemberId;
+  closeOauthResultDialog();
+  if (id) location.href = `/detail.html?id=${encodeURIComponent(id)}`;
+});
+els.oauthResultDialog?.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeOauthResultDialog();
+});
 /** 弹窗当前展示的规则；下载直接用它，不再二次请求 Cursor。 */
 let rulesDialogState = { rules: [], account: '', memberId: '' };
 
@@ -2615,109 +2862,46 @@ els.btnNotifyTest?.addEventListener('click', async () => {
   }
 });
 
-els.btnImportInDialog.addEventListener('click', async () => {
-  setBusy(els.btnImportInDialog, true, '导入中…');
-  try {
-    await importLocalCursor(els.displayName.value);
-    closeMemberDialog();
-  } catch (e) {
-    toast(e.message || String(e));
-  } finally {
-    setBusy(els.btnImportInDialog, false);
-  }
-});
-
 els.memberMethodTabs?.addEventListener('click', (event) => {
   const btn = event.target.closest('.filter-tab');
   if (!btn?.dataset.method) return;
-  setMemberMethod(btn.dataset.method);
+  setMemberMethod(/** @type {'local' | 'oauth'} */ (btn.dataset.method));
 });
 
-els.btnSendMemberEmailCode?.addEventListener('click', async () => {
-  const email = els.memberEmail?.value.trim() || '';
-  if (!email) return toast('请填写 Cursor 邮箱');
-  setBusy(els.btnSendMemberEmailCode, true, '发送中…');
+els.btnSaveDisplayNameOnly?.addEventListener('click', async () => {
+  if (!editing?.id) return;
+  const displayName = els.displayName.value.trim();
+  if (!displayName) return toast('请填写显示名');
+  setBusy(els.btnSaveDisplayNameOnly, true, '保存中…');
   try {
-    const data = await api('/api/members/email-login/start', {
-      method: 'POST',
-      body: JSON.stringify({
-        email,
-        displayName: els.displayName.value.trim() || undefined,
-      }),
+    await api(`/api/members/${editing.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ displayName }),
     });
-    emailLoginPending = {
-      loginId: data.loginId,
-      email: data.email,
-      expiresAt: data.expiresAt,
-    };
-    if (els.memberEmailHint) {
-      els.memberEmailHint.textContent = `验证码已发送至 ${data.email}，请查收邮件后填入（约 10 分钟内有效）。`;
-    }
-    toast('验证码已发送，请查收邮箱');
-    els.memberEmailCode?.focus();
+    toast('已更新显示名');
+    closeMemberDialog();
+    await load();
   } catch (e) {
     toast(e.message || String(e));
   } finally {
-    setBusy(els.btnSendMemberEmailCode, false);
+    setBusy(els.btnSaveDisplayNameOnly, false);
   }
 });
 
 els.btnSaveMember.addEventListener('click', async () => {
-  if (memberMethod === 'email') {
-    const email = els.memberEmail?.value.trim() || '';
-    const code = els.memberEmailCode?.value.trim() || '';
-    if (!email) return toast('请填写 Cursor 邮箱');
-    if (!emailLoginPending?.loginId) return toast('请先发送验证码');
-    if (emailLoginPending.email && emailLoginPending.email !== email.toLowerCase()) {
-      return toast('邮箱已变更，请重新发送验证码');
-    }
-    if (!/^\d{6}$/.test(code)) return toast('请填写 6 位验证码');
-    setBusy(els.btnSaveMember, true, '登录中…');
+  if (memberMethod === 'oauth') {
     try {
-      const body = {
-        loginId: emailLoginPending.loginId,
-        code,
-        displayName: els.displayName.value.trim() || undefined,
-      };
-      if (editing?.id) body.memberId = editing.id;
-      await api('/api/members/email-login/verify', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      });
-      toast(editing?.id ? '已用验证码更新并同步' : '已登录并入池');
-      closeMemberDialog();
-      await load();
+      await startOauthMemberLogin();
     } catch (e) {
       toast(e.message || String(e));
-    } finally {
-      setBusy(els.btnSaveMember, false);
     }
     return;
   }
 
-  const displayName = els.displayName.value.trim();
-  const sessionToken = els.sessionToken.value.trim();
-  if (!displayName) return toast('请填写显示名');
-  if (!editing?.id && !sessionToken) return toast('请填写会话 Token');
-  setBusy(els.btnSaveMember, true, '保存中…');
+  setBusy(els.btnSaveMember, true, '导入中…');
   try {
-    if (editing?.id) {
-      const body = { displayName };
-      if (sessionToken) body.sessionToken = sessionToken;
-      await api(`/api/members/${editing.id}`, { method: 'PUT', body: JSON.stringify(body) });
-      if (sessionToken) {
-        await api(`/api/members/${editing.id}/refresh`, { method: 'POST', body: '{}' });
-      }
-      toast('已更新');
-    } else {
-      await api('/api/members', {
-        method: 'POST',
-        body: JSON.stringify({ displayName, sessionToken }),
-      });
-      toast('已添加并同步');
-    }
+    await importLocalCursor(els.displayName.value);
     closeMemberDialog();
-    await load();
   } catch (e) {
     toast(e.message || String(e));
   } finally {

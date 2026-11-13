@@ -149,10 +149,12 @@ export async function fetchHomeAccountFromBoard(
 
 /**
  * 调用看板 /api/agent/report，Header 带 Access Key。
+ * clientStartedAt：读会话时刻，供服务端丢弃「切换前开读」的席位覆盖。
  */
 export async function reportSession(
   config: ReporterConfig,
   session: LocalSession,
+  opts?: { clientStartedAt?: string },
 ): Promise<{ created: boolean; memberId?: string; operatorError?: string | null }> {
   assertReporterConfig(config);
 
@@ -177,6 +179,7 @@ export async function reportSession(
       pluginVersion: String(own?.packageJSON?.version || ''),
       pluginBuild: String(own?.packageJSON?.ctuBuild || ''),
       refresh: config.refreshAfterReport,
+      clientStartedAt: opts?.clientStartedAt || undefined,
     }),
   });
 

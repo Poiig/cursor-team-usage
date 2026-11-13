@@ -175,6 +175,60 @@ export function resolvePresenceIdentity(input) {
 }
 
 /**
+ * 上报若在「本机已成功切换」之前就开读会话，其席位不能盖过切换结果。
+ * 无 clientStartedAt（旧插件）时仍按上报；切换时间不晚于上报启动则按上报。
+ * @param {string|null|undefined} clientStartedAt
+ * @param {string|null|undefined} switchFinishedAt
+ */
+export function isStaleReportVsSwitch(clientStartedAt, switchFinishedAt) {
+  const started = Date.parse(String(clientStartedAt || ''));
+  const switched = Date.parse(String(switchFinishedAt || ''));
+  if (!Number.isFinite(started) || !Number.isFinite(switched)) return false;
+  return switched > started;
+}
+
+/**
+ * 取该主机最近一次成功切换完成时间（ISO）。
+ * @param {Array<{ status?: string, hostname?: string|null, finishedAt?: string|null }>|null|undefined} logs
+ * @param {string|null|undefined} hostname
+ */
+export function latestSuccessfulSwitchFinishedAt(logs, hostname) {
+  const host = String(hostname || '')
+    .trim()
+    .toLowerCase();
+  if (!host) return null;
+  let best = null;
+  for (const log of logs || []) {
+    if (log?.status !== 'success') continue;
+    if (
+      String(log.hostname || '')
+        .trim()
+        .toLowerCase() !== host
+    ) {
+      continue;
+    }
+    const at = String(log.finishedAt || '').trim();
+    if (!at) continue;
+    if (!best || at > best) best = at;
+  }
+  return best;
+}
+
+/**
+ * 切换成功后席位粘住，直到「切换之后才开始」的下一次上报覆盖。
+ * @param {string|null|undefined} hostname
+ * @param {string|null|undefined} clientStartedAt
+ */
+export async function shouldApplyReportPresence(hostname, clientStartedAt) {
+  if (!clientStartedAt) return true;
+  const switchAt = latestSuccessfulSwitchFinishedAt(
+    await listSwitchLogs({ limit: 200 }),
+    hostname,
+  );
+  return !isStaleReportVsSwitch(clientStartedAt, switchAt);
+}
+
+/**
  * 同一主机每次只属于一个账号；切换或上报会覆盖它的当前位置（以本次 session 为准）。
  * @param {{ memberId: string, memberDisplayName?: string|null, hostname?: string|null, username?: string|null, label?: string|null }} input
  */

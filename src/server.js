@@ -33,6 +33,7 @@ import {
   isCursorAuthFailure,
   isTransientCursorError,
   probeCursorSessionAuth,
+  renewCookieIfNeeded,
   uselessReportReason,
 } from './cursor-api.js';
 import { isMemberDue as isMemberDueByInterval } from './refresh-due.js';
@@ -102,6 +103,7 @@ import {
   reconcilePresenceFromActivity,
   removeMemberPresence,
   clearPresenceForMember,
+  shouldApplyReportPresence,
 } from './account-presence.js';
 import { listLoginEvents, recordLoginEvent } from './login-log.js';
 import { createApplication, lookupApplication, markApplication } from './applications.js';
@@ -145,7 +147,11 @@ import {
   renderInstallSh,
   renderInstallPs1,
 } from './extension-asset.js';
-import { startEmailLogin, verifyEmailLogin } from './cursor-email-login.js';
+import {
+  beginClaimCursorOAuthLogin,
+  pollCursorOAuthLogin,
+  startCursorOAuthLogin,
+} from './cursor-oauth-login.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -329,6 +335,19 @@ function buildTeamSummary(members) {
   };
 }
 
+/**
+ * 临期/鉴权失败时用 JWT 自身换票并写回名册。
+ * @param {string} id
+ * @param {string} cookieValue
+ * @param {{ force?: boolean }} [opts]
+ */
+async function renewMemberCookie(id, cookieValue, opts = {}) {
+  const next = await renewCookieIfNeeded(cookieValue, { force: opts.force === true });
+  if (!next || next === cookieValue) return cookieValue;
+  await updateMember(id, { sessionToken: next });
+  return next;
+}
+
 /** @param {string} id @param {{ source?: string, trigger?: string }} [ctx] */
 async function refreshOne(id, ctx = {}) {
   if (refreshingIds.has(id)) {
@@ -342,8 +361,18 @@ async function refreshOne(id, ctx = {}) {
     const member = await getMemberInternal(id);
     if (!member) throw new Error('成员不存在');
     const label = memberLogLabel(member);
+    let cookieValue = member.cookieValue;
+    let tokenRenewed = false;
     try {
-      const snapshot = await fetchMemberSnapshotWithRetry(member.cookieValue);
+      // 临期一周内主动换票，避免休眠跨过 exp 后整批鉴权失败。
+      const before = cookieValue;
+      cookieValue = await renewMemberCookie(id, cookieValue);
+      tokenRenewed = cookieValue !== before;
+    } catch {
+      // 主动换票失败不阻断：仍用旧票拉一次，鉴权失败再强制换。
+    }
+    try {
+      const snapshot = await fetchMemberSnapshotWithRetry(cookieValue);
       const fetchedEvents = Array.isArray(snapshot._usageEvents)
         ? snapshot._usageEvents.length
         : 0;
@@ -365,6 +394,7 @@ async function refreshOne(id, ctx = {}) {
       }
       const result = await saveSyncResult(id, { snapshot });
       const updateBits = ['用量快照'];
+      if (tokenRenewed) updateBits.push('已续期 Token');
       if (fetchedEvents > 0 || persistedEvents.upserted > 0) {
         updateBits.push(`事件拉取 ${fetchedEvents} / 落库 ${persistedEvents.upserted}`);
       }
@@ -387,6 +417,47 @@ async function refreshOne(id, ctx = {}) {
       });
       return result;
     } catch (e) {
+      if (isCursorAuthFailure(e)) {
+        try {
+          const renewed = await renewMemberCookie(id, cookieValue, { force: true });
+          if (renewed && renewed !== cookieValue) {
+            const snapshot = await fetchMemberSnapshotWithRetry(renewed);
+            const fetchedEvents = Array.isArray(snapshot._usageEvents)
+              ? snapshot._usageEvents.length
+              : 0;
+            const persistedEvents = await persistSnapshotUsageEvents(id, snapshot);
+            try {
+              await fillSnapshotSpendFromLocalEvents(id, snapshot);
+            } catch {
+              // 回填失败不影响续期后的主路径
+            }
+            const result = await saveSyncResult(id, { snapshot });
+            await writeAppLog('刷新', {
+              账号: label,
+              来源: source,
+              触发: trigger || undefined,
+              结果: '成功',
+              更新: `鉴权失败后已续期 Token；用量快照；事件拉取 ${fetchedEvents} / 落库 ${persistedEvents.upserted}`,
+              拉取记录数: fetchedEvents,
+              落库记录数: persistedEvents.upserted,
+              同步时间: result?.lastSyncedAt || snapshot?.syncedAt,
+            });
+            return result;
+          }
+        } catch (renewErr) {
+          const msg = renewErr?.message || e?.message || String(e);
+          const result = await saveSyncResult(id, { error: msg });
+          await writeAppLog('刷新', {
+            账号: label,
+            来源: source,
+            触发: trigger || undefined,
+            结果: '失败',
+            更新: 'Token 续期失败',
+            错误: msg,
+          });
+          return result;
+        }
+      }
       const msg = e?.message || String(e);
       const keepSnapshot = isTransientCursorError(e) && Boolean(member.lastSnapshot);
       const result = await saveSyncResult(id, { error: msg, transient: keepSnapshot });
@@ -669,14 +740,13 @@ function requiresConsoleAuth(pathname, method) {
 }
 
 /**
- * 仅管理员可写名册 / 管用户；普通用户只读用量并允许切换。
+ * 管理员专属：报表 / 日志 / 用户 / 导出 / 改删名册。
+ * 本机导入与 OAuth 添加账号对所有登录用户开放。
  * @param {string} pathname
  * @param {string} method
  */
 function requiresAdmin(pathname, method) {
   if (pathname === '/api/config') return true;
-  if (pathname === '/api/members' && method === 'POST') return true;
-  if (pathname.startsWith('/api/members/email-login')) return true;
   if (pathname === '/api/export/accounts') return true;
   if (pathname.startsWith('/api/users')) return true;
   if (pathname.startsWith('/api/reports')) return true;
@@ -1374,13 +1444,20 @@ const server = http.createServer(async (req, res) => {
         email: body?.email,
         hostname: body?.hostname,
       });
-      await recordAccountPresence({
-        memberId: member.id,
-        memberDisplayName: member.displayName,
-        hostname: body?.hostname,
-        username: operatorUsername,
-        label: operatorUsername || body?.displayName || body?.hostname,
-      });
+      // 切换后席位粘住；仅「切换完成之后才开始」的上报可改席位（旧插件无时间戳仍按上报）
+      const applyPresence = await shouldApplyReportPresence(
+        body?.hostname,
+        body?.clientStartedAt,
+      );
+      if (applyPresence) {
+        await recordAccountPresence({
+          memberId: member.id,
+          memberDisplayName: member.displayName,
+          hostname: body?.hostname,
+          username: operatorUsername,
+          label: operatorUsername || body?.displayName || body?.hostname,
+        });
+      }
       if (operatorUsername) {
         await recordPluginReport(operatorUsername, {
           version: body?.pluginVersion,
@@ -1400,6 +1477,7 @@ const server = http.createServer(async (req, res) => {
         显示名请求: body?.displayName || undefined,
         插件版本: body?.pluginVersion || undefined,
         插件构建: body?.pluginBuild || undefined,
+        席位: applyPresence ? undefined : '保留切换(上报早于切换)',
       });
       const shouldRefresh = body?.refresh !== false;
       let refreshed = member;
@@ -1598,103 +1676,144 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await probeLocalCursorSession());
     }
 
-    if (method === 'POST' && pathname === '/api/members/email-login/start') {
-      if (!allowAttempt(`email-login:${peerIp(req)}`, 8, 10 * 60 * 1000)) {
-        return sendJson(res, 429, { error: '发送验证码过于频繁，请稍后再试' });
+    if (method === 'POST' && pathname === '/api/members/oauth/start') {
+      if (!allowAttempt(`oauth-start:${peerIp(req)}`, 20, 10 * 60 * 1000)) {
+        return sendJson(res, 429, { error: '发起登录过于频繁，请稍后再试' });
       }
       const body = await readBody(req);
-      const email = String(body?.email || '').trim().toLowerCase();
-      if (email && !allowAttempt(`email-login-mail:${email}`, 4, 10 * 60 * 1000)) {
-        return sendJson(res, 429, { error: '该邮箱发送过于频繁，请稍后再试' });
-      }
-      const started = await startEmailLogin({
-        email,
+      const started = startCursorOAuthLogin({
         displayName: body?.displayName,
+        memberId: body?.memberId,
       });
-      await writeAppLog('邮箱验证码', {
-        步骤: '发送',
-        邮箱: started.email,
-        // 不记录 loginId / 验证码，避免审计日志泄露登录过程凭证
+      await writeAppLog('OAuth登录', {
+        步骤: '开始',
+        更新账号: body?.memberId ? String(body.memberId) : undefined,
       });
       return sendJson(res, 200, started);
     }
 
-    if (method === 'POST' && pathname === '/api/members/email-login/verify') {
-      if (!allowAttempt(`email-login-verify:${peerIp(req)}`, 20, 10 * 60 * 1000)) {
-        return sendJson(res, 429, { error: '验证过于频繁，请稍后再试' });
+    if (method === 'GET' && pathname === '/api/members/oauth/poll') {
+      // 20 分钟窗口、约 2s 一次；放宽避免等浏览器时被限流
+      if (!allowAttempt(`oauth-poll:${peerIp(req)}`, 400, 20 * 60 * 1000)) {
+        return sendJson(res, 429, { error: '轮询过于频繁，请稍后再试' });
       }
-      const body = await readBody(req);
-      const verified = await verifyEmailLogin({
-        loginId: body?.loginId,
-        code: body?.code,
-      });
-      const displayName =
-        String(body?.displayName || '').trim() || verified.displayName || verified.email;
-      const memberId = String(body?.memberId || '').trim();
-      let member;
-      let source;
-      if (memberId) {
-        member = await updateMember(memberId, {
-          displayName,
-          sessionToken: verified.cookieValue,
+      const loginId = String(url.searchParams.get('loginId') || '').trim();
+      if (!loginId) throw new Error('缺少 loginId');
+      const polled = await pollCursorOAuthLogin(loginId);
+      if (polled.status !== 'done') {
+        return sendJson(res, 200, {
+          status: polled.status,
+          error: polled.error || undefined,
         });
-        source = '邮箱验证码更新';
-      } else {
-        member = await addMember({
-          displayName,
-          sessionToken: verified.cookieValue,
-        });
-        source = '邮箱验证码';
       }
-      await writeAppLog('添加账号', {
-        账号: memberLogLabel(member),
-        来源: source,
-        邮箱: verified.email,
-      });
-      const refreshed = await refreshOne(member.id, {
-        source: '添加账号',
-        trigger: source,
-      });
-      return sendJson(res, memberId ? 200 : 201, { member: refreshed });
+      // 认领后再入池：并发 poll 拿 busy→pending，失败可释放重试，成功再删会话
+      const claim = beginClaimCursorOAuthLogin(loginId);
+      if (!claim || claim.status === 'busy') {
+        return sendJson(res, 200, { status: 'pending' });
+      }
+      try {
+        const got = claim.result;
+        const displayName = String(got.displayName || '').trim() || got.email || 'Cursor';
+        const typedName = String(got.typedDisplayName || '').trim();
+        const session = sessionFromCookie(got.cookieValue);
+        const existing =
+          (got.memberId && (await getMemberInternal(got.memberId))) ||
+          (session?.userId ? await findMemberByUserId(session.userId) : null);
+        let member;
+        let created = false;
+        let source;
+        if (existing?.id) {
+          // 名册已有同一 Cursor 账号：续 Token；仅用户填了显示名才改名
+          /** @type {{ sessionToken: string, displayName?: string }} */
+          const patch = { sessionToken: got.cookieValue };
+          if (typedName) patch.displayName = typedName;
+          member = await updateMember(existing.id, patch);
+          source = 'OAuth更新';
+        } else {
+          member = await addMember({
+            displayName,
+            sessionToken: got.cookieValue,
+          });
+          created = true;
+          source = 'OAuth登录';
+        }
+        await writeAppLog('添加账号', {
+          账号: memberLogLabel(member),
+          来源: source,
+          邮箱: got.email || undefined,
+        });
+        claim.consume();
+        // 用量拉取可能数分钟；先回 done 关掉「等待登录」，后台再刷
+        void refreshOne(member.id, {
+          source: '添加账号',
+          trigger: source,
+        }).catch((e) => {
+          console.warn('[oauth] 后台刷新失败', member.id, e?.message || e);
+        });
+        return sendJson(res, created ? 201 : 200, {
+          status: 'done',
+          member: toPublicMember(member),
+          email: got.email || null,
+          created,
+        });
+      } catch (e) {
+        claim.release();
+        throw e;
+      }
     }
 
     if (method === 'POST' && pathname === '/api/members') {
       const body = await readBody(req);
-      if (body?.fromLocalCursor) {
-        const local = await resolveLocalCursorSession();
-        if (!local) throw new Error('本机未找到有效的 Cursor 登录态');
-        const displayName =
-          String(body.displayName || '').trim() || local.email || local.userId;
-        const member = await addMember({
+      if (!body?.fromLocalCursor) {
+        const err = new Error('请使用本机导入或 OAuth 登录添加账号');
+        err.status = 400;
+        throw err;
+      }
+      const local = await resolveLocalCursorSession();
+      if (!local) throw new Error('本机未找到有效的 Cursor 登录态');
+      const typedName = String(body.displayName || '').trim();
+      const displayName = typedName || local.email || local.userId;
+      const memberId = String(body.memberId || '').trim();
+      const existing =
+        (memberId && (await getMemberInternal(memberId))) ||
+        (local.userId ? await findMemberByUserId(local.userId) : null);
+      let member;
+      let created = false;
+      let source;
+      if (existing?.id) {
+        /** @type {{ sessionToken: string, displayName?: string }} */
+        const patch = { sessionToken: local.cookieValue };
+        if (typedName) patch.displayName = typedName;
+        member = await updateMember(existing.id, patch);
+        source = local.renewed ? '本机导入更新(已续期)' : '本机导入更新';
+      } else {
+        member = await addMember({
           displayName,
           sessionToken: local.cookieValue,
         });
-        await writeAppLog('添加账号', {
-          账号: memberLogLabel(member),
-          来源: '本机导入',
-        });
-        const refreshed = await refreshOne(member.id, {
-          source: '添加账号',
-          trigger: '本机导入',
-        });
-        return sendJson(res, 201, {
-          member: refreshed,
-          local: {
-            email: local.email,
-            expiresAt: local.exp ? new Date(local.exp * 1000).toISOString() : null,
-          },
-        });
+        created = true;
+        source = local.renewed ? '本机导入(已续期)' : '本机导入';
       }
-      const member = await addMember(body);
       await writeAppLog('添加账号', {
         账号: memberLogLabel(member),
-        来源: '手动粘贴Token',
+        来源: source,
       });
-      const refreshed = await refreshOne(member.id, {
+      // 与 OAuth 同：入池成功立刻返回，用量后台刷，避免对话框长时间卡住
+      void refreshOne(member.id, {
         source: '添加账号',
-        trigger: '手动添加',
+        trigger: source,
+      }).catch((e) => {
+        console.warn('[local-import] 后台刷新失败', member.id, e?.message || e);
       });
-      return sendJson(res, 201, { member: refreshed });
+      return sendJson(res, created ? 201 : 200, {
+        member: toPublicMember(member),
+        created,
+        local: {
+          email: local.email,
+          expiresAt: local.exp ? new Date(local.exp * 1000).toISOString() : null,
+          renewed: Boolean(local.renewed),
+        },
+      });
     }
 
     if (method === 'GET' && pathname === '/api/export/accounts') {

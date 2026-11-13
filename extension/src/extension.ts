@@ -39,10 +39,13 @@ let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let bridgeServer: Server | undefined;
 let lastMessage = '尚未上报';
 let operatorWarned = false;
-/** 避免同一 URI / 票据被并发处理两次。 */
+/** 避免同一 URI / 票据被并发处理两次；上报在切换中跳过，避免旧会话盖回席位。 */
 let switching = false;
-/** 成功回报最多等这么久就重启，看板慢不能拖住切换。 */
-const REPORT_BEFORE_RESTART_MS = 3_000;
+/** 每次进入切换递增；在途上报拿到旧代际后不再发请求。 */
+let switchGeneration = 0;
+/** 切换成功后必须尽量回报席位；失败则短重试，仍失败也重启（本机已写入）。 */
+const SWITCH_RESULT_ATTEMPTS = 3;
+const SWITCH_RESULT_GAP_MS = 400;
 
 function storageRoot(context: vscode.ExtensionContext): string {
   return context.globalStorageUri.fsPath;
@@ -65,6 +68,14 @@ function warnOperatorProof(reason: string) {
 }
 
 async function doReport(context: vscode.ExtensionContext, silent: boolean) {
+  if (switching) {
+    if (!silent) {
+      void vscode.window.showWarningMessage('Cursor Team Usage：正在切换账号，已跳过本次上报');
+    }
+    return;
+  }
+  const gen = switchGeneration;
+  const clientStartedAt = new Date().toISOString();
   const config = readReporterConfig();
   try {
     const session = await resolveLocalCursorSession();
@@ -80,7 +91,9 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
       }
       return;
     }
-    const result = await reportSession(config, session);
+    // 读完会话后若已开始切换，勿用旧会话上报席位
+    if (switching || gen !== switchGeneration) return;
+    const result = await reportSession(config, session, { clientStartedAt });
     const exp = session.exp
       ? new Date(session.exp * 1000).toLocaleString('zh-CN')
       : '未知';
@@ -104,6 +117,27 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
 }
 
 /**
+ * 切换成败必须落到看板席位；短重试，避免短暂超时吞掉成功回报。
+ */
+async function reportSwitchResultBestEffort(
+  config: ReturnType<typeof readReporterConfig>,
+  input: { logId: string; ok: boolean; error?: string },
+): Promise<boolean> {
+  for (let i = 0; i < SWITCH_RESULT_ATTEMPTS; i++) {
+    try {
+      await reportSwitchResult(config, input);
+      return true;
+    } catch (e) {
+      console.warn('[ctu] switch/result', i + 1, e);
+      if (i < SWITCH_RESULT_ATTEMPTS - 1) {
+        await new Promise((r) => setTimeout(r, SWITCH_RESULT_GAP_MS));
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * 处理看板一键切换：备份当前 → 领票据 → 写本机 auth → 回报 → 重启 Cursor。
  */
 async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: string) {
@@ -112,6 +146,7 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     return;
   }
   switching = true;
+  switchGeneration += 1;
   const config = readReporterConfig();
   let logId: string | undefined;
   try {
@@ -131,11 +166,11 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
     }
 
     await writeLocalCursorAuth(claimed.auth);
-    // 本机已写入即算成功；回报失败只影响看板日志，不能因此不重启
-    await Promise.race([
-      reportSwitchResult(config, { logId, ok: true }).catch(() => {}),
-      new Promise((r) => setTimeout(r, REPORT_BEFORE_RESTART_MS)),
-    ]);
+    // 本机已写入即算成功；席位回报尽量完成后再重启，失败也不挡重启
+    const reported = await reportSwitchResultBestEffort(config, { logId, ok: true });
+    if (!reported) {
+      console.warn('[ctu] switch/result 未送达，重启后首次上报会纠正席位');
+    }
     updateStatus(`已写入 ${label}，正在重启 Cursor…`);
     void vscode.window.showInformationMessage(
       `Cursor Team Usage：已切换到 ${label}${home ? '（本机账号已保留）' : ''}，即将重启 Cursor`,
@@ -144,11 +179,7 @@ async function handleAccountSwitch(context: vscode.ExtensionContext, ticketId: s
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (logId) {
-      try {
-        await reportSwitchResult(config, { logId, ok: false, error: msg });
-      } catch {
-        /* 回报失败不影响本地提示 */
-      }
+      await reportSwitchResultBestEffort(config, { logId, ok: false, error: msg });
     }
     updateStatus(`切换失败：${msg}`);
     void vscode.window.showErrorMessage(`Cursor Team Usage 切换失败：${msg}`);
@@ -200,6 +231,7 @@ async function handleRestoreHomeAccount(context: vscode.ExtensionContext) {
   }
 
   switching = true;
+  switchGeneration += 1;
   try {
     const label = home.email || home.userId || '本机账号';
     updateStatus(`正在恢复本机账号 ${label}…`);
