@@ -185,13 +185,19 @@ export async function reportSession(
 
   const data = (await res.json().catch(() => ({}))) as {
     error?: string;
+    code?: string;
     created?: boolean;
     member?: { id?: string };
     operatorVerified?: boolean;
     operatorError?: string | null;
   };
   if (!res.ok) {
-    throw new Error(data.error || `上报失败 HTTP ${res.status}`);
+    const err = new Error(data.error || `上报失败 HTTP ${res.status}`) as Error & {
+      code?: string;
+    };
+    // 服务端探活未过/Token 拒收：调用方只记状态，勿弹窗打扰
+    if (data.code) err.code = data.code;
+    throw err;
   }
   return {
     created: Boolean(data.created),

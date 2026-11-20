@@ -1407,10 +1407,8 @@ const server = http.createServer(async (req, res) => {
           existingByUser?.lastError &&
           isCursorAuthFailure({ message: existingByUser.lastError }),
       );
-      const probe =
-        existingByUser && sameCookie
-          ? null
-          : await probeCursorSessionAuth(parsedSession.cookieValue);
+      // 同 Cookie 也探活：logout 吊销后本机 JWT 常未变，跳过探活会 refresh 失败标异常
+      const probe = await probeCursorSessionAuth(parsedSession.cookieValue);
       const useless = uselessReportReason({
         hasExisting: Boolean(existingByUser),
         sameCookie,

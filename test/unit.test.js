@@ -976,6 +976,11 @@ test('uselessReportReason 换 Token 必须探活成功', async () => {
     uselessReportReason({ hasExisting: true, sameCookie: true, knownDead: false, probe: null }),
     null,
   );
+  // logout 同 Cookie 探活失效：拒收，避免 refresh 标异常
+  assert.equal(
+    uselessReportReason({ hasExisting: true, sameCookie: true, knownDead: false, probe: false }),
+    'unauth',
+  );
   assert.equal(
     uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: false }),
     'unauth',

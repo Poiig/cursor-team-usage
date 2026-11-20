@@ -80,10 +80,17 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
   try {
     const session = await resolveLocalCursorSession();
     if (!session) {
-      throw new Error('未找到有效的 Cursor 登录态，请先在本机登录 Cursor');
+      // logout / 未登录：不上报，避免把号池刷成异常
+      const msg = '本机未登录 Cursor，已跳过上报';
+      updateStatus(msg);
+      if (!silent) {
+        void vscode.window.showWarningMessage(`Cursor Team Usage：${msg}`);
+      }
+      return;
     }
     const authOk = await probeLocalSessionAuth(session);
     if (authOk === false) {
+      // logout 后 JWT 常仍在库里但已吊销：同样不上报
       const msg = '本机会话已失效，已跳过上报（避免覆盖看板 Token）';
       updateStatus(msg);
       if (!silent) {
@@ -109,8 +116,11 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const code =
+      e && typeof e === 'object' && 'code' in e ? String((e as { code?: string }).code || '') : '';
     updateStatus(`失败：${msg}`);
-    if (!silent) {
+    // TOKEN_REJECTED：看板侧探活未确认/拒收，本机用户改不了，只留状态栏
+    if (!silent && code !== 'TOKEN_REJECTED') {
       void vscode.window.showErrorMessage(`Cursor Team Usage 上报失败：${msg}`);
     }
   }

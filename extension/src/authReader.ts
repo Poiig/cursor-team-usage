@@ -122,13 +122,15 @@ export async function resolveLocalCursorSession(): Promise<LocalSession | null> 
 /**
  * 向 Cursor 探一下本机会话是否仍被接受。
  * 登出后 JWT 常仍留在 state.vscdb 且未到 exp，直接上报会盖掉看板里朋友正在用的 Token。
+ * 与服务端 probeCursorSessionAuth 同口径：用 usage-summary，不用 /api/auth/me
+ * （吊销后 auth/me 常 204 空体，会被当成已登录）。
  * 网络失败返回 null，由服务端再判，避免因抖动漏报真续期。
  */
 export async function probeLocalSessionAuth(
   session: LocalSession,
 ): Promise<boolean | null> {
   try {
-    const res = await fetch('https://cursor.com/api/auth/me', {
+    const res = await fetch('https://cursor.com/api/usage-summary', {
       signal: AbortSignal.timeout(15_000),
       headers: {
         Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
@@ -136,9 +138,18 @@ export async function probeLocalSessionAuth(
         Referer: 'https://cursor.com/dashboard',
       },
     });
-    if (res.ok) return true;
-    if (res.status === 401 || res.status === 403) return false;
-    return null;
+    if (res.status === 401 || res.status === 403 || res.status === 204) return false;
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (!text.trim()) return false;
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+    if (data.membershipType || data.billingCycleStart || data.individualUsage) return true;
+    return false;
   } catch {
     return null;
   }
