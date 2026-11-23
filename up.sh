@@ -46,6 +46,8 @@ if [[ "$NEED_BUILD" -eq 1 ]]; then
   echo "==> container build ${IMAGE}"
   # shellcheck disable=SC2086
   container build $NO_CACHE -t "$IMAGE" -f Dockerfile .
+  # 构建完停掉 buildkit 构建机，省约 1~2GB 内存；下次 build 会自动拉起
+  container builder stop >/dev/null 2>&1 || true
 fi
 
 if container list --all 2>/dev/null | grep -q "$NAME"; then
