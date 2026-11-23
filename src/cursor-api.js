@@ -80,22 +80,28 @@ export function caughtHttpStatus(e) {
 }
 
 /**
- * 换 Token 或新号必须探活成功才入库。同一份已失效 Token 静默丢掉。
- * 同 Cookie 也要认探活结果：logout 后 JWT 常仍在本机，旧逻辑跳过探活会把号刷成异常。
- * 探活未知也不许换 Token：吊销会话在 /api/auth/me 上是 204，当未知放行会再次盖掉好 Token。
+ * 上报是否允许写入号池（覆写/新建 Token）。
+ * - 同票：明确吊销则拒；网络未知只续席位、不换票。
+ * - 换票/新号：必须探活成功；未知也不许覆写（避免吊销票盖掉好票）。
  * @param {{ hasExisting: boolean, sameCookie: boolean, knownDead: boolean, probe: boolean | null }} input
  * @returns {'same-dead' | 'unauth' | 'unverified' | null}
  */
 export function uselessReportReason({ hasExisting, sameCookie, knownDead, probe }) {
   if (hasExisting && sameCookie && knownDead) return 'same-dead';
   if (hasExisting && sameCookie) {
-    // 同 Cookie：明确失效拒收；网络未知仍放行（只续席位，Token 未变）
     if (probe === false) return 'unauth';
     return null;
   }
   if (probe === true) return null;
   if (probe === false) return 'unauth';
   return 'unverified';
+}
+
+/** 探活结果文案，写入应用日志。 */
+export function probeResultLabel(probe) {
+  if (probe === true) return '有效';
+  if (probe === false) return '失效';
+  return '未知';
 }
 
 /**

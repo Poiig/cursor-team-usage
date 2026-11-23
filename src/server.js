@@ -33,6 +33,7 @@ import {
   isCursorAuthFailure,
   isTransientCursorError,
   probeCursorSessionAuth,
+  probeResultLabel,
   renewCookieIfNeeded,
   uselessReportReason,
 } from './cursor-api.js';
@@ -1397,7 +1398,7 @@ const server = http.createServer(async (req, res) => {
           code: 'OPERATOR_PROOF',
         });
       }
-      // 换 Token 必须用量接口确认有效。未确认或已失效都不写号池、不刷新、不占席位。
+      // Token 决策：探活 → 是否允许写入 → 是否覆写 → 是否刷新；全过程写应用日志。
       const existingByUser = await findMemberByUserId(parsedSession.userId);
       const sameCookie = Boolean(
         existingByUser?.cookieValue && existingByUser.cookieValue === parsedSession.cookieValue,
@@ -1407,7 +1408,7 @@ const server = http.createServer(async (req, res) => {
           existingByUser?.lastError &&
           isCursorAuthFailure({ message: existingByUser.lastError }),
       );
-      // 同 Cookie 也探活：logout 吊销后本机 JWT 常未变，跳过探活会 refresh 失败标异常
+      const hadPrev = Boolean(existingByUser?.prevCookieValue);
       const probe = await probeCursorSessionAuth(parsedSession.cookieValue);
       const useless = uselessReportReason({
         hasExisting: Boolean(existingByUser),
@@ -1416,10 +1417,25 @@ const server = http.createServer(async (req, res) => {
         probe,
       });
       if (useless) {
-        if (useless === 'unauth' || useless === 'unverified') {
+        if (useless === 'unauth' || useless === 'unverified' || useless === 'same-dead') {
           await writeAppLog('上报', {
             账号: existingByUser ? memberLogLabel(existingByUser) : parsedSession.userId,
-            操作: useless === 'unauth' ? '拒绝无效Token' : '拒绝未验证Token',
+            操作:
+              useless === 'unverified'
+                ? '拒绝未验证Token'
+                : useless === 'same-dead'
+                  ? '拒绝已知失效Token'
+                  : '拒绝无效Token',
+            探活: probeResultLabel(probe),
+            同票: sameCookie ? '是' : '否',
+            覆写Token: '否',
+            保留prev: hadPrev ? '是' : '无',
+            原因:
+              useless === 'unverified'
+                ? '看板访问Cursor超时或异常，禁止换票'
+                : useless === 'same-dead'
+                  ? '号池已记会话失效且票未变'
+                  : 'Cursor确认会话已吊销',
             使用人: operatorUsername || undefined,
             主机名: body?.hostname || undefined,
             邮箱: body?.email || undefined,
@@ -1435,6 +1451,9 @@ const server = http.createServer(async (req, res) => {
           code: 'TOKEN_REJECTED',
         });
       }
+      const cookieChanged = Boolean(
+        existingByUser?.cookieValue && existingByUser.cookieValue !== parsedSession.cookieValue,
+      );
       // upsert：新建=上报来源；已有账号续 Token，不覆盖人工显示名/主机名
       const { member, created, manualProtected } = await upsertMemberBySession({
         sessionToken,
@@ -1463,9 +1482,26 @@ const server = http.createServer(async (req, res) => {
           hostname: body?.hostname,
         });
       }
+      const overwriteLabel = created
+        ? '新建'
+        : sameCookie
+          ? '否(同票)'
+          : cookieChanged
+            ? '是(换票)'
+            : '否';
       await writeAppLog(created ? '注册' : '上报', {
         账号: memberLogLabel(member),
-        操作: created ? '新建账号' : manualProtected ? '续期Token(人工号)' : '更新Token',
+        操作: created
+          ? '新建账号'
+          : sameCookie
+            ? '续席位(同票)'
+            : manualProtected
+              ? '续期Token(人工号)'
+              : '更新Token',
+        探活: probeResultLabel(probe),
+        同票: sameCookie ? '是' : '否',
+        覆写Token: overwriteLabel,
+        保留prev: cookieChanged ? '是(写入prev)' : hadPrev ? '保持' : '无',
         来源: member.source || undefined,
         使用人: operatorUsername || undefined,
         使用人校验: operatorUsername ? undefined : `失败(${operatorReason})`,
@@ -1478,13 +1514,10 @@ const server = http.createServer(async (req, res) => {
         席位: applyPresence ? undefined : '保留切换(上报早于切换)',
       });
       const shouldRefresh = body?.refresh !== false;
+      // 同票且探活未知：只续席位，不刷用量，避免网络抖动把好号刷成异常
+      const skipRefresh = sameCookie && probe !== true;
       let refreshed = member;
-      const cookieChanged = Boolean(
-        !created &&
-          existingByUser?.cookieValue &&
-          existingByUser.cookieValue !== parsedSession.cookieValue,
-      );
-      if (shouldRefresh && member?.id) {
+      if (shouldRefresh && member?.id && !skipRefresh) {
         refreshed = await refreshOne(member.id, {
           source: created ? '注册' : '上报',
           trigger: '上报后刷新',
@@ -1500,6 +1533,10 @@ const server = http.createServer(async (req, res) => {
             await writeAppLog('上报', {
               账号: memberLogLabel(member),
               操作: '回滚Token',
+              探活: probeResultLabel(probe),
+              覆写Token: '回滚至prev',
+              保留prev: '已清空',
+              原因: '换票后刷新仍鉴权失败',
               使用人: operatorUsername || undefined,
               主机名: body?.hostname || undefined,
               邮箱: body?.email || undefined,
@@ -1511,6 +1548,18 @@ const server = http.createServer(async (req, res) => {
             });
           }
         }
+      } else if (skipRefresh) {
+        await writeAppLog('上报', {
+          账号: memberLogLabel(member),
+          操作: '跳过刷新',
+          探活: probeResultLabel(probe),
+          同票: '是',
+          覆写Token: '否',
+          原因: '同票且探活未确认，避免网络抖动标异常',
+          使用人: operatorUsername || undefined,
+          主机名: body?.hostname || undefined,
+          插件版本: body?.pluginVersion || undefined,
+        });
       }
       await recordReportEvent({
         operatorUsername,

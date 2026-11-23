@@ -147,41 +147,57 @@ export async function fetchHomeAccountFromBoard(
   };
 }
 
+export type ReportSessionResult = {
+  created: boolean;
+  memberId?: string;
+  operatorError?: string | null;
+  /** 服务端业务拒收（Token/探活等），插件只记状态不弹窗 */
+  rejected?: boolean;
+  rejectCode?: string;
+  rejectReason?: string;
+};
+
 /**
- * 调用看板 /api/agent/report，Header 带 Access Key。
- * clientStartedAt：读会话时刻，供服务端丢弃「切换前开读」的席位覆盖。
+ * 调用看板 /api/agent/report；clientStartedAt 供服务端丢弃「切换前开读」的席位覆盖。
+ * 业务拒收（如 TOKEN_REJECTED）不抛错；仅通信失败 / 5xx 抛错。
  */
 export async function reportSession(
   config: ReporterConfig,
   session: LocalSession,
   opts?: { clientStartedAt?: string },
-): Promise<{ created: boolean; memberId?: string; operatorError?: string | null }> {
+): Promise<ReportSessionResult> {
   assertReporterConfig(config);
 
   const host = os.hostname();
   const own = vscode.extensions.getExtension(EXTENSION_ID);
-  const res = await fetch(`${config.apiBaseUrl}/api/agent/report`, {
-    // 服务端上报后会顺带刷新用量，留足时间
-    signal: AbortSignal.timeout(60_000),
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Access-Key': config.accessKey,
-    },
-    body: JSON.stringify({
-      sessionToken: session.cookieValue,
-      // 仅新建账号时服务端采用显示名；已有账号不会被覆盖
-      displayName: config.displayName || host || session.email || session.userId,
-      email: session.email,
-      hostname: host,
-      operatorUsername: config.operatorUsername,
-      operatorProof: config.operatorProof,
-      pluginVersion: String(own?.packageJSON?.version || ''),
-      pluginBuild: String(own?.packageJSON?.ctuBuild || ''),
-      refresh: config.refreshAfterReport,
-      clientStartedAt: opts?.clientStartedAt || undefined,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${config.apiBaseUrl}/api/agent/report`, {
+      // 服务端上报后会顺带刷新用量，留足时间
+      signal: AbortSignal.timeout(60_000),
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Access-Key': config.accessKey,
+      },
+      body: JSON.stringify({
+        sessionToken: session.cookieValue,
+        // 仅新建账号时服务端采用显示名；已有账号不会被覆盖
+        displayName: config.displayName || host || session.email || session.userId,
+        email: session.email,
+        hostname: host,
+        operatorUsername: config.operatorUsername,
+        operatorProof: config.operatorProof,
+        pluginVersion: String(own?.packageJSON?.version || ''),
+        pluginBuild: String(own?.packageJSON?.ctuBuild || ''),
+        refresh: config.refreshAfterReport,
+        clientStartedAt: opts?.clientStartedAt || undefined,
+      }),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`无法连接看板：${msg}`);
+  }
 
   const data = (await res.json().catch(() => ({}))) as {
     error?: string;
@@ -192,12 +208,16 @@ export async function reportSession(
     operatorError?: string | null;
   };
   if (!res.ok) {
-    const err = new Error(data.error || `上报失败 HTTP ${res.status}`) as Error & {
-      code?: string;
-    };
-    // 服务端探活未过/Token 拒收：调用方只记状态，勿弹窗打扰
-    if (data.code) err.code = data.code;
-    throw err;
+    // 4xx 带业务 code：服务端已处理决策，插件不打扰人
+    if (res.status < 500 && data.code) {
+      return {
+        created: false,
+        rejected: true,
+        rejectCode: data.code,
+        rejectReason: data.error || `HTTP ${res.status}`,
+      };
+    }
+    throw new Error(data.error || `看板响应异常 HTTP ${res.status}`);
   }
   return {
     created: Boolean(data.created),

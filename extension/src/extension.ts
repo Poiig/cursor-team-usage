@@ -69,9 +69,7 @@ function warnOperatorProof(reason: string) {
 
 async function doReport(context: vscode.ExtensionContext, silent: boolean) {
   if (switching) {
-    if (!silent) {
-      void vscode.window.showWarningMessage('Cursor Team Usage：正在切换账号，已跳过本次上报');
-    }
+    updateStatus('正在切换账号，已跳过上报');
     return;
   }
   const gen = switchGeneration;
@@ -80,27 +78,23 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
   try {
     const session = await resolveLocalCursorSession();
     if (!session) {
-      // logout / 未登录：不上报，避免把号池刷成异常
-      const msg = '本机未登录 Cursor，已跳过上报';
-      updateStatus(msg);
-      if (!silent) {
-        void vscode.window.showWarningMessage(`Cursor Team Usage：${msg}`);
-      }
+      // logout / 未登录：不上报；成员端只记状态，不弹窗
+      updateStatus('本机未登录，已跳过上报');
       return;
     }
     const authOk = await probeLocalSessionAuth(session);
     if (authOk === false) {
-      // logout 后 JWT 常仍在库里但已吊销：同样不上报
-      const msg = '本机会话已失效，已跳过上报（避免覆盖看板 Token）';
-      updateStatus(msg);
-      if (!silent) {
-        void vscode.window.showWarningMessage(`Cursor Team Usage：${msg}`);
-      }
+      updateStatus('本机会话已失效，已跳过上报');
       return;
     }
     // 读完会话后若已开始切换，勿用旧会话上报席位
     if (switching || gen !== switchGeneration) return;
     const result = await reportSession(config, session, { clientStartedAt });
+    // 服务端业务拒收（探活/吊销等）：已送达看板，由服务端落日志，插件不打扰
+    if (result.rejected) {
+      updateStatus(`已上报（服务端未写入：${result.rejectReason || result.rejectCode || '业务拒绝'}）`);
+      return;
+    }
     const exp = session.exp
       ? new Date(session.exp * 1000).toLocaleString('zh-CN')
       : '未知';
@@ -115,13 +109,11 @@ async function doReport(context: vscode.ExtensionContext, silent: boolean) {
       void vscode.window.showInformationMessage(`Cursor Team Usage：${msg}`);
     }
   } catch (e) {
+    // 仅「连不上看板 / 通信异常」提示；Token 决策错误不会进到这里
     const msg = e instanceof Error ? e.message : String(e);
-    const code =
-      e && typeof e === 'object' && 'code' in e ? String((e as { code?: string }).code || '') : '';
-    updateStatus(`失败：${msg}`);
-    // TOKEN_REJECTED：看板侧探活未确认/拒收，本机用户改不了，只留状态栏
-    if (!silent && code !== 'TOKEN_REJECTED') {
-      void vscode.window.showErrorMessage(`Cursor Team Usage 上报失败：${msg}`);
+    updateStatus(`通信失败：${msg}`);
+    if (!silent) {
+      void vscode.window.showErrorMessage(`Cursor Team Usage 无法连接看板：${msg}`);
     }
   }
 }

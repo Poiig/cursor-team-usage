@@ -1001,6 +1001,10 @@ test('uselessReportReason 换 Token 必须探活成功', async () => {
     uselessReportReason({ hasExisting: true, sameCookie: false, knownDead: false, probe: true }),
     null,
   );
+  const { probeResultLabel } = await import('../src/cursor-api.js');
+  assert.equal(probeResultLabel(true), '有效');
+  assert.equal(probeResultLabel(false), '失效');
+  assert.equal(probeResultLabel(null), '未知');
 });
 
 test('caughtHttpStatus 不把 Cursor 401 当成看板未登录', async () => {
