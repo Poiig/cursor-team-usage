@@ -434,12 +434,12 @@ export function getAccountUserLimits() {
   };
 }
 
-/** 是否禁止切换到超速账号；默认关闭。 */
+/** 是否禁止切换到非临期的超速账号；临期号仍可切。默认关闭。 */
 export function getBlockSpeedingSwitch() {
   return Boolean(getAppConfig().blockSpeedingSwitch);
 }
 
-/** 管理员是否豁免「禁止切换超速账号」；默认开启。 */
+/** 管理员是否豁免「禁止切换非临期超速账号」；默认开启。 */
 export function getBlockSpeedingSwitchAdminExempt() {
   return Boolean(getAppConfig().blockSpeedingSwitchAdminExempt);
 }

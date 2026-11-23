@@ -233,6 +233,50 @@ test('getBlockSpeedingSwitchAdminExempt 读取 BLOCK_SPEEDING_SWITCH_ADMIN_EXEMP
   }
 });
 
+test('switchBlockReason：超速拦切，临期超速仍可切换', async () => {
+  const { isExpiringMember, switchBlockReason } = await import('../src/account-switch.js');
+  const prevBlock = process.env.BLOCK_SPEEDING_SWITCH;
+  const prevExempt = process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT;
+  process.env.BLOCK_SPEEDING_SWITCH = 'true';
+  process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT = 'true';
+  try {
+    await loadAppConfig();
+    // 周五中午：便于工作日节奏算超速
+    const nowMs = Date.parse('2026-11-20T12:00:00+08:00');
+    const speedingFar = {
+      id: 'speeding-far',
+      lastSnapshot: {
+        meters: { totalPercentUsed: 50 },
+        window: {
+          startIso: '2026-11-19T00:00:00+08:00',
+          resetIso: '2026-12-10T00:00:00+08:00',
+        },
+      },
+    };
+    const speedingExpiring = {
+      id: 'speeding-expiring',
+      lastSnapshot: {
+        meters: { totalPercentUsed: 70 },
+        window: {
+          startIso: '2026-11-18T00:00:00+08:00',
+          resetIso: '2026-11-23T00:00:00+08:00',
+        },
+      },
+    };
+    assert.equal(isExpiringMember(speedingFar, nowMs), false);
+    assert.equal(isExpiringMember(speedingExpiring, nowMs), true);
+    assert.match(switchBlockReason(speedingFar, { nowMs }), /超速/);
+    assert.equal(switchBlockReason(speedingExpiring, { nowMs }), null);
+    assert.equal(switchBlockReason(speedingFar, { isAdmin: true, nowMs }), null);
+  } finally {
+    if (prevBlock === undefined) delete process.env.BLOCK_SPEEDING_SWITCH;
+    else process.env.BLOCK_SPEEDING_SWITCH = prevBlock;
+    if (prevExempt === undefined) delete process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT;
+    else process.env.BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT = prevExempt;
+    await loadAppConfig();
+  }
+});
+
 test('maxUsersForMember 临期账号用第二档席位', async () => {
   const { maxUsersForMember } = await import('../src/account-presence.js');
   const prev = process.env.PRO_MAX_USERS;

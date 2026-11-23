@@ -184,9 +184,9 @@ let EXPIRING_WITHIN_DAYS = 7;
 /** 周订（The X / xAI）临期阈值；默认 4，避免整周都算临期。 */
 let EXPIRING_WITHIN_DAYS_WEEKLY = 4;
 
-/** 服务端 BLOCK_SPEEDING_SWITCH：开启后超速账号不可切换。 */
+/** 服务端 BLOCK_SPEEDING_SWITCH：开启后非临期的超速账号不可切换。 */
 let serverBlockSpeedingSwitch = false;
-/** 服务端 BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT：管理员是否可仍切换超速号。 */
+/** 服务端 BLOCK_SPEEDING_SWITCH_ADMIN_EXEMPT：管理员是否可仍切换非临期超速号。 */
 let serverBlockSpeedingSwitchAdminExempt = true;
 
 function isAdmin() {
@@ -265,7 +265,13 @@ function switchBlockReason(member) {
     return `使用人数已满（${member.activeUserCount}/${member.maxUsers}）`;
   }
   if (member.id === currentCursorMemberId) return '当前正在使用';
-  if (serverBlockSpeedingSwitch && !isSpeedingSwitchAdminExempt() && isSpeedingMember(member)) {
+  // 临期号即使超速也可切：重置在即，拦切会浪费剩余额度
+  if (
+    serverBlockSpeedingSwitch &&
+    !isSpeedingSwitchAdminExempt() &&
+    isSpeedingMember(member) &&
+    !isExpiringMember(member)
+  ) {
     return '账号超速，暂不可切换';
   }
   return '';

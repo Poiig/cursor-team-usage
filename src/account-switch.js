@@ -8,6 +8,7 @@ import { computeUsagePace } from '../public/shared.js';
 import {
   getBlockSpeedingSwitch,
   getBlockSpeedingSwitchAdminExempt,
+  getExpiringWithinDaysForSnapshot,
 } from './config.js';
 import { decodeJwtPayload, jwtFromCookie, sessionFromCookie } from './auth.js';
 import { getMemberCapacity } from './account-presence.js';
@@ -206,19 +207,44 @@ export function isFreePlanMember(member) {
   return plan === 'free' || /\bfree\b/.test(plan);
 }
 
-/** 超速：工作日节奏预计撑不到期末（与看板徽章同口径）。 */
-function isSpeedingMember(member) {
+/** 距额度重置日的天数（含到期日）；无有效 resetIso 返回 null。 */
+function daysUntilReset(iso, nowMs = Date.now()) {
+  if (!iso) return null;
+  const t = new Date(String(iso)).getTime();
+  if (Number.isNaN(t)) return null;
+  const ms = t - nowMs;
+  if (ms <= 0) return 0;
+  return Math.max(1, Math.ceil(ms / 86400000));
+}
+
+/**
+ * 非异常且额度周期在临期阈值内重置（含已到期）→ 临期。
+ * 与看板 / 席位第二档同口径（周订用独立阈值）。
+ * @param {any} member
+ * @param {number} [nowMs]
+ */
+export function isExpiringMember(member, nowMs = Date.now()) {
   if (!member || member.lastError || isFreePlanMember(member)) return false;
   const used = usageTotalPercentOf(member);
   if (used != null && used >= 100) return false;
-  return computeUsagePace(member)?.status === 'danger';
+  const days = daysUntilReset(member.lastSnapshot?.window?.resetIso, nowMs);
+  return days != null && days <= getExpiringWithinDaysForSnapshot(member.lastSnapshot);
+}
+
+/** 超速：工作日节奏预计撑不到期末（与看板徽章同口径）。 */
+function isSpeedingMember(member, nowMs = Date.now()) {
+  if (!member || member.lastError || isFreePlanMember(member)) return false;
+  const used = usageTotalPercentOf(member);
+  if (used != null && used >= 100) return false;
+  return computeUsagePace(member, nowMs)?.status === 'danger';
 }
 
 /**
  * 切换前的统一可用性检查。额度已用完、尚无额度数据、同步异常或 Free 都不能切换。
- * 开启 BLOCK_SPEEDING_SWITCH 时，超速账号也不可切换（管理员可按配置豁免）。
+ * 开启 BLOCK_SPEEDING_SWITCH 时，非临期的超速账号不可切换（管理员可按配置豁免）；
+ * 临期账号即使超速仍可切换，避免重置前浪费剩余额度。
  * @param {any} member
- * @param {{ isAdmin?: boolean }} [opts]
+ * @param {{ isAdmin?: boolean, nowMs?: number }} [opts]
  * @returns {string | null}
  */
 export function switchBlockReason(member, opts = {}) {
@@ -235,8 +261,14 @@ export function switchBlockReason(member, opts = {}) {
     return `当前使用人数已满（${member.activeUserCount}/${member.maxUsers}）`;
   }
   if (getBlockSpeedingSwitch()) {
+    const nowMs = opts.nowMs ?? Date.now();
     const adminExempt = Boolean(opts.isAdmin) && getBlockSpeedingSwitchAdminExempt();
-    if (!adminExempt && isSpeedingMember(member)) {
+    // 临期优先：重置在即，超速拦切会空耗额度；席位第二档也鼓励临期号多用
+    if (
+      !adminExempt &&
+      isSpeedingMember(member, nowMs) &&
+      !isExpiringMember(member, nowMs)
+    ) {
       return '该账号超速，暂不可切换';
     }
   }
