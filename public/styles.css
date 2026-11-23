@@ -18,6 +18,8 @@
   --green: #10b981;
   --green-strong: #059669;
   --amber: #d97706;
+  /* 超速：橙，介于偏快琥珀与异常红之间 */
+  --speeding: #ea580c;
   --red: #dc2626;
   --blue: #3b82f6;
   --purple: #8b5cf6;
@@ -46,6 +48,7 @@
     --green: #3fd39a;
     --green-strong: #34c48c;
     --amber: #e0a044;
+    --speeding: #fb923c;
     --red: #f2716b;
     --blue: #4daafc;
     --purple: #a78bfa;
@@ -445,7 +448,7 @@ h3 {
 }
 
 .account-section--speeding .account-section-title {
-  color: var(--red);
+  color: var(--speeding);
 }
 
 .account-section--expiring .account-section-title {
@@ -454,6 +457,10 @@ h3 {
 
 .stat .value.warn {
   color: var(--amber);
+}
+
+.stat .value.speeding {
+  color: var(--speeding);
 }
 
 .filter-empty {
@@ -737,6 +744,231 @@ h3 {
 
 .report-kpis {
   margin-top: 4px;
+}
+
+.reports-layout {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.reports-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+  border-right: 1px solid var(--border);
+}
+
+.reports-nav-item {
+  appearance: none;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  padding: 9px 12px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.reports-nav-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.reports-nav-item.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text);
+}
+
+.reports-main {
+  min-width: 0;
+}
+
+.reports-pane .chart-note {
+  margin: 0 0 10px;
+  max-width: 72ch;
+}
+
+.reports-pane .report-kpis {
+  margin: 0 0 8px;
+}
+
+tr.prev-plan-group td {
+  padding-top: 14px;
+  padding-bottom: 6px;
+  font-weight: 650;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+
+.prev-cohorts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.prev-cohort-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.prev-cohort-card:hover {
+  border-color: color-mix(in srgb, var(--accent, #7c9cff) 55%, var(--border));
+}
+
+.prev-cohort-card.active {
+  border-color: var(--accent, #7c9cff);
+  background: color-mix(in srgb, var(--accent, #7c9cff) 12%, var(--panel));
+}
+
+.prev-cohort-label {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.prev-cohort-blurb {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.prev-cohort-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.prev-cohort-metrics b {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.prev-table-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.prev-table-head h3 {
+  margin: 0;
+}
+
+.prev-drill-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+tr.prev-account-row {
+  cursor: pointer;
+}
+
+tr.prev-account-row:hover td {
+  background: color-mix(in srgb, var(--accent, #7c9cff) 8%, transparent);
+}
+
+a.h-bar-row--link {
+  text-decoration: none;
+  color: inherit;
+  border-radius: 6px;
+  padding: 2px 0;
+}
+
+a.h-bar-row--link:hover .h-bar-name,
+div.h-bar-row--link:hover .h-bar-name {
+  color: var(--accent, #7c9cff);
+}
+
+div.h-bar-row--link {
+  cursor: pointer;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.pager-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pager-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cycle-usage-section {
+  margin: 0 0 16px;
+}
+
+.cycle-usage-note {
+  margin: 0;
+  font-size: 12px;
+}
+
+.cycle-usage-section .usage-head {
+  align-items: flex-end;
+}
+
+tr.cycle-usage-row {
+  cursor: pointer;
+}
+
+tr.cycle-usage-row:hover td {
+  background: color-mix(in srgb, var(--accent, #7c9cff) 8%, transparent);
+}
+
+tr.cycle-usage-current td {
+  background: color-mix(in srgb, var(--accent, #7c9cff) 6%, transparent);
+}
+
+tr.cycle-usage-selected td {
+  background: color-mix(in srgb, var(--accent, #7c9cff) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent, #7c9cff) 40%, transparent);
+}
+
+.cycle-usage-speed {
+  color: var(--speeding);
+  font-weight: 650;
+}
+
+@media (max-width: 900px) {
+  .reports-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .reports-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
 }
 
 .chart-note {
@@ -1390,6 +1622,13 @@ a.user-slot-link:hover .user-slot-name {
 .badge.warn {
   color: #3b2500;
   background: var(--amber);
+}
+
+/* 超速：橙底，区别于偏快琥珀 / 异常红 */
+.badge.speeding {
+  color: #fff7ed;
+  background: var(--speeding);
+  border-color: color-mix(in srgb, var(--speeding) 70%, #000);
 }
 
 .badge.danger {
@@ -2331,10 +2570,25 @@ td.cell-time {
   overflow-x: auto;
 }
 
+th.num,
 td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* 周期表：固定百分比列宽，表头与单元格同右对齐 */
+.cycle-usage-table {
+  table-layout: fixed;
+}
+.cycle-usage-table th.num,
+.cycle-usage-table td.num {
+  width: 6.2em;
+  text-align: right;
+}
+.cycle-usage-table th:nth-child(4),
+.cycle-usage-table td:nth-child(4) {
+  width: 22em;
 }
 
 /* 账号详情 · 周期视图切换 */

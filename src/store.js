@@ -104,6 +104,37 @@ export async function setPrevCycleSummary(id, summary) {
   return api().setPrevCycleSummary(id, summary);
 }
 
+/** @param {import('./member-billing-cycles.js').BillingCycleRow} row */
+export async function upsertBillingCycle(row) {
+  return api().upsertBillingCycle(row);
+}
+
+/**
+ * @param {string} memberId
+ * @param {import('./member-billing-cycles.js').BillingCycleRow} row
+ */
+export async function closeBillingCycle(memberId, row) {
+  return api().closeBillingCycle(memberId, row);
+}
+
+/** @param {string} memberId */
+export async function getCurrentBillingCycle(memberId) {
+  return api().getCurrentBillingCycle(memberId);
+}
+
+/**
+ * @param {string} memberId
+ * @param {{ limit?: number, offset?: number }} [opts]
+ */
+export async function listBillingCycles(memberId, opts = {}) {
+  return api().listBillingCycles(memberId, opts);
+}
+
+/** @param {string} memberId */
+export async function getLatestClosedBillingCycle(memberId) {
+  return api().getLatestClosedBillingCycle(memberId);
+}
+
 export async function listConsoleUsers() {
   return api().listConsoleUsers();
 }
@@ -182,14 +213,14 @@ export async function listUsageEventsInRange(memberId, startMs, endMs) {
   return api().listUsageEventsInRange(memberId, startMs, endMs);
 }
 
-/** @param {number} startMs @param {number} endMs */
-export async function aggregateUsageModelsInRange(startMs, endMs) {
-  return api().aggregateUsageModelsInRange(startMs, endMs);
+/** @param {number} startMs @param {number} endMs @param {string[]} [excludeMemberIds] */
+export async function aggregateUsageModelsInRange(startMs, endMs, excludeMemberIds) {
+  return api().aggregateUsageModelsInRange(startMs, endMs, excludeMemberIds);
 }
 
-/** @param {string} model @param {number} startMs @param {number} endMs */
-export async function aggregateUsageModelAccountsInRange(model, startMs, endMs) {
-  return api().aggregateUsageModelAccountsInRange(model, startMs, endMs);
+/** @param {string} model @param {number} startMs @param {number} endMs @param {string[]} [excludeMemberIds] */
+export async function aggregateUsageModelAccountsInRange(model, startMs, endMs, excludeMemberIds) {
+  return api().aggregateUsageModelAccountsInRange(model, startMs, endMs, excludeMemberIds);
 }
 
 /** 账号使用人席位（按主机）。 */

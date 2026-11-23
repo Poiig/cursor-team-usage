@@ -36,15 +36,18 @@
             </div>
           </div>
           <div class="toolbar">
-            <nav class="cycle-tabs" aria-label="账单周期">
-              <a class="cycle-tab active" data-cycle="current" href="#">当前周期</a>
-              <a class="cycle-tab" data-cycle="prev" href="#">上个周期</a>
-            </nav>
             <button type="button" class="btn" id="btnDetailRefresh">刷新用量</button>
             <button type="button" class="btn" id="btnUserRules">下载用户规则</button>
           </div>
         </div>
-        <section id="prevCycle" class="prev-cycle hidden" aria-label="上个账单周期"></section>
+        <section class="cycle-usage-section" aria-label="各订阅周期用量">
+          <div class="panel-head usage-head">
+            <h3>各订阅周期用量</h3>
+            <p class="muted cycle-usage-note">仅本周期与上个周期（已落库）。假估窗不入库。用完日只看本段累计%。点击一行看明细。</p>
+          </div>
+          <div class="table-wrap" id="cycleUsageTable"></div>
+        </section>
+        <section id="cycleDetail" class="prev-cycle hidden" aria-label="订阅周期明细"></section>
         <div id="currentCycleView">
         <div id="detailMeters" class="panel-lines"></div>
         <div class="charts">

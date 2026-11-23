@@ -101,53 +101,110 @@
         <div class="panel-head">
           <h2>报表</h2>
           <div class="toolbar">
+            <button type="button" class="btn hidden" id="btnPreloadPrevCycle">补齐缓存</button>
             <button type="button" class="btn" id="btnRefreshReports">刷新</button>
           </div>
         </div>
-        <div class="stats report-kpis" id="reportKpis"></div>
-        <div class="charts report-charts">
-          <article class="chart-card chart-card--wide">
-            <h3>团队每日 Tokens（近 30 日）</h3>
-            <div id="chartTeamTokens" class="chart-box chart-box--clickable"></div>
-          </article>
-          <article class="chart-card">
-            <h3>团队每日花费（近 30 日）</h3>
-            <div id="chartTeamSpend" class="chart-box chart-box--clickable"></div>
-          </article>
-          <article class="chart-card">
-            <h3>团队每日请求次数（近 30 日）</h3>
-            <div id="chartTeamRequests" class="chart-box chart-box--clickable"></div>
-          </article>
-          <article class="chart-card">
-            <h3>团队平均用量 %（按日）</h3>
-            <div id="chartTeamUsage" class="chart-box"></div>
-          </article>
-          <article class="chart-card">
-            <h3>近 14 日切换量</h3>
-            <div id="chartSwitchDaily" class="chart-box"></div>
-          </article>
-          <article class="chart-card">
-            <h3>各账号剩余用量 %</h3>
-            <p class="chart-note">从多到少；红色剩余 &lt;20%，黄色 &lt;40%。</p>
-            <div id="chartAccountUsage" class="chart-box chart-box--scroll"></div>
-          </article>
-          <article class="chart-card">
-            <h3>各账号预计期末用量 %</h3>
-            <p class="chart-note">按本周期工作日节奏推算；红色会超额，黄色 ≥90%。</p>
-            <div id="chartAccountPace" class="chart-box chart-box--scroll"></div>
-          </article>
-          <article class="chart-card">
-            <h3>各账号近 30 日 Tokens</h3>
-            <div id="chartAccountTokens" class="chart-box chart-box--scroll"></div>
-          </article>
-          <article class="chart-card">
-            <h3>今日模型分布（Tokens）</h3>
-            <div id="chartTodayModels" class="chart-box chart-box--scroll"></div>
-          </article>
-          <article class="chart-card">
-            <h3>按人切换量</h3>
-            <div id="chartSwitchByUser" class="chart-box chart-box--scroll"></div>
-          </article>
+        <div class="reports-layout">
+          <nav class="reports-nav" aria-label="报表类型">
+            <button type="button" class="reports-nav-item active" data-report="overview">当前概览</button>
+            <button type="button" class="reports-nav-item" data-report="prev">上个周期</button>
+          </nav>
+          <div class="reports-main">
+            <div class="reports-pane" data-report-pane="overview">
+              <div class="stats report-kpis" id="reportKpis"></div>
+              <div class="charts report-charts">
+                <article class="chart-card chart-card--wide">
+                  <h3>团队每日 Tokens（近 30 日）</h3>
+                  <div id="chartTeamTokens" class="chart-box chart-box--clickable"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>团队每日花费（近 30 日）</h3>
+                  <div id="chartTeamSpend" class="chart-box chart-box--clickable"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>团队每日请求次数（近 30 日）</h3>
+                  <div id="chartTeamRequests" class="chart-box chart-box--clickable"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>团队平均用量 %（按日）</h3>
+                  <div id="chartTeamUsage" class="chart-box"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>近 14 日切换量</h3>
+                  <div id="chartSwitchDaily" class="chart-box"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>月付 · 各账号剩余用量 %</h3>
+                  <p class="chart-note">普通月订；Pro+/Super 靠前。红 &lt;20%，黄 &lt;40%。点条进详情。</p>
+                  <div id="chartAccountUsageMonthly" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>周付 · 各账号剩余用量 %</h3>
+                  <p class="chart-note">XAI / 周额度；与月付窗口不同，勿直接对比。点条进详情。</p>
+                  <div id="chartAccountUsageWeekly" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>月付 · 各账号预计期末用量 %</h3>
+                  <p class="chart-note">按本月工作日节奏；红会超额，黄 ≥90%。</p>
+                  <div id="chartAccountPaceMonthly" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>周付 · 各账号预计期末用量 %</h3>
+                  <p class="chart-note">按本周工作日节奏；红会超额，黄 ≥90%。</p>
+                  <div id="chartAccountPaceWeekly" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>月付 · 各账号近 30 日 Tokens</h3>
+                  <p class="chart-note">不计 Free；点条进详情。</p>
+                  <div id="chartAccountTokensMonthly" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>周付 · 各账号近 30 日 Tokens</h3>
+                  <p class="chart-note">不计 Free；点条进详情。</p>
+                  <div id="chartAccountTokensWeekly" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>今日模型分布（Tokens）</h3>
+                  <p class="chart-note">不计 Free；点模型下钻各账号用量。</p>
+                  <div id="chartTodayModels" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>按人切换量</h3>
+                  <div id="chartSwitchByUser" class="chart-box chart-box--scroll"></div>
+                </article>
+              </div>
+            </div>
+
+            <div class="reports-pane hidden" data-report-pane="prev" id="prevCycleReport">
+              <p class="chart-note" id="prevCycleReportNote">
+                周订（X / XAI）按「上一周额度窗」；普通订阅按「上一自然月」。金额分两列：用量价值含套餐内估值，按量花费仅 USAGE_BASED 实付（Pro 未超套餐常为 $0）。点柱图或表行可进该账号上个周期详情。
+              </p>
+              <div class="stats report-kpis" id="prevCycleReportKpis"></div>
+              <div class="prev-cohorts" id="prevCycleCohorts" aria-label="套餐分群对比"></div>
+              <div class="charts report-charts">
+                <article class="chart-card">
+                  <h3>周订 · 上个周期 Tokens（档位优先，可点下钻）</h3>
+                  <div id="chartPrevWeeklyTokens" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>月订 · 上个周期 Tokens（Pro+/Super 靠前，可点下钻）</h3>
+                  <div id="chartPrevMonthlyTokens" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card">
+                  <h3>上个周期团队模型（已缓存账号合计）</h3>
+                  <div id="chartPrevCycleModels" class="chart-box chart-box--scroll"></div>
+                </article>
+                <article class="chart-card chart-card--wide">
+                  <div class="prev-table-head">
+                    <h3>各账号上个周期明细</h3>
+                    <div class="prev-drill-filters" id="prevCycleDrillFilters" hidden></div>
+                  </div>
+                  <div class="table-wrap" id="prevCycleAccountTable"></div>
+                </article>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 

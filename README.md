@@ -160,6 +160,10 @@ OAuth 走 Cursor 官方 `loginDeepControl` + PKCE 轮询（与 OpenUsage 同口�
 | 套餐 | `GET /api/auth/stripe` |
 | 用量百分比 | `GET /api/usage-summary` |
 | 周期用量 | Connect `GetCurrentPeriodUsage` |
+| 计划 / 是否统一账号 | Connect `GetPlanInfo`（含 `isMerged`） |
+| 普通 Credits | Connect `GetCreditGrantsBalance` |
+| 统一账号 Credits | Connect `GetComplatCreditBalance` |
+| 周池 / Additional usage | `GET /api/dashboard/v2/usage-status` |
 | 请求事件 | `POST /api/dashboard/get-filtered-usage-events` |
 | 花费上限 | `POST /api/dashboard/get-hard-limit` |
 | Grok Bot | Connect `GetSandUsageStatus` |

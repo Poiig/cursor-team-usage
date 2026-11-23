@@ -220,6 +220,33 @@ export async function init() {
     `CREATE INDEX IF NOT EXISTS idx_usage_events_member_model_ts ON usage_events (member_id, model, ts_ms DESC)`,
   );
   await db().query(`
+    CREATE TABLE IF NOT EXISTS member_billing_cycles (
+      member_id TEXT NOT NULL,
+      start_iso TEXT NOT NULL,
+      end_iso TEXT NOT NULL,
+      cycle_kind TEXT NOT NULL,
+      plan_name TEXT,
+      membership_type TEXT,
+      source TEXT NOT NULL DEFAULT 'billing',
+      status TEXT NOT NULL,
+      total_pct DOUBLE PRECISION,
+      auto_pct DOUBLE PRECISION,
+      api_pct DOUBLE PRECISION,
+      peak_total DOUBLE PRECISION,
+      exhausted_date TEXT,
+      days_to_exhaust INTEGER,
+      totals JSONB,
+      models JSONB,
+      closed_at TIMESTAMPTZ,
+      stored_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (member_id, start_iso)
+    )
+  `);
+  await db().query(
+    `CREATE INDEX IF NOT EXISTS idx_billing_cycles_member_start ON member_billing_cycles (member_id, start_iso DESC)`,
+  );
+  await db().query(`
     CREATE TABLE IF NOT EXISTS console_admin (
       username TEXT PRIMARY KEY,
       password_hash TEXT NOT NULL,
@@ -665,6 +692,7 @@ export async function rollbackMemberSession(id) {
 /** @param {string} id */
 export async function deleteMember(id) {
   await db().query('DELETE FROM usage_events WHERE member_id = $1', [id]);
+  await db().query('DELETE FROM member_billing_cycles WHERE member_id = $1', [id]);
   const res = await db().query('DELETE FROM members WHERE id = $1', [id]);
   if (!res.rowCount) throw new Error('成员不存在');
 }
@@ -870,9 +898,18 @@ export async function listUsageEventsInRange(memberId, startMs, endMs) {
  * 全团队按模型汇总 tokens（今日排行等报表用，直接读落库事件）。
  * @param {number} startMs
  * @param {number} endMs
+ * @param {string[]} [excludeMemberIds] 报表排除 Free 等
  * @returns {Promise<Array<{ model: string, tokens: number, accounts: number }>>}
  */
-export async function aggregateUsageModelsInRange(startMs, endMs) {
+export async function aggregateUsageModelsInRange(startMs, endMs, excludeMemberIds = []) {
+  const excl = [...new Set((excludeMemberIds || []).map(String).filter(Boolean))];
+  const params = [startMs, endMs];
+  let notIn = '';
+  if (excl.length) {
+    const start = params.length + 1;
+    notIn = `AND member_id NOT IN (${excl.map((_, i) => `$${start + i}`).join(',')})`;
+    params.push(...excl);
+  }
   const { rows } = await db().query(
     `SELECT model,
             COALESCE(SUM(total_tokens), 0)::bigint AS tokens,
@@ -881,9 +918,10 @@ export async function aggregateUsageModelsInRange(startMs, endMs) {
      WHERE ts_ms >= $1 AND ts_ms < $2
        AND model IS NOT NULL AND model <> ''
        AND total_tokens > 0
+       ${notIn}
      GROUP BY model
      ORDER BY tokens DESC, model ASC`,
-    [startMs, endMs],
+    params,
   );
   return rows.map((r) => ({
     model: String(r.model),
@@ -897,19 +935,29 @@ export async function aggregateUsageModelsInRange(startMs, endMs) {
  * @param {string} model
  * @param {number} startMs
  * @param {number} endMs
+ * @param {string[]} [excludeMemberIds]
  * @returns {Promise<Array<{ memberId: string, tokens: number }>>}
  */
-export async function aggregateUsageModelAccountsInRange(model, startMs, endMs) {
+export async function aggregateUsageModelAccountsInRange(model, startMs, endMs, excludeMemberIds = []) {
   const name = String(model || '').trim();
   if (!name) return [];
+  const excl = [...new Set((excludeMemberIds || []).map(String).filter(Boolean))];
+  const params = [startMs, endMs, name];
+  let notIn = '';
+  if (excl.length) {
+    const start = params.length + 1;
+    notIn = `AND member_id NOT IN (${excl.map((_, i) => `$${start + i}`).join(',')})`;
+    params.push(...excl);
+  }
   const { rows } = await db().query(
     `SELECT member_id,
             COALESCE(SUM(total_tokens), 0)::bigint AS tokens
      FROM usage_events
      WHERE ts_ms >= $1 AND ts_ms < $2 AND model = $3 AND total_tokens > 0
+       ${notIn}
      GROUP BY member_id
      ORDER BY tokens DESC`,
-    [startMs, endMs, name],
+    params,
   );
   return rows.map((r) => ({
     memberId: String(r.member_id),
@@ -984,6 +1032,12 @@ export async function saveSyncResult(id, result) {
         id,
       ],
     );
+    try {
+      const { persistMemberBillingCycle } = await import('./member-billing-cycles.js');
+      await persistMemberBillingCycle(id, member, result.snapshot, history);
+    } catch (e) {
+      console.warn('[billing-cycles] 落库失败', id, e?.message || e);
+    }
   } else if (result.transient && member.lastSnapshot) {
     // 短暂网络失败：保留上次成功数据，不写红条；last_synced_at 不动以便扫描再刷
     await db().query('UPDATE members SET last_error=NULL, updated_at=$1 WHERE id=$2', [now, id]);
@@ -1026,6 +1080,140 @@ export async function setPrevCycleSummary(id, summary) {
     JSON.stringify(summary),
     id,
   ]);
+}
+
+/** @param {any} r */
+function billingCycleFromRow(r) {
+  if (!r) return null;
+  return {
+    memberId: String(r.member_id),
+    startIso: String(r.start_iso),
+    endIso: String(r.end_iso),
+    cycleKind: r.cycle_kind === 'weekly' ? 'weekly' : 'monthly',
+    planName: r.plan_name != null ? String(r.plan_name) : null,
+    membershipType: r.membership_type != null ? String(r.membership_type) : null,
+    source: 'billing',
+    status: r.status === 'closed' ? 'closed' : 'current',
+    totalPct: r.total_pct == null ? null : Number(r.total_pct),
+    autoPct: r.auto_pct == null ? null : Number(r.auto_pct),
+    apiPct: r.api_pct == null ? null : Number(r.api_pct),
+    peakTotal: r.peak_total == null ? null : Number(r.peak_total),
+    exhaustedDate: r.exhausted_date != null ? String(r.exhausted_date) : null,
+    daysToExhaust: r.days_to_exhaust == null ? null : Number(r.days_to_exhaust),
+    totals: r.totals ?? null,
+    models: Array.isArray(r.models) ? r.models : null,
+    closedAt: r.closed_at ? new Date(r.closed_at).toISOString() : null,
+    storedAt: r.stored_at ? new Date(r.stored_at).toISOString() : '',
+    updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : '',
+  };
+}
+
+/**
+ * @param {import('./member-billing-cycles.js').BillingCycleRow} row
+ */
+export async function upsertBillingCycle(row) {
+  if (!row?.memberId || !row?.startIso) return;
+  if (row.status === 'current') {
+    await db().query(
+      `UPDATE member_billing_cycles SET status='closed', updated_at=$1::timestamptz
+       WHERE member_id=$2 AND status='current' AND start_iso<>$3`,
+      [row.updatedAt || new Date().toISOString(), row.memberId, row.startIso],
+    );
+  }
+  await db().query(
+    `INSERT INTO member_billing_cycles (
+      member_id, start_iso, end_iso, cycle_kind, plan_name, membership_type, source, status,
+      total_pct, auto_pct, api_pct, peak_total, exhausted_date, days_to_exhaust,
+      totals, models, closed_at, stored_at, updated_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+      $15::jsonb,$16::jsonb,$17::timestamptz,$18::timestamptz,$19::timestamptz
+    )
+    ON CONFLICT (member_id, start_iso) DO UPDATE SET
+      end_iso=EXCLUDED.end_iso,
+      cycle_kind=EXCLUDED.cycle_kind,
+      plan_name=EXCLUDED.plan_name,
+      membership_type=EXCLUDED.membership_type,
+      source=EXCLUDED.source,
+      status=EXCLUDED.status,
+      total_pct=EXCLUDED.total_pct,
+      auto_pct=EXCLUDED.auto_pct,
+      api_pct=EXCLUDED.api_pct,
+      peak_total=EXCLUDED.peak_total,
+      exhausted_date=EXCLUDED.exhausted_date,
+      days_to_exhaust=EXCLUDED.days_to_exhaust,
+      totals=COALESCE(EXCLUDED.totals, member_billing_cycles.totals),
+      models=COALESCE(EXCLUDED.models, member_billing_cycles.models),
+      closed_at=COALESCE(EXCLUDED.closed_at, member_billing_cycles.closed_at),
+      updated_at=EXCLUDED.updated_at`,
+    [
+      row.memberId,
+      row.startIso,
+      row.endIso,
+      row.cycleKind,
+      row.planName,
+      row.membershipType,
+      row.source || 'billing',
+      row.status,
+      row.totalPct,
+      row.autoPct,
+      row.apiPct,
+      row.peakTotal,
+      row.exhaustedDate,
+      row.daysToExhaust,
+      row.totals != null ? JSON.stringify(row.totals) : null,
+      row.models != null ? JSON.stringify(row.models) : null,
+      row.closedAt,
+      row.storedAt || new Date().toISOString(),
+      row.updatedAt || new Date().toISOString(),
+    ],
+  );
+}
+
+/**
+ * @param {string} memberId
+ * @param {import('./member-billing-cycles.js').BillingCycleRow} row
+ */
+export async function closeBillingCycle(memberId, row) {
+  await upsertBillingCycle({
+    ...row,
+    memberId,
+    status: 'closed',
+    closedAt: row.closedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** @param {string} memberId */
+export async function getCurrentBillingCycle(memberId) {
+  const { rows } = await db().query(
+    `SELECT * FROM member_billing_cycles WHERE member_id=$1 AND status='current' ORDER BY start_iso DESC LIMIT 1`,
+    [memberId],
+  );
+  return billingCycleFromRow(rows[0]);
+}
+
+/**
+ * @param {string} memberId
+ * @param {{ limit?: number, offset?: number }} [opts]
+ */
+export async function listBillingCycles(memberId, opts = {}) {
+  const limit = Math.max(1, Math.min(100, Number(opts.limit) || 20));
+  const offset = Math.max(0, Number(opts.offset) || 0);
+  const { rows } = await db().query(
+    `SELECT * FROM member_billing_cycles WHERE member_id=$1 ORDER BY start_iso DESC LIMIT $2 OFFSET $3`,
+    [memberId, limit, offset],
+  );
+  return rows.map(billingCycleFromRow);
+}
+
+/** @param {string} memberId */
+export async function getLatestClosedBillingCycle(memberId) {
+  const { rows } = await db().query(
+    `SELECT * FROM member_billing_cycles WHERE member_id=$1 AND status='closed' ORDER BY start_iso DESC LIMIT 1`,
+    [memberId],
+  );
+  return billingCycleFromRow(rows[0]);
 }
 
 /**

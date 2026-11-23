@@ -17,9 +17,11 @@ import {
   fieldForProgressLabel,
   formatDateTime,
   formatDeltaVsYesterday,
+  exhaustionFromPercentDays,
   formatPlanLabel,
   formatSpendPart,
   formatTokens,
+  isSyntheticBillingWindow,
   loadSettings,
   money,
   planBadgeClass,
@@ -53,8 +55,9 @@ const els = {
   btnLoadEvents: document.getElementById('btnLoadEvents'),
   btnExportCsv: document.getElementById('btnExportCsv'),
   btnUserRules: document.getElementById('btnUserRules'),
-  prevCycle: document.getElementById('prevCycle'),
+  cycleDetail: document.getElementById('cycleDetail'),
   currentCycleView: document.getElementById('currentCycleView'),
+  cycleUsageTable: document.getElementById('cycleUsageTable'),
 };
 
 /** @type {object | null} */
@@ -389,6 +392,163 @@ function renderDetailMeta(member) {
   return chips.join('');
 }
 
+/** @type {any[]} */
+let cycleUsageRows = [];
+/** 当前打开的周期起点 ISO（用于表格高亮）。 */
+let selectedCycleFrom = null;
+
+/** 本地日历 yyyy-MM-dd（与落库 usagePercentHistory.date 一致）。 */
+function localDayKeyMs(ms) {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * 优先读落库 billingCycles（本 + 上）；未同步过则用当前官方窗兜底（滤假窗）。
+ * @param {any} m
+ */
+function buildCycleUsageRowsClient(m) {
+  const bc = m?.billingCycles;
+  /** @type {any[]} */
+  const fromDb = [];
+  if (bc?.current?.startIso) fromDb.push({ ...bc.current, current: true });
+  if (bc?.previous?.startIso) fromDb.push({ ...bc.previous, current: false });
+  if (fromDb.length) {
+    return fromDb.sort((a, b) => (Date.parse(b.startIso) || 0) - (Date.parse(a.startIso) || 0));
+  }
+
+  const snap = m?.lastSnapshot;
+  const win = snap?.window;
+  if (!win?.startIso || isSyntheticBillingWindow(win)) {
+    return [];
+  }
+  // 表尚未写入时：至少展示当前官方窗
+  const history = Array.isArray(m?.usagePercentHistory) ? m.usagePercentHistory : [];
+  const startMs = Date.parse(win.startIso);
+  const endMs = Date.parse(win.endIso || '') || Date.now();
+  const startDay = Number.isFinite(startMs) ? localDayKeyMs(startMs) : '';
+  const lastDay = Number.isFinite(endMs)
+    ? localDayKeyMs(Math.max(startMs || endMs, endMs - 1))
+    : localDayKeyMs(Date.now());
+  const days = history.filter(
+    (r) => r?.date && (!startDay || r.date >= startDay) && (!lastDay || r.date <= lastDay),
+  );
+  const meters = snap.meters || snap.planMeters || {};
+  const total = meters.totalPercentUsed ?? meters.primaryPercent ?? null;
+  const ex = exhaustionFromPercentDays(days, startDay, total);
+  let cycleKind = null;
+  const dur = endMs - startMs;
+  if (Number.isFinite(dur) && dur >= 6 * 86400000 && dur <= 8 * 86400000) cycleKind = 'weekly';
+  else if (Number.isFinite(startMs)) cycleKind = 'monthly';
+  return [
+    {
+      startIso: win.startIso,
+      endIso: win.endIso || null,
+      current: true,
+      cycleKind,
+      planName: snap?.plan?.planName || m?.planName || null,
+      membershipType: snap?.plan?.membershipType || m?.membershipType || null,
+      total: total == null ? null : Number(total),
+      auto: meters.autoPercentUsed ?? null,
+      api: meters.apiPercentUsed ?? null,
+      exhaustedDate: ex.exhaustedDate,
+      daysToExhaust: ex.daysToExhaust,
+      peakTotal: ex.peakTotal,
+      daySamples: ex.daySamples,
+    },
+  ];
+}
+
+/** 账号详情：本周期 + 上个周期（最多两行）。 */
+function renderCycleUsageTable() {
+  if (!els.cycleUsageTable || !member) return;
+  cycleUsageRows = buildCycleUsageRowsClient(member);
+  const slice = cycleUsageRows.slice(0, 2);
+  const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? '—' : `${Number(v).toFixed(1)}%`);
+  const kindLabel = (k) => (k === 'weekly' ? '周订' : k === 'monthly' ? '月订' : '—');
+  const rows = slice
+    .map((r) => {
+      const startMs = Date.parse(r.startIso || '');
+      const endMs = Date.parse(r.endIso || '') || Date.now();
+      const cycleDays =
+        Number.isFinite(startMs) && endMs > startMs
+          ? Math.max(1, Math.round((endMs - startMs) / 86400000))
+          : r.cycleKind === 'weekly'
+            ? 7
+            : 30;
+      // 只有知道用完日、且早于周期末日才标超速；日期未知不猜
+      const dayN = r.daysToExhaust != null ? Number(r.daysToExhaust) : null;
+      const early =
+        r.exhaustedDate != null &&
+        dayN != null &&
+        Number.isFinite(dayN) &&
+        dayN < cycleDays;
+      const usedUp =
+        r.exhaustedDate != null || (r.peakTotal != null && Number(r.peakTotal) >= 100);
+      let exhaustHtml;
+      if (!usedUp) {
+        exhaustHtml = '<span class="muted">未用完</span>';
+      } else if (early) {
+        exhaustHtml = `<span class="cycle-usage-speed" title="额度在周期结束前用尽">超速 · 第 ${escapeHtml(String(dayN))} 天用完 · ${escapeHtml(r.exhaustedDate)}</span>`;
+      } else if (r.exhaustedDate) {
+        exhaustHtml = `<span class="muted">周期末用完 · 第 ${escapeHtml(String(dayN ?? '—'))} 天 · ${escapeHtml(r.exhaustedDate)}</span>`;
+      } else {
+        exhaustHtml = '<span class="muted" title="峰值已满但缺按日快照，无法判断是否超速">已用完（日期未知）</span>';
+      }
+      const selected =
+        selectedCycleFrom &&
+        r.startIso &&
+        Math.abs(Date.parse(r.startIso) - Date.parse(selectedCycleFrom)) < 60_000;
+      const endIso = r.endIso || (r.current ? new Date().toISOString() : '');
+      const planRaw = r.planName || r.membershipType || '';
+      const planLabel = planRaw ? formatPlanLabel(planRaw) : '未知';
+      const planCell = planRaw
+        ? `<span class="badge plan ${planBadgeClass(planRaw)}">${escapeHtml(planLabel)}</span>`
+        : '<span class="muted">—</span>';
+      return `<tr class="cycle-usage-row${r.current ? ' cycle-usage-current' : ''}${selected ? ' cycle-usage-selected' : ''}" data-start="${escapeHtml(r.startIso || '')}" data-end="${escapeHtml(endIso)}" tabindex="0" role="link" title="查看该周期明细">
+        <td>${r.current ? '<span class="badge ok">当前</span>' : '<span class="badge muted">已结束</span>'}</td>
+        <td>${planCell}</td>
+        <td>${escapeHtml(kindLabel(r.cycleKind))}</td>
+        <td class="muted">${escapeHtml(formatDateTime(r.startIso) || '—')} → ${escapeHtml(formatDateTime(r.endIso) || (r.current ? '进行中' : '—'))}</td>
+        <td class="num">${escapeHtml(pct(r.total))}</td>
+        <td class="num">${escapeHtml(pct(r.auto))}</td>
+        <td class="num">${escapeHtml(pct(r.api))}</td>
+        <td class="num">${escapeHtml(pct(r.peakTotal))}</td>
+        <td>${exhaustHtml}</td>
+      </tr>`;
+    })
+    .join('');
+  els.cycleUsageTable.innerHTML = `
+    <table class="data-table cycle-usage-table">
+      <thead>
+        <tr>
+          <th>状态</th><th>套餐</th><th>周期</th><th>窗口</th>
+          <th class="num">收尾 Total%</th><th class="num">Cursor%</th><th class="num">Other%</th><th class="num">峰值%</th><th>用完时间</th>
+        </tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="9" class="muted">暂无周期记录（需至少跨过一次账单重置）</td></tr>'}</tbody>
+    </table>`;
+  els.cycleUsageTable.querySelectorAll('tr.cycle-usage-row').forEach((tr) => {
+    const open = () => {
+      const from = tr.getAttribute('data-start');
+      const to = tr.getAttribute('data-end');
+      if (!from || !to) return;
+      history.pushState(null, '', cycleRangeHref(from, to));
+      void applyCycleRangeView();
+    };
+    tr.addEventListener('click', open);
+    tr.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
 function renderMember() {
   if (!member) return;
   const idn = accountIdentity(member, settings.privacyMode);
@@ -401,6 +561,8 @@ function renderMember() {
     : '';
   if (els.meta) els.meta.innerHTML = planBadge + renderDetailMeta(member);
 
+  renderCycleUsageTable();
+
   const pace = computeUsagePace(member);
   if (els.pace) {
     if (!pace) {
@@ -409,7 +571,7 @@ function renderMember() {
     } else {
       els.pace.classList.remove('hidden');
       const badgeClass =
-        pace.status === 'danger' ? 'danger' : pace.status === 'warn' ? 'warn' : 'ok';
+        pace.status === 'danger' ? 'speeding' : pace.status === 'warn' ? 'warn' : 'ok';
       els.pace.innerHTML = `
         <div class="pace-head">
           <h3>用量节奏预警</h3>
@@ -595,6 +757,7 @@ if (!memberId) {
       if (weekly && els.eventsDays && Number(els.eventsDays.value) === 1) {
         els.eventsDays.value = '30';
       }
+      void applyCycleRangeView();
       return loadEvents({ reset: true, forceSync: true });
     })
     .catch((e) => toast(e.message || String(e)));
@@ -617,8 +780,9 @@ els.btnRefresh?.addEventListener('click', async () => {
   }
 });
 
-/** 上个周期：最终使用率 + 请求/Tokens/金额 + Cursor/Other 分组 + 模型占比 + 按日 + 计费类型。 */
-function renderPrevCycle(d) {
+/** 某订阅周期明细：最终使用率 + 请求/Tokens/金额 + 模型 + 按日。 */
+function renderCycleDetail(d) {
+  if (!els.cycleDetail) return;
   const t = d.totals;
   const fp = d.finalPercents;
   const pctText = (v) => (v == null ? '—' : `${Number(v).toFixed(1)}%`);
@@ -635,9 +799,11 @@ function renderPrevCycle(d) {
   };
   const fpNote = !fp
     ? '<p class="muted">没有该周期的使用率记录（看板接入此账号晚于该周期结束）。</p>'
-    : fp.approximate
-      ? `<p class="muted">近似值：取重置前一天（${escapeHtml(fp.closedAt || '')}）日终快照，不含重置当天的用量。</p>`
-      : `<p class="muted">周期切换前最后一次同步（${escapeHtml(formatDateTime(fp.closedAt) || '—')}）的值。</p>`;
+    : fp.current
+      ? `<p class="muted">当前周期实时值（${escapeHtml(formatDateTime(fp.closedAt) || '—')}）。</p>`
+      : fp.approximate
+        ? `<p class="muted">近似值：取重置前一天（${escapeHtml(fp.closedAt || '')}）日终快照，不含重置当天的用量。</p>`
+        : `<p class="muted">周期切换前最后一次同步（${escapeHtml(formatDateTime(fp.closedAt) || '—')}）的值。</p>`;
   const stat = (k, v, sub = '') => `
     <div class="prev-stat">
       <span class="k">${escapeHtml(k)}</span>
@@ -652,7 +818,7 @@ function renderPrevCycle(d) {
       <td class="num">${tok(g.totalTokens)}</td><td class="num">${g.tokenShare}%</td>
       <td class="num">${money(g.dollars)}</td><td class="num">${g.dollarShare}%</td>
     </tr>`;
-  const modelRows = d.models
+  const modelRows = (d.models || [])
     .map(
       (m) => `
     <tr>
@@ -666,7 +832,7 @@ function renderPrevCycle(d) {
     </tr>`,
     )
     .join('');
-  const kindRows = d.kinds
+  const kindRows = (d.kinds || [])
     .map(
       (k) =>
         `<tr><td>${escapeHtml(k.kind)}</td><td class="num">${k.requests}</td><td class="num">${k.requestShare}%</td><td class="num">${tok(k.totalTokens)}</td><td class="num">${money(k.dollars)}</td></tr>`,
@@ -677,11 +843,20 @@ function renderPrevCycle(d) {
       ? `<span class="badge ok">已落库 · ${escapeHtml(formatDateTime(d.storedAt) || '')}</span>`
       : d.source === 'cursor'
         ? '<span class="badge ok">Cursor 实时</span>'
-        : `<span class="badge warn" title="${escapeHtml(d.fetchError || '')}">本地缓存（可能不全）</span>`;
+        : `<span class="badge warn" title="${escapeHtml(d.fetchError || '')}">本地事件</span>`;
+  const kindBadge =
+    d.cycleKind === 'weekly'
+      ? '<span class="badge ok" title="The X / XAI 周额度窗">周订</span>'
+      : d.cycleKind === 'monthly'
+        ? '<span class="badge muted" title="普通订阅自然月账单窗">月订</span>'
+        : '';
+  const title = fp?.current ? '当前订阅周期' : '订阅周期明细';
 
-  els.prevCycle.innerHTML = `
+  els.cycleDetail.innerHTML = `
     <div class="prev-cycle-head">
-      <h3>上个账单周期</h3>
+      <button type="button" class="btn" id="btnBackCycleList">← 返回</button>
+      <h3>${escapeHtml(title)}</h3>
+      ${kindBadge}
       <span class="muted">${escapeHtml(formatDateTime(d.startIso) || '')} → ${escapeHtml(formatDateTime(d.endIso) || '')}</span>
       ${sourceBadge}
     </div>
@@ -699,7 +874,8 @@ function renderPrevCycle(d) {
           ${stat('请求次数', String(t.requests))}
           ${stat('Tokens', tok(t.totalTokens), `输入 ${tok(t.inputTokens)} · 输出 ${tok(t.outputTokens)}`)}
           ${stat('缓存', tok(t.cacheReadTokens + t.cacheWriteTokens), `读 ${tok(t.cacheReadTokens)} · 写 ${tok(t.cacheWriteTokens)}`)}
-          ${stat('用量价值', money(t.dollars), `其中实际计费 ${money(t.billedDollars)}`)}
+          ${stat('用量价值', money(t.dollars), '含套餐内估值（Pro 常有）')}
+          ${stat('按量花费', money(t.billedDollars), '仅 USAGE_BASED；未超套餐多为 $0')}
         </div>
       </div>
     </div>
@@ -711,7 +887,7 @@ function renderPrevCycle(d) {
       </table></div>
     </div>
     <div class="prev-card">
-      <h4>按模型（${d.models.length} 个，按 Tokens 排序）</h4>
+      <h4>按模型（${(d.models || []).length} 个，按 Tokens 排序）</h4>
       <div class="table-wrap"><table class="data-table">
         <thead><tr><th>模型</th><th>请求</th><th>占比</th><th>Tokens</th><th>Tokens 占比</th><th>输入 / 输出</th><th>缓存</th><th>价值</th><th>占比</th></tr></thead>
         <tbody>${modelRows || '<tr><td colspan="9" class="muted">该周期没有用量事件</td></tr>'}</tbody>
@@ -731,55 +907,97 @@ function renderPrevCycle(d) {
   `;
   renderBarChart(
     document.getElementById('prevChartRequests'),
-    d.daily.map((x) => ({ label: x.date, value: x.requests })),
+    (d.daily || []).map((x) => ({ label: x.date, value: x.requests })),
     '#a78bfa',
   );
   renderBarChart(
     document.getElementById('prevChartTokens'),
-    d.daily.map((x) => ({ label: x.date, value: x.tokens })),
+    (d.daily || []).map((x) => ({ label: x.date, value: x.tokens })),
     '#4daafc',
     (v) => (v <= 0 ? '0' : formatTokens(v)),
   );
+  document.getElementById('btnBackCycleList')?.addEventListener('click', () => {
+    history.pushState(null, '', cycleRangeHref(null, null));
+    void applyCycleRangeView();
+  });
 }
 
-/** 周期视图写在 URL（?cycle=prev），刷新 / 后退 / 分享都停在同一视图。 */
-function cycleHref(cycle) {
+/** @param {string | null} from @param {string | null} to */
+function cycleRangeHref(from, to) {
   const p = new URLSearchParams(location.search);
-  if (cycle === 'prev') p.set('cycle', 'prev');
-  else p.delete('cycle');
+  p.delete('cycle');
+  if (from && to) {
+    p.set('from', from);
+    p.set('to', to);
+  } else {
+    p.delete('from');
+    p.delete('to');
+  }
   return `${location.pathname}?${p}`;
 }
 
-/** @type {object | null} */
-let prevCycleData = null;
+/** 解析 URL 上的周期窗；兼容旧 ?cycle=prev → 上个周期窗。 */
+function parseCycleRangeFromUrl() {
+  const p = new URLSearchParams(location.search);
+  const from = p.get('from');
+  const to = p.get('to');
+  if (from && to && Number.isFinite(Date.parse(from)) && Number.isFinite(Date.parse(to))) {
+    return { from, to };
+  }
+  if (p.get('cycle') === 'prev' && member?.lastSnapshot) {
+    const endMs = Date.parse(member.lastSnapshot.window?.startIso || '');
+    if (!Number.isFinite(endMs)) return null;
+    const weekly =
+      member.lastSnapshot?.plan?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY' ||
+      member.lastSnapshot?.planMeters?.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+    const startMs = weekly
+      ? endMs - 7 * 86400000
+      : (() => {
+          const d = new Date(endMs);
+          d.setUTCMonth(d.getUTCMonth() - 1);
+          return d.getTime();
+        })();
+    return { from: new Date(startMs).toISOString(), to: new Date(endMs).toISOString() };
+  }
+  return null;
+}
 
-async function applyCycleView() {
-  const cycle = new URLSearchParams(location.search).get('cycle') === 'prev' ? 'prev' : 'current';
-  document.querySelectorAll('.cycle-tab').forEach((a) => {
-    a.classList.toggle('active', a.dataset.cycle === cycle);
-    a.setAttribute('href', cycleHref(a.dataset.cycle));
-  });
-  els.currentCycleView?.classList.toggle('hidden', cycle !== 'current');
-  els.prevCycle?.classList.toggle('hidden', cycle !== 'prev');
-  if (cycle !== 'prev' || prevCycleData || !els.prevCycle) return;
-  els.prevCycle.innerHTML = '<p class="muted">正在从 Cursor 拉取上个周期数据…</p>';
+/** @type {string} */
+let cycleDetailKey = '';
+
+async function applyCycleRangeView() {
+  const range = parseCycleRangeFromUrl();
+  selectedCycleFrom = range?.from || null;
+  const showing = Boolean(range);
+  els.currentCycleView?.classList.toggle('hidden', showing);
+  els.cycleDetail?.classList.toggle('hidden', !showing);
+  if (member) renderCycleUsageTable();
+  if (!showing) {
+    cycleDetailKey = '';
+    if (els.cycleDetail) {
+      els.cycleDetail.dataset.loaded = '0';
+      els.cycleDetail.innerHTML = '';
+    }
+    return;
+  }
+  if (!els.cycleDetail || !memberId) return;
+  const key = `${range.from}|${range.to}`;
+  if (key === cycleDetailKey && els.cycleDetail.dataset.loaded === '1') return;
+  cycleDetailKey = key;
+  els.cycleDetail.dataset.loaded = '0';
+  els.cycleDetail.innerHTML = '<p class="muted">正在加载该周期明细…</p>';
   try {
-    prevCycleData = await api(`/api/members/${encodeURIComponent(memberId)}/previous-cycle`);
-    renderPrevCycle(prevCycleData);
+    const q = `start=${encodeURIComponent(range.from)}&end=${encodeURIComponent(range.to)}`;
+    const data = await api(`/api/members/${encodeURIComponent(memberId)}/cycle-range?${q}`);
+    renderCycleDetail(data);
+    els.cycleDetail.dataset.loaded = '1';
+    els.cycleDetail.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
-    els.prevCycle.innerHTML = `<p class="muted">加载失败：${escapeHtml(e.message || String(e))}</p>`;
+    els.cycleDetail.innerHTML = `<p class="muted">加载失败：${escapeHtml(e.message || String(e))}</p>`;
   }
 }
 
-document.querySelector('.cycle-tabs')?.addEventListener('click', (event) => {
-  const a = event.target.closest('.cycle-tab');
-  if (!a) return;
-  event.preventDefault();
-  history.pushState(null, '', cycleHref(a.dataset.cycle));
-  void applyCycleView();
-});
-window.addEventListener('popstate', () => void applyCycleView());
-if (memberId) void applyCycleView();
+window.addEventListener('popstate', () => void applyCycleRangeView());
 
 els.btnLoadEvents?.addEventListener('click', () => loadEvents({ reset: true, forceSync: true }));
 els.eventsDays?.addEventListener('change', () => loadEvents({ reset: true }));

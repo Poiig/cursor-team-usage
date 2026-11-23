@@ -324,8 +324,78 @@ function ensureSchema() {
   `);
   ensureSwitchLogColumns();
   ensureUsageEventsSchema();
+  ensureBillingCyclesSchema();
   ensureAccountPresenceSchema();
   migrateConsoleAdminToUsers();
+}
+
+/** 账号账单周期摘要：一行一窗，可累积。 */
+function ensureBillingCyclesSchema() {
+  run(`
+    CREATE TABLE IF NOT EXISTS member_billing_cycles (
+      member_id TEXT NOT NULL,
+      start_iso TEXT NOT NULL,
+      end_iso TEXT NOT NULL,
+      cycle_kind TEXT NOT NULL,
+      plan_name TEXT,
+      membership_type TEXT,
+      source TEXT NOT NULL DEFAULT 'billing',
+      status TEXT NOT NULL,
+      total_pct REAL,
+      auto_pct REAL,
+      api_pct REAL,
+      peak_total REAL,
+      exhausted_date TEXT,
+      days_to_exhaust INTEGER,
+      totals_json TEXT,
+      models_json TEXT,
+      closed_at TEXT,
+      stored_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (member_id, start_iso)
+    )
+  `);
+  run(
+    `CREATE INDEX IF NOT EXISTS idx_billing_cycles_member_start ON member_billing_cycles (member_id, start_iso DESC)`,
+  );
+}
+
+/** @param {any} r */
+function billingCycleFromRow(r) {
+  if (!r) return null;
+  let totals = null;
+  let models = null;
+  try {
+    totals = r.totals_json ? JSON.parse(String(r.totals_json)) : null;
+  } catch {
+    totals = null;
+  }
+  try {
+    models = r.models_json ? JSON.parse(String(r.models_json)) : null;
+  } catch {
+    models = null;
+  }
+  return {
+    memberId: String(r.member_id),
+    startIso: String(r.start_iso),
+    endIso: String(r.end_iso),
+    cycleKind: r.cycle_kind === 'weekly' ? 'weekly' : 'monthly',
+    planName: r.plan_name != null ? String(r.plan_name) : null,
+    membershipType: r.membership_type != null ? String(r.membership_type) : null,
+    source: 'billing',
+    status: r.status === 'closed' ? 'closed' : 'current',
+    totalPct: r.total_pct == null ? null : Number(r.total_pct),
+    autoPct: r.auto_pct == null ? null : Number(r.auto_pct),
+    apiPct: r.api_pct == null ? null : Number(r.api_pct),
+    peakTotal: r.peak_total == null ? null : Number(r.peak_total),
+    exhaustedDate: r.exhausted_date != null ? String(r.exhausted_date) : null,
+    daysToExhaust: r.days_to_exhaust == null ? null : Number(r.days_to_exhaust),
+    totals,
+    models: Array.isArray(models) ? models : null,
+    closedAt: r.closed_at != null ? String(r.closed_at) : null,
+    storedAt: String(r.stored_at || ''),
+    updatedAt: String(r.updated_at || ''),
+  };
 }
 
 /** 账号使用人席位：按主机键存最近所在账号，与名册同库以便多实例共享。 */
@@ -875,6 +945,7 @@ export async function deleteMember(id) {
   const before = getOne('SELECT 1 AS x FROM members WHERE id = ?', [id]);
   if (!before) throw new Error('成员不存在');
   run('DELETE FROM usage_events WHERE member_id = ?', [id]);
+  run('DELETE FROM member_billing_cycles WHERE member_id = ?', [id]);
   run('DELETE FROM members WHERE id = ?', [id]);
   await persist();
 }
@@ -1058,9 +1129,12 @@ export async function listUsageEventsInRange(memberId, startMs, endMs) {
 /**
  * @param {number} startMs
  * @param {number} endMs
+ * @param {string[]} [excludeMemberIds] 报表排除 Free 等
  * @returns {Promise<Array<{ model: string, tokens: number, accounts: number }>>}
  */
-export async function aggregateUsageModelsInRange(startMs, endMs) {
+export async function aggregateUsageModelsInRange(startMs, endMs, excludeMemberIds = []) {
+  const excl = [...new Set((excludeMemberIds || []).map(String).filter(Boolean))];
+  const notIn = excl.length ? `AND member_id NOT IN (${excl.map(() => '?').join(',')})` : '';
   return getAll(
     `SELECT model,
             COALESCE(SUM(total_tokens), 0) AS tokens,
@@ -1069,9 +1143,10 @@ export async function aggregateUsageModelsInRange(startMs, endMs) {
      WHERE ts_ms >= ? AND ts_ms < ?
        AND model IS NOT NULL AND model <> ''
        AND total_tokens > 0
+       ${notIn}
      GROUP BY model
      ORDER BY tokens DESC, model ASC`,
-    [startMs, endMs],
+    [startMs, endMs, ...excl],
   ).map((r) => ({
     model: String(r.model),
     tokens: Number(r.tokens) || 0,
@@ -1083,19 +1158,23 @@ export async function aggregateUsageModelsInRange(startMs, endMs) {
  * @param {string} model
  * @param {number} startMs
  * @param {number} endMs
+ * @param {string[]} [excludeMemberIds]
  * @returns {Promise<Array<{ memberId: string, tokens: number }>>}
  */
-export async function aggregateUsageModelAccountsInRange(model, startMs, endMs) {
+export async function aggregateUsageModelAccountsInRange(model, startMs, endMs, excludeMemberIds = []) {
   const name = String(model || '').trim();
   if (!name) return [];
+  const excl = [...new Set((excludeMemberIds || []).map(String).filter(Boolean))];
+  const notIn = excl.length ? `AND member_id NOT IN (${excl.map(() => '?').join(',')})` : '';
   return getAll(
     `SELECT member_id AS memberId,
             COALESCE(SUM(total_tokens), 0) AS tokens
      FROM usage_events
      WHERE ts_ms >= ? AND ts_ms < ? AND model = ? AND total_tokens > 0
+       ${notIn}
      GROUP BY member_id
      ORDER BY tokens DESC`,
-    [startMs, endMs, name],
+    [startMs, endMs, name, ...excl],
   ).map((r) => ({
     memberId: String(r.memberId ?? r.member_id),
     tokens: Number(r.tokens) || 0,
@@ -1170,6 +1249,12 @@ export async function saveSyncResult(id, result) {
         id,
       ],
     );
+    try {
+      const { persistMemberBillingCycle } = await import('./member-billing-cycles.js');
+      await persistMemberBillingCycle(id, member, result.snapshot, history);
+    } catch (e) {
+      console.warn('[billing-cycles] 落库失败', id, e?.message || e);
+    }
   } else if (result.transient && member.lastSnapshot) {
     // 短暂网络失败：保留上次成功数据，不写红条；last_synced_at 不动以便扫描再刷
     run(`UPDATE members SET last_error=NULL, updated_at=? WHERE id=?`, [now, id]);
@@ -1212,6 +1297,114 @@ export async function setUsagePercentHistory(id, history) {
 export async function setPrevCycleSummary(id, summary) {
   run(`UPDATE members SET prev_cycle_summary=? WHERE id=?`, [JSON.stringify(summary), id]);
   await persist();
+}
+
+/**
+ * @param {import('./member-billing-cycles.js').BillingCycleRow} row
+ */
+export async function upsertBillingCycle(row) {
+  if (!row?.memberId || !row?.startIso) return;
+  // 同账号只保留一个 current：写入 current 前先把其它 current 降为 closed
+  if (row.status === 'current') {
+    run(
+      `UPDATE member_billing_cycles SET status='closed', updated_at=? WHERE member_id=? AND status='current' AND start_iso<>?`,
+      [row.updatedAt || new Date().toISOString(), row.memberId, row.startIso],
+    );
+  }
+  run(
+    `INSERT INTO member_billing_cycles (
+      member_id, start_iso, end_iso, cycle_kind, plan_name, membership_type, source, status,
+      total_pct, auto_pct, api_pct, peak_total, exhausted_date, days_to_exhaust,
+      totals_json, models_json, closed_at, stored_at, updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(member_id, start_iso) DO UPDATE SET
+      end_iso=excluded.end_iso,
+      cycle_kind=excluded.cycle_kind,
+      plan_name=excluded.plan_name,
+      membership_type=excluded.membership_type,
+      source=excluded.source,
+      status=excluded.status,
+      total_pct=excluded.total_pct,
+      auto_pct=excluded.auto_pct,
+      api_pct=excluded.api_pct,
+      peak_total=excluded.peak_total,
+      exhausted_date=excluded.exhausted_date,
+      days_to_exhaust=excluded.days_to_exhaust,
+      totals_json=COALESCE(excluded.totals_json, member_billing_cycles.totals_json),
+      models_json=COALESCE(excluded.models_json, member_billing_cycles.models_json),
+      closed_at=COALESCE(excluded.closed_at, member_billing_cycles.closed_at),
+      updated_at=excluded.updated_at`,
+    [
+      row.memberId,
+      row.startIso,
+      row.endIso,
+      row.cycleKind,
+      row.planName,
+      row.membershipType,
+      row.source || 'billing',
+      row.status,
+      row.totalPct,
+      row.autoPct,
+      row.apiPct,
+      row.peakTotal,
+      row.exhaustedDate,
+      row.daysToExhaust,
+      row.totals != null ? JSON.stringify(row.totals) : null,
+      row.models != null ? JSON.stringify(row.models) : null,
+      row.closedAt,
+      row.storedAt || new Date().toISOString(),
+      row.updatedAt || new Date().toISOString(),
+    ],
+  );
+  await persist();
+}
+
+/**
+ * 封存周期：强制 status=closed，并写入 totals（若有）。
+ * @param {string} memberId
+ * @param {import('./member-billing-cycles.js').BillingCycleRow} row
+ */
+export async function closeBillingCycle(memberId, row) {
+  await upsertBillingCycle({
+    ...row,
+    memberId,
+    status: 'closed',
+    closedAt: row.closedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** @param {string} memberId */
+export async function getCurrentBillingCycle(memberId) {
+  return billingCycleFromRow(
+    getOne(
+      `SELECT * FROM member_billing_cycles WHERE member_id=? AND status='current' ORDER BY start_iso DESC LIMIT 1`,
+      [memberId],
+    ),
+  );
+}
+
+/**
+ * @param {string} memberId
+ * @param {{ limit?: number, offset?: number }} [opts]
+ */
+export async function listBillingCycles(memberId, opts = {}) {
+  const limit = Math.max(1, Math.min(100, Number(opts.limit) || 20));
+  const offset = Math.max(0, Number(opts.offset) || 0);
+  return getAll(
+    `SELECT * FROM member_billing_cycles WHERE member_id=? ORDER BY start_iso DESC LIMIT ? OFFSET ?`,
+    [memberId, limit, offset],
+  ).map(billingCycleFromRow);
+}
+
+/** @param {string} memberId */
+export async function getLatestClosedBillingCycle(memberId) {
+  return billingCycleFromRow(
+    getOne(
+      `SELECT * FROM member_billing_cycles WHERE member_id=? AND status='closed' ORDER BY start_iso DESC LIMIT 1`,
+      [memberId],
+    ),
+  );
 }
 
 /** @returns {Promise<ConsoleUserRow[]>} */

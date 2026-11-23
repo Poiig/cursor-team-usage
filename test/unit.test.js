@@ -47,6 +47,12 @@ import {
   preferOnDemand,
   combineCredits,
   stripePrepaidCents,
+  complatCreditsFromBalance,
+  parseAdditionalUsage,
+  resolvePlanDisplayName,
+  shouldUseRequestBasedFallback,
+  isUsageBasedCharge,
+  eventBilledCents,
 } from '../src/cursor-api.js';
 import { formatPlanLabel, planBadgeClass, resolveSpendRow, formatSpendPart } from '../public/shared.js';
 import {
@@ -574,6 +580,140 @@ test('Credits：赠额 + Stripe 预付；负 customerBalance 才算余额', () =
   const credits = lines.find((l) => l.label === 'Credits');
   assert.equal(credits?.type, 'values');
   assert.equal(credits?.text, '$12.50 left');
+});
+
+test('统一账号：Complat Credits + Additional usage；套餐名与请求兜底', () => {
+  assert.equal(complatCreditsFromBalance({ usdRemainingCents: 581149 })?.remainingDollars, 5811.49);
+  assert.equal(complatCreditsFromBalance({}), null);
+
+  const uncapped = parseAdditionalUsage({
+    availability: 'available',
+    monthlyUsage: {
+      additionalUsageOff: false,
+      limitCents: null,
+      usedCents: 0,
+      periodStart: '2026-11-01T00:00:00.000Z',
+      resetsAt: '2026-12-01T00:00:00.000Z',
+    },
+  });
+  assert.equal(uncapped?.source, 'additional');
+  assert.equal(uncapped?.limitCents, null);
+  assert.equal(uncapped?.usedCents, 0);
+
+  assert.equal(
+    parseAdditionalUsage({
+      monthlyUsage: { additionalUsageOff: true, limitCents: 1000, usedCents: 10 },
+    }),
+    null,
+  );
+  assert.equal(
+    parseAdditionalUsage({
+      monthlyUsage: { additionalUsageOff: false, limitCents: 0, usedCents: 10 },
+    }),
+    null,
+  );
+
+  const capped = parseAdditionalUsage({
+    availability: 'available',
+    monthlyUsage: { additionalUsageOff: false, limitCents: 20000, usedCents: 1500 },
+  });
+  assert.equal(capped?.limitCents, 20000);
+  assert.equal(capped?.usedCents, 1500);
+
+  assert.equal(resolvePlanDisplayName('Pro', 'team'), 'team');
+  assert.equal(resolvePlanDisplayName('Ultra', 'unified_ultra'), 'Ultra');
+  assert.equal(resolvePlanDisplayName(null, 'enterprise'), 'enterprise');
+
+  assert.equal(
+    shouldUseRequestBasedFallback(
+      { totalPercentUsed: null, autoPercentUsed: null, apiPercentUsed: null, planLimitDollars: null },
+      'enterprise',
+    ),
+    true,
+  );
+  assert.equal(
+    shouldUseRequestBasedFallback({ totalPercentUsed: 12, planLimitDollars: null }, 'team'),
+    false,
+  );
+
+  const mergedLines = buildOpenUsagePanelLines({
+    planMeters: {
+      totalPercentUsed: 3.3,
+      includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY',
+      onDemand: {
+        enabled: true,
+        usedCents: 0,
+        limitCents: null,
+        source: 'additional',
+      },
+    },
+    meters: {},
+    isMerged: true,
+    credits: { remainingDollars: 58.11 },
+    grokBot: { usagePercent: 3.3, isUnified: true },
+    spend: null,
+    window: { resetIso: '2026-11-22T00:00:00.000Z' },
+  });
+  assert.equal(mergedLines.some((l) => l.label === 'Total usage'), true);
+  assert.equal(mergedLines.some((l) => l.label === 'Weekly usage'), false);
+  assert.equal(mergedLines.some((l) => l.label === 'Cursor Models'), false);
+  assert.equal(mergedLines.some((l) => l.label === 'Grok Bot usage'), false);
+  assert.equal(mergedLines.find((l) => l.label === 'On-demand')?.type, 'values');
+  assert.equal(mergedLines.find((l) => l.label === 'Credits')?.text, '$58.11 left');
+
+  const requestLines = buildOpenUsagePanelLines({
+    planMeters: {},
+    meters: {},
+    requestBasedFallback: true,
+    quota: { used: 110, limit: 500 },
+    spend: null,
+    window: {},
+  });
+  assert.equal(requestLines.filter((l) => l.label === 'Total usage' || l.label === 'Requests').length, 2);
+});
+
+test('Spend $ 只计 USAGE_BASED；Included 的 chargedCents 不计美元', () => {
+  assert.equal(isUsageBasedCharge({ kind: 'USAGE_EVENT_KIND_USAGE_BASED', chargedCents: 150 }), true);
+  assert.equal(isUsageBasedCharge({ kind: 'USAGE_EVENT_KIND_INCLUDED', chargedCents: 200 }), false);
+  assert.equal(eventBilledCents({ kind: 'USAGE_EVENT_KIND_INCLUDED', chargedCents: 200 }), 0);
+  assert.equal(eventBilledCents({ kind: 'USAGE_EVENT_KIND_USAGE_BASED', chargedCents: 150 }), 150);
+  // 无 kind：兼容缺字段
+  assert.equal(eventBilledCents({ chargedCents: 50 }), 50);
+
+  const now = Date.parse('2026-09-15T12:00:00+08:00');
+  const spend = aggregateSpendPeriods(
+    [
+      {
+        timestamp: now,
+        kind: 'USAGE_EVENT_KIND_USAGE_BASED',
+        chargedCents: 150,
+        inputTokens: 100,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+      {
+        timestamp: now,
+        kind: 'USAGE_EVENT_KIND_INCLUDED',
+        chargedCents: 999,
+        tokenCents: 999,
+        inputTokens: 500,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    ],
+    now,
+  );
+  assert.equal(spend.today?.dollars, 1.5);
+  assert.equal(spend.today?.tokens, 600);
+
+  const summarized = summarizeEvents([
+    { kind: 'USAGE_EVENT_KIND_INCLUDED', chargedCents: 200, model: 'a', inputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, isTokenBasedCall: true },
+    { kind: 'USAGE_EVENT_KIND_USAGE_BASED', chargedCents: 50, model: 'b', inputTokens: 5, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, isTokenBasedCall: true },
+  ]);
+  assert.equal(summarized.billedDollars, 0.5);
+  assert.equal(summarized.totalTokens, 15);
 });
 
 test('The X Subscription 周额度：优先 period，不看 summary 的月窗 0%', () => {
@@ -2431,6 +2571,20 @@ test('wecom expiring notify: filter and body', async () => {
   assert.ok(delay > 0 && delay < 2 * 3600 * 1000);
 });
 
+test('刷新退避：Retry-After / 鉴权 / 指数倍增', async () => {
+  const { nextRefreshBackoffMs, isRefreshHeld } = await import('../src/refresh-due.js');
+  assert.equal(nextRefreshBackoffMs(1, { auth: true }), 60 * 60 * 1000);
+  assert.equal(nextRefreshBackoffMs(1, { retryAfterMs: 120000 }), 120000);
+  assert.equal(nextRefreshBackoffMs(1, { retryAfterMs: 999999999 }), 60 * 60 * 1000);
+  assert.equal(nextRefreshBackoffMs(1), 5 * 60 * 1000);
+  assert.equal(nextRefreshBackoffMs(2), 10 * 60 * 1000);
+  assert.equal(nextRefreshBackoffMs(8), 60 * 60 * 1000);
+  const now = 1_000_000;
+  assert.equal(isRefreshHeld({ untilMs: now + 1000 }, now), true);
+  assert.equal(isRefreshHeld({ untilMs: now - 1 }, now), false);
+  assert.equal(isRefreshHeld(null, now), false);
+});
+
 test('isMemberDue：同步周期与重置后补偿', async () => {
   const { isMemberDue } = await import('../src/refresh-due.js');
 
@@ -2538,6 +2692,10 @@ test('上个账单周期：窗口、收尾使用率留存与按模型汇总', as
   assert.equal(new Date(weeklyWin.startMs).toISOString(), '2026-10-26T05:10:36.797Z');
   assert.equal(new Date(weeklyWin.endMs).toISOString(), '2026-11-02T05:10:36.797Z');
 
+  const { cycleKindFromSnapshot } = await import('../src/billing-cycle.js');
+  assert.equal(cycleKindFromSnapshot(weeklySnap), 'weekly');
+  assert.equal(cycleKindFromSnapshot(cur), 'monthly');
+
   const prev = {
     window: { startIso: '2026-09-18T08:43:00.000Z', endIso: '2026-10-18T08:43:00.000Z' },
     meters: { totalPercentUsed: 97.5, autoPercentUsed: 80, apiPercentUsed: 99 },
@@ -2546,10 +2704,22 @@ test('上个账单周期：窗口、收尾使用率留存与按模型汇总', as
   const same = carryCycleHistory(prev, { window: { ...prev.window } });
   assert.deepEqual(same.cycleHistory, []);
   const next = carryCycleHistory(prev, { ...cur });
-  assert.equal(next.cycleHistory.length, 1);
-  assert.equal(next.cycleHistory[0].total, 97.5);
+  assert.deepEqual(next.cycleHistory, []);
 
-  const exact = previousCycleFinalPercents({ lastSnapshot: next }, win);
+  const exact = previousCycleFinalPercents(
+    {
+      lastSnapshot: next,
+      prevCycleSummary: {
+        startIso: prev.window.startIso,
+        endIso: prev.window.endIso,
+        total: 97.5,
+        auto: 80,
+        api: 99,
+        closedAt: prev.syncedAt,
+      },
+    },
+    win,
+  );
   assert.equal(exact.approximate, false);
   assert.equal(exact.api, 99);
   const approx = previousCycleFinalPercents(
@@ -2568,19 +2738,291 @@ test('上个账单周期：窗口、收尾使用率留存与按模型汇总', as
 
   const t = Date.parse('2026-10-01T04:00:00Z');
   const s = summarizeCycleEvents([
-    { timestamp: t, model: 'auto', inputTokens: 100, outputTokens: 0, tokenCents: 10 },
-    { timestamp: t, model: 'claude-4.5-sonnet', inputTokens: 300, outputTokens: 0, chargedCents: 30 },
-    { timestamp: t + 1000, model: 'claude-4.5-sonnet', inputTokens: 600, outputTokens: 0, tokenCents: 60 },
+    {
+      timestamp: t,
+      model: 'auto',
+      kind: 'USAGE_EVENT_KIND_INCLUDED',
+      inputTokens: 100,
+      outputTokens: 0,
+      tokenCents: 10,
+      chargedCents: 10,
+    },
+    {
+      timestamp: t,
+      model: 'claude-4.5-sonnet',
+      kind: 'USAGE_EVENT_KIND_USAGE_BASED',
+      inputTokens: 300,
+      outputTokens: 0,
+      chargedCents: 30,
+    },
+    {
+      timestamp: t + 1000,
+      model: 'claude-4.5-sonnet',
+      kind: 'USAGE_EVENT_KIND_INCLUDED',
+      inputTokens: 600,
+      outputTokens: 0,
+      tokenCents: 60,
+    },
   ]);
   assert.equal(s.totals.requests, 3);
   assert.equal(s.totals.totalTokens, 1000);
-  assert.equal(s.totals.dollars, 1);
+  // dollars = 用量价值（含 Included）；billedDollars = 仅 USAGE_BASED
+  assert.equal(s.totals.dollars, 1.0);
   assert.equal(s.totals.billedDollars, 0.3);
   assert.equal(s.models[0].model, 'claude-4.5-sonnet');
   assert.equal(s.models[0].tokenShare, 90);
   assert.equal(s.groups.cursor.requests, 1);
   assert.equal(s.groups.other.tokenShare, 90);
   assert.equal(s.daily.length, 1);
+});
+
+test('上个周期预加载判定与报表分周/月桶', async () => {
+  const {
+    hasCachedPrevCycle,
+    isPrevCycleSettled,
+    prevCycleNeedsPreload,
+    PREV_CYCLE_SETTLE_MS,
+  } = await import('../src/usage-events-sync.js');
+  const { buildPreviousCycleReport } = await import('../src/prev-cycle-report.js');
+  const { previousCycleWindow } = await import('../src/billing-cycle.js');
+
+  const monthlySnap = {
+    plan: { planName: 'Pro', includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_MONTHLY' },
+    window: { startIso: '2026-11-01T00:00:00.000Z', endIso: '2026-12-01T00:00:00.000Z' },
+  };
+  const weeklySnap = {
+    plan: { planName: 'Ultra', includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_WEEKLY' },
+    window: { startIso: '2026-11-16T00:00:00.000Z', endIso: '2026-11-23T00:00:00.000Z' },
+  };
+  const monthlyWin = previousCycleWindow(monthlySnap);
+  const weeklyWin = previousCycleWindow(weeklySnap);
+  assert.ok(monthlyWin && weeklyWin);
+
+  // 两边窗口都过收尾等待，才能把缺缓存算进 missing（而非 settling）
+  const settledAt =
+    Math.max(monthlyWin.endMs, weeklyWin.endMs) + PREV_CYCLE_SETTLE_MS + 1000;
+  assert.equal(isPrevCycleSettled(monthlyWin, settledAt), true);
+  assert.equal(isPrevCycleSettled(weeklyWin, settledAt), true);
+  assert.equal(isPrevCycleSettled(monthlyWin, monthlyWin.endMs + 1000), false);
+
+  const monthlyCached = {
+    id: 'm1',
+    cookieValue: 'user%3A%3Atok',
+    displayName: '月订号',
+    lastSnapshot: monthlySnap,
+    prevCycleSummary: {
+      startIso: new Date(monthlyWin.startMs).toISOString(),
+      endIso: new Date(monthlyWin.endMs).toISOString(),
+      cycleKind: 'monthly',
+      totals: {
+        requests: 10,
+        totalTokens: 1000,
+        inputTokens: 800,
+        outputTokens: 200,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        dollars: 1.5,
+        billedDollars: 1.5,
+      },
+      models: [{ model: 'gpt-5', totalTokens: 1000, requests: 10, dollars: 1.5 }],
+      storedAt: new Date(settledAt).toISOString(),
+    },
+  };
+  const weeklyMissing = {
+    id: 'w1',
+    cookieValue: 'user%3A%3Atok',
+    displayName: '周订号',
+    lastSnapshot: weeklySnap,
+    prevCycleSummary: null,
+  };
+  assert.equal(hasCachedPrevCycle(monthlyCached, monthlyWin), true);
+  assert.equal(prevCycleNeedsPreload(monthlyCached, settledAt), false);
+  assert.equal(prevCycleNeedsPreload(weeklyMissing, settledAt), true);
+  assert.equal(prevCycleNeedsPreload(weeklyMissing, weeklyWin.endMs + 1000), false);
+
+  const report = buildPreviousCycleReport([monthlyCached, weeklyMissing], { nowMs: settledAt });
+  assert.equal(report.monthly.cachedCount, 1);
+  assert.equal(report.monthly.totals.totalTokens, 1000);
+  assert.equal(report.weekly.accountCount, 1);
+  assert.equal(report.weekly.cachedCount, 0);
+  assert.equal(report.preload.cached, 1);
+  assert.equal(report.preload.missing, 1);
+  assert.equal(report.teamModels[0]?.model, 'gpt-5');
+  assert.match(report.note, /周订/);
+  assert.equal(report.cohorts.pro.accountCount, 1);
+  assert.equal(report.cohorts.pro.cachedCount, 1);
+  assert.equal(report.cohorts.pro.totals.dollars, 1.5);
+  assert.equal(report.cohorts.xai.accountCount, 1);
+  assert.equal(report.cohorts.xai.cachedCount, 0);
+  assert.equal(report.accounts[0]?.detailHref?.includes('from='), true);
+  assert.equal(report.accounts[0]?.detailHref?.includes('to='), true);
+
+  // Free 账号不进报表
+  const withFree = buildPreviousCycleReport(
+    [
+      monthlyCached,
+      {
+        id: 'f1',
+        planName: 'Free',
+        lastSnapshot: monthlySnap,
+        prevCycleSummary: monthlyCached.prevCycleSummary,
+      },
+    ],
+    { nowMs: settledAt },
+  );
+  assert.equal(withFree.accounts.every((a) => a.id !== 'f1'), true);
+  assert.equal(withFree.monthly.accountCount, 1);
+});
+
+test('套餐档位：Pro+/Super 先于 Pro/Premium；Free 可识别', async () => {
+  const { planTierRank, isFreePlan, formatPlanLabel } = await import('../public/shared.js');
+  assert.equal(isFreePlan({ planName: 'Free' }), true);
+  assert.equal(isFreePlan({ planName: 'hobby' }), true);
+  assert.equal(isFreePlan({ planName: 'Pro' }), false);
+  assert.ok(planTierRank('Pro+', null) < planTierRank('Pro', null));
+  assert.ok(planTierRank('Super', null) < planTierRank('Premium', null));
+  assert.ok(planTierRank('Ultra', null) < planTierRank('Pro+', null));
+  assert.equal(formatPlanLabel('unified_ultra'), 'Ultra');
+});
+
+test('各订阅周期用量：收尾%与用完日；跨重置不误判超速', async () => {
+  const { buildMemberCycleUsageRows } = await import('../src/billing-cycle.js');
+  const { exhaustionFromPercentDays } = await import('../public/shared.js');
+
+  // 窗内先涨到 100% 再回落：只认最后一段 → 未用完
+  const cross = exhaustionFromPercentDays(
+    [
+      { date: '2026-11-01', total: 40 },
+      { date: '2026-11-06', total: 100 },
+      { date: '2026-11-07', total: 5 },
+      { date: '2026-11-20', total: 34 },
+    ],
+    '2026-11-01',
+    34,
+  );
+  assert.equal(cross.exhaustedDate, null);
+  assert.equal(cross.peakTotal, 34);
+
+  const member = {
+    usagePercentHistory: [
+      { date: '2026-10-02', total: 40 },
+      { date: '2026-10-05', total: 100 },
+      { date: '2026-10-10', total: 100 },
+      { date: '2026-11-03', total: 20 },
+    ],
+    lastSnapshot: {
+      window: { startIso: '2026-11-01T00:00:00.000Z', endIso: '2026-12-01T00:00:00.000Z' },
+      plan: { planName: 'Premium', membershipType: 'premium' },
+      meters: { totalPercentUsed: 20, autoPercentUsed: 10, apiPercentUsed: 5 },
+      cycleHistory: [
+        {
+          startIso: '2026-10-01T00:00:00.000Z',
+          endIso: '2026-11-01T00:00:00.000Z',
+          cycleKind: 'monthly',
+          planName: 'Pro',
+          total: 100,
+          auto: 90,
+          api: 80,
+          closedAt: '2026-11-01T00:00:00.000Z',
+        },
+      ],
+    },
+  };
+  const rows = buildMemberCycleUsageRows(member);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].current, true);
+  assert.equal(rows[0].planName, 'Premium');
+  assert.equal(rows[1].planName, 'Pro');
+  assert.equal(rows[1].exhaustedDate, '2026-10-05');
+  assert.equal(rows[1].daysToExhaust, 5);
+});
+
+test('上个周期分群：Pro / Pro+ / XAI；用量价值与按量花费拆分', async () => {
+  const { buildPreviousCycleReport, prevCycleCohortOf } = await import('../src/prev-cycle-report.js');
+  const { summarizeCycleEvents } = await import('../src/billing-cycle.js');
+
+  assert.equal(prevCycleCohortOf({ cycleKind: 'weekly', planName: 'Ultra' }), 'xai');
+  assert.equal(prevCycleCohortOf({ cycleKind: 'monthly', planName: 'Pro' }), 'pro');
+  assert.equal(prevCycleCohortOf({ cycleKind: 'monthly', planName: 'Pro+' }), 'pro_plus');
+  assert.equal(prevCycleCohortOf({ cycleKind: 'monthly', membershipType: 'pro_plus' }), 'pro_plus');
+
+  const included = {
+    model: 'auto',
+    kind: 'USAGE_EVENT_KIND_INCLUDED',
+    kindLabel: 'Included',
+    chargedCents: 120,
+    tokenCents: 120,
+    inputTokens: 100,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    timestamp: Date.now(),
+  };
+  const onDemand = {
+    model: 'gpt-5',
+    kind: 'USAGE_EVENT_KIND_USAGE_BASED',
+    kindLabel: 'On-Demand',
+    chargedCents: 50,
+    tokenCents: 50,
+    inputTokens: 40,
+    outputTokens: 10,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    timestamp: Date.now(),
+  };
+  const sum = summarizeCycleEvents([included, onDemand]);
+  // 用量价值含套餐内；按量花费仅 USAGE_BASED
+  assert.equal(sum.totals.dollars, 1.7);
+  assert.equal(sum.totals.billedDollars, 0.5);
+
+  const proOnly = summarizeCycleEvents([included]);
+  assert.equal(proOnly.totals.dollars, 1.2);
+  assert.equal(proOnly.totals.billedDollars, 0);
+
+  const now = Date.now();
+  const report = buildPreviousCycleReport(
+    [
+      {
+        id: 'p1',
+        displayName: 'Pro甲',
+        planName: 'Pro',
+        lastSnapshot: {
+          plan: { planName: 'Pro', includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_MONTHLY' },
+          window: { startIso: '2026-11-01T00:00:00.000Z', endIso: '2026-12-01T00:00:00.000Z' },
+        },
+        prevCycleSummary: {
+          startIso: '2026-10-01T00:00:00.000Z',
+          endIso: '2026-11-01T00:00:00.000Z',
+          cycleKind: 'monthly',
+          totals: { ...proOnly.totals },
+          models: [],
+          storedAt: new Date(now).toISOString(),
+        },
+      },
+      {
+        id: 'pp1',
+        displayName: 'Pro+乙',
+        planName: 'Pro+',
+        lastSnapshot: {
+          plan: { planName: 'Pro+', includedUsagePeriod: 'INCLUDED_USAGE_PERIOD_MONTHLY' },
+          window: { startIso: '2026-11-01T00:00:00.000Z', endIso: '2026-12-01T00:00:00.000Z' },
+        },
+        prevCycleSummary: {
+          startIso: '2026-10-01T00:00:00.000Z',
+          endIso: '2026-11-01T00:00:00.000Z',
+          cycleKind: 'monthly',
+          totals: { ...sum.totals },
+          models: [],
+          storedAt: new Date(now).toISOString(),
+        },
+      },
+    ],
+    { nowMs: now },
+  );
+  assert.equal(report.cohorts.pro.totals.dollars, 1.2);
+  assert.equal(report.cohorts.pro.totals.billedDollars, 0);
+  assert.equal(report.cohorts.pro_plus.totals.dollars, 1.7);
+  assert.equal(report.cohorts.pro_plus.totals.billedDollars, 0.5);
 });
 
 test('上个账单周期：拉全后落库，同周期再进不请求 Cursor；刚结束不落库', async () => {
@@ -2695,6 +3137,209 @@ test('换 Token 留下上一份会话，回滚只还原一级', async () => {
   }
 });
 
+
+test('详情双槽：缺 closed 时用 prevCycleSummary / 推算上个窗补 previous', async () => {
+  const { resolveDetailBillingCycles, viewRowFromPrevSummary } = await import(
+    '../src/member-billing-cycles.js'
+  );
+  const summary = {
+    startIso: '2026-10-10T01:55:53.000Z',
+    endIso: '2026-11-10T01:55:53.000Z',
+    cycleKind: 'monthly',
+    planName: 'Pro+',
+    total: 100,
+    auto: 99,
+    api: 80,
+    storedAt: '2026-11-10T02:00:00.000Z',
+  };
+  const fromSum = viewRowFromPrevSummary(summary);
+  assert.equal(fromSum.current, false);
+  assert.equal(fromSum.total, 100);
+
+  const member = {
+    id: 'm-detail',
+    planName: 'Pro+',
+    prevCycleSummary: summary,
+    usagePercentHistory: [
+      { date: '2026-10-15', total: 50 },
+      { date: '2026-11-05', total: 100 },
+    ],
+    lastSnapshot: {
+      window: {
+        startIso: '2026-11-10T01:55:53.000Z',
+        endIso: '2026-12-10T01:55:53.000Z',
+        source: 'billing',
+      },
+      plan: { planName: 'Pro+', membershipType: 'pro_plus' },
+      meters: { totalPercentUsed: 43 },
+    },
+  };
+  // 表里只有 current：应仍能补出 previous
+  const onlyCurrent = [
+    {
+      memberId: 'm-detail',
+      startIso: member.lastSnapshot.window.startIso,
+      endIso: member.lastSnapshot.window.endIso,
+      cycleKind: 'monthly',
+      planName: 'Pro+',
+      membershipType: 'pro_plus',
+      source: 'billing',
+      status: 'current',
+      totalPct: 43,
+      autoPct: 44,
+      apiPct: 6,
+      peakTotal: 43,
+      exhaustedDate: null,
+      daysToExhaust: null,
+      totals: null,
+      models: null,
+      closedAt: null,
+      storedAt: '2026-11-23T00:00:00.000Z',
+      updatedAt: '2026-11-23T00:00:00.000Z',
+    },
+  ];
+  // closeBillingCycle 会打真实 store；无 init 时吞错仍返回展示行
+  const resolved = await resolveDetailBillingCycles(member, onlyCurrent);
+  assert.equal(resolved.current.startIso, member.lastSnapshot.window.startIso);
+  assert.equal(resolved.previous.startIso, summary.startIso);
+  assert.equal(resolved.previous.total, 100);
+  assert.equal(resolved.previous.planName, 'Pro+');
+
+  // 摘要只有事件、无%：应回落到按日历史，并补套餐
+  const { previousCycleFinalPercents } = await import('../src/billing-cycle.js');
+  const eventsOnly = {
+    ...member,
+    prevCycleSummary: {
+      startIso: summary.startIso,
+      endIso: summary.endIso,
+      totals: { requests: 10, dollars: 1 },
+      models: [],
+      storedAt: summary.storedAt,
+    },
+  };
+  const fp = previousCycleFinalPercents(eventsOnly, {
+    startMs: Date.parse(summary.startIso),
+    endMs: Date.parse(summary.endIso),
+  });
+  assert.equal(fp.approximate, true);
+  assert.equal(fp.total, 100);
+  const filled = await resolveDetailBillingCycles(eventsOnly, onlyCurrent);
+  assert.equal(filled.previous.total, 100);
+  assert.equal(filled.previous.planName, 'Pro+');
+});
+
+test('账单周期落库：假窗拒绝、换期双槽、list 最多取本+上', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const pathMod = await import('node:path');
+  const {
+    buildBillingCycleRow,
+    persistMemberBillingCycle,
+    pickCurrentAndPrevious,
+    billingCycleToViewRow,
+  } = await import('../src/member-billing-cycles.js');
+  const { isSyntheticBillingWindow } = await import('../public/shared.js');
+
+  const fakeWin = {
+    startIso: '2026-11-01T00:00:00.000+08:00',
+    endIso: '2026-11-20T23:59:59.999+08:00',
+    source: 'fallback',
+  };
+  assert.equal(isSyntheticBillingWindow(fakeWin), true);
+  assert.equal(
+    buildBillingCycleRow(
+      'm1',
+      { window: fakeWin, plan: { planName: 'Pro' }, meters: { totalPercentUsed: 50 } },
+      [],
+      'current',
+    ),
+    null,
+  );
+
+  const official = {
+    startIso: '2026-10-18T08:43:00.000Z',
+    endIso: '2026-11-18T08:43:00.000Z',
+    source: 'billing',
+  };
+  assert.equal(isSyntheticBillingWindow(official), false);
+
+  const dir = await mkdtemp(pathMod.join(tmpdir(), 'ctu-bc-'));
+  const prevDriver = process.env.STORE_DRIVER;
+  const prevSqlite = process.env.SQLITE_PATH;
+  process.env.STORE_DRIVER = 'sqlite';
+  process.env.SQLITE_PATH = pathMod.join(dir, 't.sqlite');
+  try {
+    await loadAppConfig();
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    const store = await import('../src/store.js');
+    await store.initStore();
+
+    const added = await store.addMember({
+      displayName: '周期甲',
+      sessionToken: buildCookieValue('user_bc', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX2JjIn0.s'),
+    });
+    const mid = added.id;
+    const hist = [
+      { date: '2026-10-20', total: 40 },
+      { date: '2026-11-01', total: 100 },
+      { date: '2026-11-10', total: 100 },
+    ];
+    const snap1 = {
+      window: official,
+      plan: { planName: 'Pro', membershipType: 'pro' },
+      meters: { totalPercentUsed: 88, autoPercentUsed: 70, apiPercentUsed: 90 },
+      syncedAt: '2026-11-17T12:00:00.000Z',
+    };
+    await persistMemberBillingCycle(mid, { lastSnapshot: null, usagePercentHistory: [] }, snap1, hist);
+    let cur = await store.getCurrentBillingCycle(mid);
+    assert.equal(cur.status, 'current');
+    assert.equal(cur.startIso, official.startIso);
+    assert.equal(cur.exhaustedDate, '2026-11-01');
+
+    const nextOfficial = {
+      startIso: '2026-11-18T08:43:00.000Z',
+      endIso: '2026-12-18T08:43:00.000Z',
+      source: 'billing',
+    };
+    const snap2 = {
+      window: nextOfficial,
+      plan: { planName: 'Pro', membershipType: 'pro' },
+      meters: { totalPercentUsed: 12, autoPercentUsed: 10, apiPercentUsed: 5 },
+      syncedAt: '2026-11-19T09:00:00.000Z',
+    };
+    await persistMemberBillingCycle(
+      mid,
+      { lastSnapshot: snap1, usagePercentHistory: hist },
+      snap2,
+      [...hist, { date: '2026-11-19', total: 12 }],
+    );
+    const rows = await store.listBillingCycles(mid, { limit: 10 });
+    assert.equal(rows.length, 2);
+    const picked = pickCurrentAndPrevious(rows);
+    assert.equal(picked.current.startIso, nextOfficial.startIso);
+    assert.equal(picked.previous.startIso, official.startIso);
+    assert.equal(picked.previous.status, 'closed');
+    assert.ok(billingCycleToViewRow(picked.previous).current === false);
+
+    // 假窗同步不得新增行
+    await persistMemberBillingCycle(
+      mid,
+      { lastSnapshot: snap2, usagePercentHistory: hist },
+      { window: fakeWin, plan: { planName: 'Pro' }, meters: { totalPercentUsed: 1 }, syncedAt: '2026-11-20T01:00:00.000Z' },
+      hist,
+    );
+    assert.equal((await store.listBillingCycles(mid, { limit: 10 })).length, 2);
+  } finally {
+    const sqlite = await import('../src/store-sqlite.js');
+    await sqlite.close().catch(() => {});
+    if (prevDriver === undefined) delete process.env.STORE_DRIVER;
+    else process.env.STORE_DRIVER = prevDriver;
+    if (prevSqlite === undefined) delete process.env.SQLITE_PATH;
+    else process.env.SQLITE_PATH = prevSqlite;
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
 
 test('cursor-safe-storage Windows v10 AES-GCM 可解', async () => {
   const {

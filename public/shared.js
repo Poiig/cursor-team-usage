@@ -451,6 +451,127 @@ export function formatAgo(iso) {
 }
 
 /**
+ * 从成员或套餐字段抽出归一化套餐串。
+ * @param {string | { planName?: string | null, membershipType?: string | null, lastSnapshot?: any } | null | undefined} planOrMember
+ */
+export function planRawOf(planOrMember) {
+  if (planOrMember && typeof planOrMember === 'object') {
+    return String(
+      planOrMember.planName ||
+        planOrMember.membershipType ||
+        planOrMember.lastSnapshot?.plan?.planName ||
+        planOrMember.lastSnapshot?.plan?.membershipType ||
+        '',
+    )
+      .trim()
+      .toLowerCase();
+  }
+  return String(planOrMember || '')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * 是否像旧版「自然月 1 号 0 点 → 当天 23:59」估窗（不是 Cursor 真实订阅日周期）。
+ * @param {{ startIso?: string | null, endIso?: string | null, source?: string | null, inferred?: boolean } | null | undefined} row
+ */
+export function isSyntheticBillingWindow(row) {
+  if (!row) return false;
+  if (row.source === 'fallback' || row.inferred === true) return true;
+  const startMs = Date.parse(row.startIso || '');
+  const endMs = Date.parse(row.endIso || '');
+  if (!Number.isFinite(startMs)) return false;
+  const s = new Date(startMs);
+  const e = Number.isFinite(endMs) ? new Date(endMs) : null;
+  const startMid = s.getHours() === 0 && s.getMinutes() === 0 && s.getSeconds() === 0;
+  const endEod = Boolean(e && e.getHours() === 23 && e.getMinutes() >= 59);
+  if (startMid && endEod) return true;
+  if (startMid && s.getDate() === 1 && Number.isFinite(endMs)) {
+    const dur = endMs - startMs;
+    if (dur > 8 * 86400000 && dur < 25 * 86400000) return true;
+  }
+  return false;
+}
+
+/**
+ * 按日累计%遇回落视为换周期；只保留最后一段（对应该账单窗收尾）。
+ * 避免上一段用满 100% 被误算进下一窗的「第 N 天用完」。
+ * @param {Array<{ date: string, total?: number | null }> | null | undefined} days
+ */
+export function lastUsagePercentSegment(days) {
+  if (!Array.isArray(days) || !days.length) return [];
+  const sorted = days
+    .filter((r) => r?.date)
+    .slice()
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  let segStart = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = Number(sorted[i - 1].total);
+    const cur = Number(sorted[i].total);
+    // 与 percentDayDelta 同口径：累计%明显回落 = 新周期
+    if (Number.isFinite(prev) && Number.isFinite(cur) && cur + 0.05 < prev) {
+      segStart = i;
+    }
+  }
+  return sorted.slice(segStart);
+}
+
+/**
+ * 在周期窗内的按日%上推算用完日 / 峰值（仅最后一段）。
+ * @param {Array<{ date: string, total?: number | null }> | null | undefined} daysInWindow
+ * @param {string} cycleStartDay yyyy-MM-dd
+ * @param {number | null | undefined} closingTotal 收尾 Total%
+ */
+export function exhaustionFromPercentDays(daysInWindow, cycleStartDay, closingTotal) {
+  const seg = lastUsagePercentSegment(daysInWindow);
+  const peakFromSeg = seg.reduce((m, r) => Math.max(m, Number(r.total) || 0), 0);
+  const peakTotal = Math.max(peakFromSeg, Number(closingTotal) || 0) || null;
+  const exhausted = seg.find((r) => Number(r.total) >= 100);
+  let daysToExhaust = null;
+  if (exhausted?.date && cycleStartDay) {
+    const a = Date.parse(`${cycleStartDay}T00:00:00`);
+    const b = Date.parse(`${exhausted.date}T00:00:00`);
+    if (Number.isFinite(a) && Number.isFinite(b) && b >= a) {
+      daysToExhaust = Math.max(1, Math.round((b - a) / 86400000) + 1);
+    }
+  }
+  return {
+    exhaustedDate: exhausted?.date || null,
+    daysToExhaust,
+    peakTotal: peakTotal && peakTotal > 0 ? peakTotal : closingTotal == null ? null : Number(closingTotal),
+    daySamples: seg.length,
+  };
+}
+
+/** Free / Hobby：报表与团队汇总一律排除。 */
+export function isFreePlan(planOrMember) {
+  const s = planRawOf(planOrMember);
+  return s === 'free' || s === 'hobby' || /\bfree\b/.test(s);
+}
+
+/**
+ * 报表排序档：数字越小越靠前。
+ * 对齐官方可售（The X：Ultra > Super > Premium > Plus）与遗留（Ultra > Pro+ > Pro），
+ * Pro+/Super 同档且排在 Pro/Premium 之前；Teams / Enterprise 靠后；Free 最大（应先过滤）。
+ * @param {string | null | undefined} planName
+ * @param {string | null | undefined} [membershipType]
+ */
+export function planTierRank(planName, membershipType) {
+  const raw = `${planName || ''} ${membershipType || ''}`.trim().toLowerCase();
+  if (!raw || raw === 'unknown') return 900;
+  if (raw.includes('free') || raw.includes('hobby')) return 980;
+  if (raw.includes('ultra') || raw.includes('unified_ultra')) return 10;
+  if (raw.includes('super')) return 20;
+  if (/(pro\+|pro_plus|proplus|pro plus)/.test(raw)) return 20;
+  if (raw.includes('premium')) return 30;
+  if (raw === 'pro' || /(^|[^a-z_])pro($|[^a-z_+])/.test(raw)) return 30;
+  if (raw === 'plus' || /(^|[^a-z])plus($|[^a-z])/.test(raw) || raw.includes('start')) return 40;
+  if (raw.includes('team') || raw.includes('business')) return 50;
+  if (raw.includes('enterprise')) return 60;
+  return 80;
+}
+
+/**
  * 套餐文案 → badge 修饰类，按档位配色一眼区分 free / pro / pro+。
  * @param {string | null | undefined} plan
  * @returns {'plan-free' | 'plan-pro' | 'plan-pro-plus' | 'plan-ultra' | 'plan-business' | 'plan-unknown'}
@@ -491,12 +612,48 @@ export function formatPlanLabel(plan) {
   if (s === 'pro_plus' || s === 'proplus' || s === 'pro plus') return 'Pro+';
   if (s === 'pro') return 'Pro';
   if (s === 'free' || s === 'hobby') return 'Free';
-  if (s === 'ultra') return 'Ultra';
+  if (s === 'ultra' || s === 'unified_ultra') return 'Ultra';
   if (s === 'premium') return 'Premium';
   if (s === 'super') return 'Super';
   if (s === 'plus') return 'Plus';
-  if (s === 'business' || s === 'team') return raw.charAt(0).toUpperCase() + raw.slice(1);
+  if (s === 'start') return 'Start';
+  if (s === 'business' || s === 'team' || s === 'enterprise') {
+    return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+  }
   return raw;
+}
+
+/**
+ * 简易分页条：上一页 / 页码 / 下一页；total≤pageSize 时只显示条数。
+ * @param {HTMLElement | null} el
+ * @param {{ page: number, pageSize: number, total: number, onPage: (page: number) => void }} opts
+ */
+export function renderPager(el, opts) {
+  if (!el) return;
+  const pageSize = Math.max(1, Number(opts.pageSize) || 10);
+  const total = Math.max(0, Number(opts.total) || 0);
+  const pages = Math.max(1, Math.ceil(total / pageSize) || 1);
+  const page = Math.min(Math.max(1, Number(opts.page) || 1), pages);
+  if (total <= 0) {
+    el.innerHTML = '';
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  if (total <= pageSize) {
+    el.innerHTML = `<span class="pager-meta">共 ${total} 条</span>`;
+    return;
+  }
+  el.innerHTML = `
+    <button type="button" class="btn pager-btn" data-pager="prev" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+    <span class="pager-meta">${page} / ${pages} · 共 ${total} 条</span>
+    <button type="button" class="btn pager-btn" data-pager="next" ${page >= pages ? 'disabled' : ''}>下一页</button>`;
+  el.querySelectorAll('[data-pager]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const dir = btn.getAttribute('data-pager');
+      opts.onPage(dir === 'prev' ? page - 1 : page + 1);
+    });
+  });
 }
 
 export function accountIdentity(member, privacyMode) {
@@ -871,9 +1028,9 @@ export function renderLineChart(el, points, color, formatValue = (v) => String(v
 }
 
 /**
- * 横向条形图。
+ * 横向条形图。item.href 有值时整行可点跳转（报表下钻到详情）。
  * @param {HTMLElement | null} el
- * @param {Array<{ label: string, value: number, color?: string, tip?: string, badge?: { text: string, className: string } }>} items
+ * @param {Array<{ label: string, value: number, color?: string, tip?: string, href?: string, drill?: string, badge?: { text: string, className: string } }>} items
  * @param {string} color
  * @param {(v: number) => string} [formatValue]
  * @param {{ max?: number }} [opts] 百分比类传 max=100，条长才对应真实比例
@@ -885,12 +1042,18 @@ export function renderHorizontalBars(el, items, color, formatValue = (v) => Stri
     return;
   }
   const max = opts.max || Math.max(...items.map((i) => Number(i.value) || 0), 1);
+  const hasLink = items.some((i) => i.href || i.drill != null);
+  el.classList.toggle('chart-box--clickable', hasLink);
   el.innerHTML = `<div class="h-bars">${items
     .map((item) => {
       const value = Number(item.value) || 0;
       const pct = Math.min(100, Math.max(2, (value / max) * 100));
       const tip = item.tip || `${item.label} · ${formatValue(value)}`;
-      return `<div class="h-bar-row" title="${escapeHtml(tip)}">
+      const tag = item.href ? 'a' : 'div';
+      const hrefAttr = item.href ? ` href="${escapeHtml(item.href)}"` : '';
+      const drillAttr = item.drill != null ? ` data-drill="${escapeHtml(String(item.drill))}"` : '';
+      const linkClass = item.href || item.drill != null ? ' h-bar-row--link' : '';
+      return `<${tag} class="h-bar-row${linkClass}"${hrefAttr}${drillAttr} title="${escapeHtml(tip)}">
         <span class="h-bar-label"><span class="h-bar-name">${escapeHtml(item.label)}</span>${
           item.badge
             ? `<span class="badge plan ${escapeHtml(item.badge.className)}">${escapeHtml(item.badge.text)}</span>`
@@ -898,7 +1061,7 @@ export function renderHorizontalBars(el, items, color, formatValue = (v) => Stri
         }</span>
         <span class="h-bar-track"><span class="h-bar-fill" style="width:${pct}%;background:${item.color || color}"></span></span>
         <span class="h-bar-value">${escapeHtml(formatValue(value))}</span>
-      </div>`;
+      </${tag}>`;
     })
     .join('')}</div>`;
 }

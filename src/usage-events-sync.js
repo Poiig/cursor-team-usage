@@ -7,6 +7,7 @@ import {
   aggregateSpendPeriods,
   currentCycleSpendLabel,
   fetchUsageEventsMerged,
+  isCursorAuthFailure,
   localDayKey,
   spendCellFromEvents,
   summarizeEvents,
@@ -21,9 +22,12 @@ import {
   upsertUsageEvents,
 } from './store.js';
 import {
+  cycleKindFromSnapshot,
+  cycleWindowFinalPercents,
   previousCycleFinalPercents,
   previousCycleWindow,
   summarizeCycleEvents,
+  withPrevCycleUsageMeta,
 } from './billing-cycle.js';
 import {
   computeUsageEventsSyncWindow,
@@ -69,7 +73,43 @@ export async function ensureMemberUsageEventsSynced(memberId, cookieValue, opts 
 }
 
 /** 周期刚结束时 Cursor 可能还在补写最后几笔事件，过了这段时间才把汇总当终值落库。 */
-const PREV_CYCLE_SETTLE_MS = 60 * 60 * 1000;
+export const PREV_CYCLE_SETTLE_MS = 60 * 60 * 1000;
+
+/**
+ * 上个周期窗口是否已过收尾等待（可落终值缓存）。
+ * @param {{ endMs: number }} window
+ * @param {number} [nowMs]
+ */
+export function isPrevCycleSettled(window, nowMs = Date.now()) {
+  return Boolean(window) && nowMs - window.endMs >= PREV_CYCLE_SETTLE_MS;
+}
+
+/**
+ * 已缓存的上个周期是否仍对应当前推算窗口。
+ * @param {any} member
+ * @param {{ startMs: number, endMs: number } | null} [window]
+ */
+export function hasCachedPrevCycle(member, window = previousCycleWindow(member?.lastSnapshot)) {
+  if (!window || !member?.prevCycleSummary) return false;
+  const startIso = new Date(window.startMs).toISOString();
+  const endIso = new Date(window.endMs).toISOString();
+  const stored = member.prevCycleSummary;
+  return stored.startIso === startIso && stored.endIso === endIso;
+}
+
+/**
+ * 是否需要后台预加载上个周期（缺缓存、已过收尾、会话可用）。
+ * @param {any} member
+ * @param {number} [nowMs]
+ */
+export function prevCycleNeedsPreload(member, nowMs = Date.now()) {
+  if (!member?.id || !member?.cookieValue || !member?.lastSnapshot) return false;
+  if (isCursorAuthFailure({ message: member.lastError })) return false;
+  const window = previousCycleWindow(member.lastSnapshot);
+  if (!window) return false;
+  if (!isPrevCycleSettled(window, nowMs)) return false;
+  return !hasCachedPrevCycle(member, window);
+}
 
 /**
  * 上个账单周期统计：已落库且周期一致直接读库；否则向 Cursor 拉该时间窗全部事件，
@@ -86,12 +126,57 @@ export async function loadPreviousCycle(member, opts = {}) {
   }
   const startIso = new Date(window.startMs).toISOString();
   const endIso = new Date(window.endMs).toISOString();
+  const cycleKind = cycleKindFromSnapshot(member.lastSnapshot);
   // 收尾使用率可能在换周期后才补进 cycleHistory，每次现算，不进缓存
   const finalPercents = previousCycleFinalPercents(member, window);
 
   const stored = member?.prevCycleSummary;
   if (stored?.startIso === startIso && stored?.endIso === endIso) {
-    return { ...stored, source: 'stored', fetchError: null, finalPercents };
+    // 已缓存：用本地事件按最新口径重算用量价值/按量花费，不打 Cursor
+    const localEvents = await listUsageEventsInRange(member.id, window.startMs, window.endMs);
+    if (localEvents.length) {
+      const fresh = withPrevCycleUsageMeta(member, window, {
+        startIso,
+        endIso,
+        cycleKind,
+        ...summarizeCycleEvents(localEvents),
+        storedAt: stored.storedAt || new Date().toISOString(),
+      });
+      const oldDollars = Number(stored.totals?.dollars);
+      const newDollars = Number(fresh.totals?.dollars);
+      const needWrite =
+        !Number.isFinite(oldDollars) ||
+        Math.abs(oldDollars - newDollars) > 0.009 ||
+        Number(stored.totals?.billedDollars) !== Number(fresh.totals?.billedDollars) ||
+        stored.total == null ||
+        !stored.planName;
+      if (needWrite) await setPrevCycleSummary(member.id, fresh);
+      return {
+        ...fresh,
+        source: 'stored',
+        fetchError: null,
+        finalPercents: previousCycleFinalPercents(
+          { ...member, prevCycleSummary: fresh },
+          window,
+        ),
+      };
+    }
+    const enriched = withPrevCycleUsageMeta(member, window, {
+      ...stored,
+      cycleKind: stored.cycleKind || cycleKind,
+    });
+    if (stored.total == null || !stored.planName) {
+      await setPrevCycleSummary(member.id, enriched);
+    }
+    return {
+      ...enriched,
+      source: 'stored',
+      fetchError: null,
+      finalPercents: previousCycleFinalPercents(
+        { ...member, prevCycleSummary: enriched },
+        window,
+      ),
+    };
   }
 
   let events;
@@ -108,12 +193,147 @@ export async function loadPreviousCycle(member, opts = {}) {
     fetchError = e instanceof Error ? e.message : String(e);
     events = await listUsageEventsInRange(member.id, window.startMs, window.endMs);
   }
-  const summary = { startIso, endIso, ...summarizeCycleEvents(events) };
+  const summary = withPrevCycleUsageMeta(member, window, {
+    startIso,
+    endIso,
+    cycleKind,
+    ...summarizeCycleEvents(events),
+  });
   const nowMs = opts.nowMs ?? Date.now();
-  if (source === 'cursor' && nowMs - window.endMs >= PREV_CYCLE_SETTLE_MS) {
+  if (source === 'cursor' && isPrevCycleSettled(window, nowMs)) {
     await setPrevCycleSummary(member.id, { ...summary, storedAt: new Date(nowMs).toISOString() });
   }
-  return { ...summary, source, fetchError, finalPercents };
+  return {
+    ...summary,
+    source,
+    fetchError,
+    finalPercents: previousCycleFinalPercents(
+      { ...member, prevCycleSummary: summary },
+      window,
+    ),
+  };
+}
+
+/**
+ * 任意订阅周期明细：优先本地事件；空则尝试拉 Cursor；收尾% 走 cycleHistory / 按日近似。
+ * @param {any} member
+ * @param {{ startMs: number, endMs: number, nowMs?: number }} opts
+ */
+export async function loadCycleRange(member, opts) {
+  const startMs = Number(opts.startMs);
+  const endMs = Number(opts.endMs);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    const err = new Error('周期时间窗无效');
+    err.status = 400;
+    throw err;
+  }
+  const startIso = new Date(startMs).toISOString();
+  const endIso = new Date(endMs).toISOString();
+  const dur = endMs - startMs;
+  const cycleKind =
+    dur >= 6 * 86400000 && dur <= 8 * 86400000
+      ? 'weekly'
+      : cycleKindFromSnapshot(member?.lastSnapshot);
+  const finalPercents = cycleWindowFinalPercents(member, { startMs, endMs });
+
+  // 正好是已缓存的上个周期：走原路径（可补拉 Cursor / 写回摘要）
+  const prevWin = previousCycleWindow(member?.lastSnapshot);
+  if (
+    prevWin &&
+    Math.abs(prevWin.startMs - startMs) < 60_000 &&
+    Math.abs(prevWin.endMs - endMs) < 60_000
+  ) {
+    return loadPreviousCycle(member, { nowMs: opts.nowMs });
+  }
+
+  let events = await listUsageEventsInRange(member.id, startMs, endMs);
+  let source = 'local';
+  let fetchError = null;
+  if (!events.length && member.cookieValue) {
+    try {
+      const session = sessionFromCookie(member.cookieValue);
+      if (!session) throw new Error('会话 Token 格式无效');
+      events = await fetchUsageEventsMerged(session, startMs, endMs - 1);
+      await upsertUsageEvents(member.id, events);
+      source = 'cursor';
+    } catch (e) {
+      fetchError = e instanceof Error ? e.message : String(e);
+      events = await listUsageEventsInRange(member.id, startMs, endMs);
+    }
+  }
+
+  return {
+    startIso,
+    endIso,
+    cycleKind,
+    ...summarizeCycleEvents(events),
+    source,
+    fetchError,
+    finalPercents,
+    storedAt: null,
+  };
+}
+
+/**
+ * 已缓存账号：仅用本地 usage_events 按当前口径重算并写回（纠正旧版「按量=价值」混淆）。
+ * @param {any} member
+ */
+export async function refreshPrevCycleSummaryFromLocal(member) {
+  const window = previousCycleWindow(member?.lastSnapshot);
+  if (!window || !hasCachedPrevCycle(member, window)) return null;
+  const events = await listUsageEventsInRange(member.id, window.startMs, window.endMs);
+  if (!events.length) return null;
+  const cycleKind = cycleKindFromSnapshot(member.lastSnapshot);
+  const summary = withPrevCycleUsageMeta(member, window, {
+    startIso: new Date(window.startMs).toISOString(),
+    endIso: new Date(window.endMs).toISOString(),
+    cycleKind,
+    ...summarizeCycleEvents(events),
+    storedAt: member.prevCycleSummary?.storedAt || new Date().toISOString(),
+  });
+  await setPrevCycleSummary(member.id, summary);
+  return summary;
+}
+
+/**
+ * 批量预加载缺缓存的上个周期（低并发，避免齐刷撞 Cursor 限流）。
+ * @param {any[]} members 内部成员列表
+ * @param {{ concurrency?: number, limit?: number, nowMs?: number, onOne?: (row: any) => void }} [opts]
+ */
+export async function preloadDuePrevCycles(members, opts = {}) {
+  const nowMs = opts.nowMs ?? Date.now();
+  const concurrency = Math.max(1, Math.min(3, Number(opts.concurrency) || 1));
+  const limit = Math.max(1, Math.min(50, Number(opts.limit) || 8));
+  const due = (members || []).filter((m) => prevCycleNeedsPreload(m, nowMs)).slice(0, limit);
+  /** @type {Array<{ id: string, ok: boolean, error?: string, source?: string }>} */
+  const results = [];
+  const queue = [...due];
+  async function worker() {
+    while (queue.length) {
+      const member = queue.shift();
+      if (!member) break;
+      try {
+        const data = await loadPreviousCycle(member, { nowMs });
+        const row = {
+          id: member.id,
+          ok: data.source === 'stored' || data.source === 'cursor',
+          source: data.source,
+        };
+        results.push(row);
+        opts.onOne?.(row);
+      } catch (e) {
+        const row = {
+          id: member.id,
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        };
+        results.push(row);
+        opts.onOne?.(row);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, due.length) || 1 }, () => worker()));
+  return { due: due.length, done: results.length, results };
 }
 
 /**

@@ -14,13 +14,23 @@ import {
 import { isSyntheticEventId as isSyntheticEventIdFromUsage } from './usage-events.js';
 
 const USER_AGENT = 'cursor-team-usage/0.1';
-const PAGE_SIZE = 100;
-/** 单次拉取页数上限；过小会把重度账号周期截成 5000 条，tokens/模型严重偏低。 */
+/** 与 OpenUsage 一致：单页尽量大，减少 get-filtered-usage-events 往返。 */
+const PAGE_SIZE = 1000;
+/** 单次拉取页数上限；过小会把重度账号周期截成不足，tokens/模型严重偏低。 */
 const MAX_PAGES = 500;
 /** 与 OpenUsage 一致：Cursor 桌面 OAuth client，JWT 自身兼作 refresh_token。 */
 const CURSOR_OAUTH_CLIENT_ID = 'KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB';
 /** 到期前一周主动换票，避免机器休眠跨过 exp。 */
 export const CURSOR_REFRESH_LEAD_MS = 7 * 86400000;
+/** 提前续票失败后的冷却，避免每轮刷新都打 /oauth/token。 */
+const EARLY_RENEW_HOLD_MS = 15 * 60 * 1000;
+/** Retry-After 账号级上限（对齐 OpenUsage 最长约 1 小时）。 */
+export const CURSOR_RETRY_AFTER_CAP_MS = 60 * 60 * 1000;
+/** 单次请求内对 Retry-After 的等待上限，更长的交给账号级退避。 */
+const INLINE_RETRY_AFTER_CAP_MS = 10 * 1000;
+
+/** @type {Map<string, number>} userId → 提前续票冷却截止 */
+const earlyRenewHoldUntil = new Map();
 
 /** cursor.com 对状态变更请求做 Origin 校验，需模拟浏览器 dashboard 头。 */
 const BROWSER_HEADERS = {
@@ -162,7 +172,9 @@ function isRetryableError(error) {
 
 /** 连接超时要多等一会儿，250ms 时对端往往还没恢复。 */
 function retryDelayMs(error, attempt) {
-  if (error?.retryAfterMs) return error.retryAfterMs;
+  if (error?.retryAfterMs) {
+    return Math.min(error.retryAfterMs, INLINE_RETRY_AFTER_CAP_MS);
+  }
   const slow = /TIMEOUT|ETIMEDOUT|ENETUNREACH|UND_ERR_CONNECT|AbortError|aborted/i.test(
     String(error?.code || error?.cause?.code || error?.name || error?.message || ''),
   );
@@ -201,7 +213,8 @@ async function fetchJsonOnce(url, options, timeoutMs) {
       err.status = res.status;
       const retryAfter = Number(res.headers.get('retry-after'));
       if (Number.isFinite(retryAfter) && retryAfter > 0) {
-        err.retryAfterMs = Math.min(retryAfter * 1000, 5000);
+        // 完整 Retry-After 留给账号级 hold；单次请求内最多干等 INLINE 上限
+        err.retryAfterMs = Math.min(retryAfter * 1000, CURSOR_RETRY_AFTER_CAP_MS);
       }
       throw err;
     }
@@ -242,6 +255,10 @@ async function fetchJson(url, options, timeoutMs = 20000) {
       return await fetchJsonOnce(url, options, timeoutMs);
     } catch (error) {
       if (attempt >= maxRetries || !isRetryableError(error)) throw error;
+      // 长 Retry-After 交给账号级退避，别在单次 Promise 里干等几十分钟
+      if (Number(error.status) === 429 && Number(error.retryAfterMs) > INLINE_RETRY_AFTER_CAP_MS) {
+        throw error;
+      }
       await sleep(retryDelayMs(error, attempt));
     }
   }
@@ -384,6 +401,126 @@ export function combineCredits(creditGrants, stripeBalanceCents = 0) {
 }
 
 /**
+ * 统一账号（Cursor+X+Grok）Credits：GetComplatCreditBalance.usdRemainingCents。
+ * @param {any} body
+ */
+export function complatCreditsFromBalance(body) {
+  if (!body || typeof body !== 'object') return null;
+  const remaining = num(body.usdRemainingCents);
+  if (remaining == null) return null;
+  const remainingCents = Math.max(0, remaining);
+  return {
+    remainingDollars: Math.round((remainingCents / 100) * 100) / 100,
+    totalCents: remainingCents,
+    usedCents: 0,
+    source: 'complat',
+  };
+}
+
+/**
+ * dashboard Additional usage（统一账号月度超额，从 credits 扣）。
+ * limitCents===0 视为关闭；无上限时仍展示已用金额（可为 $0）。
+ * @param {any} status v2/usage-status 响应
+ */
+export function parseAdditionalUsage(status) {
+  if (!status || typeof status !== 'object') return null;
+  if (String(status.availability || 'available') !== 'available') return null;
+  const monthly = status.monthlyUsage;
+  if (!monthly || typeof monthly !== 'object') return null;
+  if (monthly.additionalUsageOff === true) return null;
+  // limitCents 缺省=无上限；显式 0=关闭。不能用 num(null)（Number(null)===0）。
+  if (monthly.limitCents === 0 || monthly.limitCents === '0') return null;
+  const limitCents =
+    monthly.limitCents == null || monthly.limitCents === ''
+      ? null
+      : num(monthly.limitCents);
+  if (limitCents === 0) return null;
+  const usedCents = Math.max(0, num(monthly.usedCents) ?? 0);
+  if (limitCents == null) {
+    return {
+      enabled: true,
+      usedCents,
+      limitCents: null,
+      remainingCents: null,
+      source: 'additional',
+      resetsAt: typeof monthly.resetsAt === 'string' ? monthly.resetsAt : null,
+      periodStart: typeof monthly.periodStart === 'string' ? monthly.periodStart : null,
+    };
+  }
+  if (!(limitCents > 0)) return null;
+  return {
+    enabled: true,
+    usedCents,
+    limitCents,
+    remainingCents: Math.max(0, limitCents - usedCents),
+    source: 'additional',
+    resetsAt: typeof monthly.resetsAt === 'string' ? monthly.resetsAt : null,
+    periodStart: typeof monthly.periodStart === 'string' ? monthly.periodStart : null,
+  };
+}
+
+const ORG_MEMBERSHIP_TYPES = new Set(['enterprise', 'team']);
+
+/**
+ * 展示用套餐名：org 席位 membership 优先于 GetPlanInfo 仍写的 Pro。
+ * @param {string | null | undefined} planInfoName
+ * @param {string | null | undefined} membershipType
+ */
+export function resolvePlanDisplayName(planInfoName, membershipType) {
+  const membership = String(membershipType || '')
+    .trim()
+    .toLowerCase();
+  const planInfo = String(planInfoName || '').trim();
+  const planLower = planInfo.toLowerCase();
+  if (
+    membership &&
+    ORG_MEMBERSHIP_TYPES.has(membership) &&
+    (!planInfo || planLower === 'pro' || planLower === 'pro plan')
+  ) {
+    return membership;
+  }
+  return planInfo || membership || null;
+}
+
+/**
+ * planUsage 不可用时，Enterprise/Team 回退 /api/usage 请求额度。
+ * @param {{ totalPercentUsed?: number | null, autoPercentUsed?: number | null, apiPercentUsed?: number | null, planLimitDollars?: number | null }} planMeters
+ * @param {string | null | undefined} membershipOrPlan
+ */
+export function shouldUseRequestBasedFallback(planMeters, membershipOrPlan) {
+  const hasPercent = planMeters?.totalPercentUsed != null;
+  const hasModels =
+    planMeters?.autoPercentUsed != null || planMeters?.apiPercentUsed != null;
+  const hasLimit =
+    planMeters?.planLimitDollars != null && planMeters.planLimitDollars > 0;
+  if (hasPercent || hasModels || hasLimit) return false;
+  const name = String(membershipOrPlan || '')
+    .trim()
+    .toLowerCase();
+  return name === 'enterprise' || name === 'team' || name === '';
+}
+
+/**
+ * Today/Spend 美元只计官方按量（USAGE_BASED）；Included/Free 计 $0，token 仍累计。
+ * 无 kind 的旧行：有 chargedCents 仍计（兼容缺字段）。
+ * @param {{ kind?: string, chargedCents?: number | null }} e
+ */
+export function isUsageBasedCharge(e) {
+  const kind = String(e?.kind || '');
+  if (/ERRORED|FREE|INCLUDED|CUSTOM_SUBSCRIPTION/i.test(kind)) return false;
+  if (/USAGE_BASED|ON_?DEMAND/i.test(kind)) return true;
+  if (!kind) return e?.chargedCents != null && Number(e.chargedCents) > 0;
+  return false;
+}
+
+/** @param {{ kind?: string, chargedCents?: number | null }} e */
+export function eventBilledCents(e) {
+  if (!isUsageBasedCharge(e)) return 0;
+  const cents = num(e?.chargedCents);
+  return cents != null && cents > 0 ? cents : 0;
+}
+
+/**
  * 用 refresh_token（通常即当前 JWT）换新 access_token。
  * @param {string} refreshToken
  */
@@ -422,6 +559,7 @@ export async function refreshCursorAccessToken(refreshToken) {
 
 /**
  * 已过期或进入临期窗口时换票并拼回 cookie；无需换或失败时返回 null。
+ * 提前续票失败且 JWT 未过期时进入冷却，保留旧票（对齐 OpenUsage early renewal hold）。
  * @param {string} cookieValue
  * @param {{ force?: boolean, leadMs?: number, refreshToken?: string | null }} [opts]
  */
@@ -437,6 +575,10 @@ export async function renewCookieIfNeeded(cookieValue, opts = {}) {
     !Number.isFinite(expMs) ||
     expMs - Date.now() <= leadMs;
   if (!due) return null;
+  if (!opts.force) {
+    const holdUntil = earlyRenewHoldUntil.get(session.userId);
+    if (holdUntil && holdUntil > Date.now()) return null;
+  }
   try {
     const refreshWith = String(opts.refreshToken || jwt).trim() || jwt;
     const tokens = await refreshCursorAccessToken(refreshWith);
@@ -444,9 +586,13 @@ export async function renewCookieIfNeeded(cookieValue, opts = {}) {
     const userId = newPayload?.sub
       ? userIdFromSub(String(newPayload.sub))
       : session.userId;
+    earlyRenewHoldUntil.delete(session.userId);
     return buildCookieValue(userId, tokens.accessToken);
   } catch (error) {
     if (opts.force) throw error;
+    if (Number.isFinite(expMs) && expMs > Date.now()) {
+      earlyRenewHoldUntil.set(session.userId, Date.now() + EARLY_RENEW_HOLD_MS);
+    }
     return null;
   }
 }
@@ -510,26 +656,18 @@ export function parseQuotaResponse(data) {
 }
 
 /**
- * 当前账单周期窗口：有额度起始日则用之，否则回退到本月 1 号。
+ * 缺官方 billingCycleEnd 时的估窗：保留官方起点时刻，终点按 +1 月估。
+ * 不再用「自然月 1 号 0 点 → 今天 23:59」（会污染 cycleHistory，出现「月订只有 20 天」）。
  * @param {{ startOfCycleIso?: string } | null | undefined} quota
- * @param {Date} [now]
+ * @returns {{ start: number, end: number, inferred: true } | null}
  */
-export function billingCycleWindow(quota, now = new Date()) {
-  const end = new Date(now);
-  end.setHours(23, 59, 59, 999);
-
-  if (quota?.startOfCycleIso) {
-    const start = new Date(quota.startOfCycleIso);
-    if (!Number.isNaN(start.getTime())) {
-      start.setHours(0, 0, 0, 0);
-      return { start: start.getTime(), end: end.getTime() };
-    }
-  }
-
-  const start = new Date(now);
-  start.setDate(1);
-  start.setHours(0, 0, 0, 0);
-  return { start: start.getTime(), end: end.getTime() };
+export function billingCycleWindow(quota) {
+  if (!quota?.startOfCycleIso) return null;
+  const start = new Date(quota.startOfCycleIso);
+  if (Number.isNaN(start.getTime())) return null;
+  const end = new Date(start.getTime());
+  end.setUTCMonth(end.getUTCMonth() + 1);
+  return { start: start.getTime(), end: end.getTime(), inferred: true };
 }
 
 /**
@@ -791,7 +929,7 @@ export function summarizeEvents(events) {
   const byModel = {};
 
   for (const e of events) {
-    if (e.chargedCents != null) billedCents += e.chargedCents;
+    billedCents += eventBilledCents(e);
     if (e.tokenCents != null) tokenValueCents += e.tokenCents;
     inputTokens += e.inputTokens || 0;
     outputTokens += e.outputTokens || 0;
@@ -1062,8 +1200,8 @@ export function topModelsByTokens(events, dayKey, limit = 8) {
 
 /**
  * 按本地日汇总花费与 token，供 Today / Yesterday / Last 30 Days。
- * 有实际计费用 charged；Included/$0 时回退 token 估值，避免 Included 请求显示为 $0。
- * @param {Array<{ timestamp?: unknown, model?: string, chargedCents: number | null, tokenCents: number | null, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
+ * $ 只计 USAGE_BASED（对齐 Cursor Usage 页 / OpenUsage）；token 计全部事件。
+ * @param {Array<{ timestamp?: unknown, kind?: string, model?: string, chargedCents: number | null, tokenCents: number | null, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
  * @param {number} [nowMs]
  */
 export function aggregateSpendPeriods(events, nowMs = Date.now()) {
@@ -1080,9 +1218,7 @@ export function aggregateSpendPeriods(events, nowMs = Date.now()) {
       (e.outputTokens || 0) +
       (e.cacheReadTokens || 0) +
       (e.cacheWriteTokens || 0);
-    let dollars = 0;
-    if (e.chargedCents != null && e.chargedCents > 0) dollars = e.chargedCents / 100;
-    else if (e.tokenCents != null && e.tokenCents > 0) dollars = e.tokenCents / 100;
+    const dollars = eventBilledCents(e) / 100;
 
     if (!byDay[key]) byDay[key] = { dollars: 0, tokens: 0, requests: 0 };
     byDay[key].dollars += dollars;
@@ -1209,7 +1345,36 @@ export async function fetchPlanInfo(session) {
       price: info.price ? String(info.price) : null,
       includedUsagePeriod: info.includedUsagePeriod ? String(info.includedUsagePeriod) : null,
       includedUsageResetsAt: msToIso(info.includedUsageResetsAt),
+      // Cursor+X+Grok 合并账号：Credits / Additional usage 走另一套接口
+      isMerged: data?.isMerged === true,
     };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 统一账号预付 Credits（GetComplatCreditBalance）。
+ * @param {{ cookieValue: string }} session
+ */
+export async function fetchComplatCreditBalance(session) {
+  const jwt = jwtFromCookie(session.cookieValue);
+  if (!jwt) return null;
+  try {
+    const data = await fetchJson(
+      'https://api2.cursor.sh/aiserver.v1.DashboardService/GetComplatCreditBalance',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          'Content-Type': 'application/json',
+          'Connect-Protocol-Version': '1',
+          'User-Agent': USER_AGENT,
+        },
+        body: '{}',
+      },
+    );
+    return complatCreditsFromBalance(data);
   } catch {
     return null;
   }
@@ -1250,6 +1415,8 @@ export async function fetchUserRules(cookieValue) {
  *   quota?: { used: number, limit: number | null } | null,
  *   grokBot?: { usagePercent: number, resetsAt?: string | null, isUnified?: boolean } | null,
  *   credits?: { remainingDollars: number } | null,
+ *   isMerged?: boolean,
+ *   requestBasedFallback?: boolean,
  *   spend?: (ReturnType<typeof aggregateSpendPeriods> & {
  *     last30Label?: string,
  *     cycle?: { dollars?: number, tokens?: number, requests?: number } | null,
@@ -1264,6 +1431,9 @@ export function buildOpenUsagePanelLines(input) {
   const pm = input.planMeters || {};
   const resetsAt = input.window?.resetIso || pm.billingCycleEnd || null;
   const weekly = pm.includedUsagePeriod === 'INCLUDED_USAGE_PERIOD_WEEKLY';
+  const isMerged = input.isMerged === true;
+  // 周池或统一账号：单一 included 池，不拆 Models / Grok Bot
+  const singleIncludedPool = weekly || isMerged;
 
   const pushPercent = (label, used) => {
     if (used == null || !Number.isFinite(used)) return;
@@ -1277,9 +1447,28 @@ export function buildOpenUsagePanelLines(input) {
     });
   };
 
-  // The X Subscription：单一周池，只画 Weekly usage
-  if (weekly) {
-    pushPercent('Weekly usage', pm.totalPercentUsed);
+  if (singleIncludedPool) {
+    // The X：Weekly usage；统一 Ultra：Total usage（对齐 OpenUsage）
+    pushPercent(weekly && !isMerged ? 'Weekly usage' : 'Total usage', pm.totalPercentUsed);
+  } else if (
+    input.requestBasedFallback &&
+    input.quota?.limit != null &&
+    input.quota.limit > 0
+  ) {
+    // Enterprise/Team planUsage 不可用：用 /api/usage 请求数充当 Total + Requests
+    for (const label of ['Total usage', 'Requests']) {
+      lines.push({
+        type: 'progress',
+        label,
+        used: input.quota.used,
+        limit: input.quota.limit,
+        format: 'count',
+        suffix: 'requests',
+        resetsAt,
+      });
+    }
+    pushPercent('Cursor Models', pm.autoPercentUsed);
+    pushPercent('Other Models', pm.apiPercentUsed);
   } else {
     // 展示顺序：Total → Cursor Models → Other Models → Grok → On-demand → Credits → spend
     if (pm.totalPercentUsed != null) {
@@ -1323,7 +1512,17 @@ export function buildOpenUsagePanelLines(input) {
       used: Math.round(used * 100) / 100,
       limit: Math.round(limit * 100) / 100,
       format: 'dollars',
-      resetsAt,
+      resetsAt: od.resetsAt || resetsAt,
+    });
+  } else if (od && od.enabled && od.limitCents == null) {
+    // 无月度上限的 Additional usage：即使 $0 也展示（对齐 OpenUsage）
+    const dollars = Math.round(((od.usedCents || 0) / 100) * 100) / 100;
+    lines.push({
+      type: 'values',
+      label: odLabel,
+      dollars,
+      tokens: null,
+      text: `$${dollars.toFixed(2)}`,
     });
   } else if (od && (od.enabled || (od.usedCents ?? 0) > 0) && (od.usedCents ?? 0) > 0) {
     lines.push({
@@ -1472,18 +1671,21 @@ export async function fetchV2UsageStatus(session) {
     },
   );
   const weekly = data?.weeklyIncludedUsage || null;
-  if (!weekly) return null;
-  const usedCents = num(weekly.usedCents) ?? 0;
-  const budgetCents = num(weekly.budgetCents) ?? 0;
+  const usedCents = weekly ? (num(weekly.usedCents) ?? 0) : null;
+  const budgetCents = weekly ? (num(weekly.budgetCents) ?? 0) : null;
   const percent =
-    budgetCents > 0 ? Math.round((usedCents / budgetCents) * 1000) / 10 : null;
+    budgetCents != null && budgetCents > 0 && usedCents != null
+      ? Math.round((usedCents / budgetCents) * 1000) / 10
+      : null;
   return {
     usedCents,
     budgetCents,
     percent,
-    periodStart: typeof weekly.periodStart === 'string' ? weekly.periodStart : null,
-    resetsAt: typeof weekly.resetsAt === 'string' ? weekly.resetsAt : null,
+    periodStart:
+      weekly && typeof weekly.periodStart === 'string' ? weekly.periodStart : null,
+    resetsAt: weekly && typeof weekly.resetsAt === 'string' ? weekly.resetsAt : null,
     additionalUsageOff: Boolean(data?.monthlyUsage?.additionalUsageOff),
+    additionalUsage: parseAdditionalUsage(data),
   };
 }
 
@@ -1795,7 +1997,7 @@ export async function fetchUsageEventsMerged(session, startMs, endMs) {
 
 /**
  * 事件列表 → spend 单元格（本周 / 周期汇总）。
- * @param {Array<{ chargedCents?: number | null, tokenCents?: number | null, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
+ * @param {Array<{ kind?: string, chargedCents?: number | null, tokenCents?: number | null, inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number }>} events
  */
 export function spendCellFromEvents(events) {
   if (!Array.isArray(events) || !events.length) return null;
@@ -1808,8 +2010,7 @@ export function spendCellFromEvents(events) {
       (e.cacheReadTokens || 0) +
       (e.cacheWriteTokens || 0);
     tokens += t;
-    if (e.chargedCents != null && e.chargedCents > 0) dollars += e.chargedCents / 100;
-    else if (e.tokenCents != null && e.tokenCents > 0) dollars += e.tokenCents / 100;
+    dollars += eventBilledCents(e) / 100;
   }
   return {
     dollars: Math.round(dollars * 100) / 100,
@@ -1940,7 +2141,11 @@ export async function fetchMemberSnapshot(cookieValue) {
     }
   };
 
-  const [me, plan, quota, hardLimit, usageSummary, periodUsage, grokBot, planInfo, creditGrants] =
+  // 先拿 planInfo：isMerged 决定 Credits / Additional usage 走哪套接口
+  const planInfo = await optional('计划信息', fetchPlanInfo(session), null);
+  const isMerged = planInfo?.isMerged === true;
+
+  const [me, plan, quota, hardLimit, usageSummary, periodUsage, grokBot, creditGrants, complatCredits] =
     await Promise.all([
       fetchMe(session),
       optional('套餐', fetchStripeProfile(session), {
@@ -1955,12 +2160,18 @@ export async function fetchMemberSnapshot(cookieValue) {
       optional('按量上限', fetchHardLimit(session), null),
       optional('用量摘要', fetchUsageSummary(session), null),
       fetchCurrentPeriodUsage(session),
-      fetchGrokBotUsage(session),
-      fetchPlanInfo(session),
-      optional('积分余额', fetchCreditGrantsBalance(session), null),
+      isMerged ? Promise.resolve(null) : fetchGrokBotUsage(session),
+      isMerged
+        ? Promise.resolve(null)
+        : optional('积分余额', fetchCreditGrantsBalance(session), null),
+      isMerged
+        ? optional('统一积分', fetchComplatCreditBalance(session), null)
+        : Promise.resolve(null),
     ]);
 
-  const credits = combineCredits(creditGrants, plan?.stripePrepaidCents || 0);
+  const credits = isMerged
+    ? complatCredits
+    : combineCredits(creditGrants, plan?.stripePrepaidCents || 0);
 
   const weekly = isWeeklyIncludedUsage(planInfo?.includedUsagePeriod);
   let planMeters = mergePlanMeters(usageSummary, periodUsage, {
@@ -1968,10 +2179,11 @@ export async function fetchMemberSnapshot(cookieValue) {
     includedUsageResetsAt: planInfo?.includedUsageResetsAt,
   });
 
-  // grok.com Usage 同源：周池 used/budget 比 period 百分比更准
-  const v2Status = weekly
-    ? await optional('周池状态', fetchV2UsageStatus(session), null)
-    : null;
+  // 周池或统一账号：v2 usage-status 补百分比 / Additional usage
+  const v2Status =
+    weekly || isMerged
+      ? await optional('用量状态', fetchV2UsageStatus(session), null)
+      : null;
   if (weekly && v2Status?.percent != null) {
     planMeters = {
       ...planMeters,
@@ -1983,13 +2195,23 @@ export async function fetchMemberSnapshot(cookieValue) {
       weeklyBudgetCents: v2Status.budgetCents,
     };
   }
+  if (isMerged) {
+    // 统一账号 Extra Usage = dashboard Additional usage，不用 spendLimitUsage
+    planMeters = {
+      ...planMeters,
+      onDemand: v2Status?.additionalUsage || null,
+      autoPercentUsed: null,
+      apiPercentUsed: null,
+    };
+  }
 
-  let window;
+  /** @type {{ start: number, end: number, inferred?: boolean } | null} */
+  let window = null;
   if (planMeters.billingCycleStart && planMeters.billingCycleEnd) {
     const start = new Date(planMeters.billingCycleStart).getTime();
     const end = new Date(planMeters.billingCycleEnd).getTime();
     if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
-      window = { start, end };
+      window = { start, end, inferred: false };
     }
   }
   if (!window) {
@@ -2000,8 +2222,11 @@ export async function fetchMemberSnapshot(cookieValue) {
           : null),
     );
   }
-
+  // 仍无窗：用近 30 日拉事件，但不写成「账单周期」（避免假月订进 history）
   const { last30Start } = localDayBounds();
+  if (!window) {
+    window = { start: last30Start, end: Date.now() + 1, inferred: true };
+  }
   const fetchStart = Math.min(window.start, last30Start);
   const fetchEnd = Math.max(Date.now(), Math.min(window.end, Date.now()));
   /** @type {any[]} */
@@ -2110,14 +2335,27 @@ export async function fetchMemberSnapshot(cookieValue) {
     startIso: new Date(window.start).toISOString(),
     endIso: new Date(window.end).toISOString(),
     resetIso: planMeters.billingCycleEnd || quota?.resetIso,
+    // fallback / 近 30 日估窗：不得当作真实订阅周期写入 cycleHistory
+    source: window.inferred ? 'fallback' : 'billing',
   };
+
+  const membershipType = planMeters.membershipType || plan.membershipType;
+  const displayPlanName = resolvePlanDisplayName(planInfo?.planName, membershipType);
+  const requestBasedFallback = shouldUseRequestBasedFallback(
+    planMeters,
+    membershipType || displayPlanName,
+  );
+  const grokForPanel =
+    isMerged && grokBot ? { ...grokBot, isUnified: true } : grokBot;
 
   const panelLines = buildOpenUsagePanelLines({
     planMeters,
     meters: { primaryPercent, quotaPercent, spendPercent },
     quota,
-    grokBot,
+    grokBot: grokForPanel,
     credits,
+    isMerged,
+    requestBasedFallback,
     spend,
     window: windowMeta,
   });
@@ -2128,15 +2366,16 @@ export async function fetchMemberSnapshot(cookieValue) {
     name: me.name,
     plan: {
       ...plan,
-      membershipType: planMeters.membershipType || plan.membershipType,
-      planName: planInfo?.planName || null,
+      membershipType,
+      planName: displayPlanName,
       price: planInfo?.price || null,
       includedUsagePeriod: planInfo?.includedUsagePeriod || null,
+      isMerged,
     },
     quota,
     hardLimit,
     planMeters,
-    grokBot,
+    grokBot: grokForPanel,
     credits,
     spend,
     panelLines,

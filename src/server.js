@@ -37,14 +37,24 @@ import {
   renewCookieIfNeeded,
   uselessReportReason,
 } from './cursor-api.js';
-import { isMemberDue as isMemberDueByInterval } from './refresh-due.js';
+import {
+  isMemberDue as isMemberDueByInterval,
+  isRefreshHeld,
+  nextRefreshBackoffMs,
+} from './refresh-due.js';
 import {
   ensureMemberUsageEventsSynced,
   enrichPublicMemberFromEvents,
   fillSnapshotSpendFromLocalEvents,
+  loadCycleRange,
   loadPreviousCycle,
   persistSnapshotUsageEvents,
+  preloadDuePrevCycles,
+  prevCycleNeedsPreload,
+  refreshPrevCycleSummaryFromLocal,
 } from './usage-events-sync.js';
+import { buildPreviousCycleReport } from './prev-cycle-report.js';
+import { isFreePlan } from '../public/shared.js';
 import { sessionFromCookie } from './auth.js';
 import { probeLocalCursorSession, resolveLocalCursorSession } from './local-session.js';
 import {
@@ -73,6 +83,7 @@ import {
   listMembers,
   listUsageEvents,
   pruneOperationalData,
+  listBillingCycles,
   saveSyncResult,
   setUsagePercentHistory,
   toPublicMember,
@@ -80,6 +91,7 @@ import {
   rollbackMemberSession,
   upsertMemberBySession,
 } from './store.js';
+import { resolveDetailBillingCycles } from './member-billing-cycles.js';
 import { localDayStartMs } from './usage-events.js';
 import {
   archiveYesterdayPercents,
@@ -184,6 +196,10 @@ const PUBLIC_STATIC = new Set([
 /** @type {ReturnType<typeof setInterval> | null} */
 let autoRefreshTimer = null;
 /** @type {ReturnType<typeof setInterval> | null} */
+let prevCyclePreloadTimer = null;
+/** 正在预加载上个周期的账号，避免定时任务与刷新后补载叠跑 */
+const prevCyclePreloadingIds = new Set();
+/** @type {ReturnType<typeof setInterval> | null} */
 let logPruneTimer = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let usagePercentArchiveTimer = null;
@@ -191,6 +207,8 @@ let usagePercentArchiveTimer = null;
 let usagePercentArchiveInterval = null;
 /** 正在刷新的成员，避免上报与定时器重复拉同一账号。 */
 const refreshingIds = new Set();
+/** @type {Map<string, { untilMs: number, failCount: number }>} 账号级刷新 hold（进程内，重启清空） */
+const refreshHoldById = new Map();
 
 /**
  * @param {import('node:http').IncomingMessage} req
@@ -304,6 +322,9 @@ function buildTeamSummary(members) {
     if (m.lastError) errored++;
     else if (m.lastSnapshot) ok++;
 
+    // Free 不计入用量汇总（仍计异常/正常账号数）
+    if (isFreePlan(m)) continue;
+
     const snap = m.lastSnapshot;
     if (!snap) continue;
     // 顶部汇总按「今日」跨账号合计，与列表 Today 行一致
@@ -394,6 +415,7 @@ async function refreshOne(id, ctx = {}) {
         console.warn('[usage-events] 本地回填失败', id, fillErr?.message || fillErr);
       }
       const result = await saveSyncResult(id, { snapshot });
+      refreshHoldById.delete(id);
       const updateBits = ['用量快照'];
       if (tokenRenewed) updateBits.push('已续期 Token');
       if (fetchedEvents > 0 || persistedEvents.upserted > 0) {
@@ -416,6 +438,10 @@ async function refreshOne(id, ctx = {}) {
             ? snapshot.warnings.join(' | ')
             : undefined,
       });
+      // 刷新可能刚跨周期：异步预加载上个周期，不挡主路径
+      queueMicrotask(() => {
+        preloadPrevCycleForMemberId(id).catch(() => {});
+      });
       return result;
     } catch (e) {
       if (isCursorAuthFailure(e)) {
@@ -433,6 +459,7 @@ async function refreshOne(id, ctx = {}) {
               // 回填失败不影响续期后的主路径
             }
             const result = await saveSyncResult(id, { snapshot });
+            refreshHoldById.delete(id);
             await writeAppLog('刷新', {
               账号: label,
               来源: source,
@@ -447,6 +474,7 @@ async function refreshOne(id, ctx = {}) {
           }
         } catch (renewErr) {
           const msg = renewErr?.message || e?.message || String(e);
+          noteRefreshFailure(id, renewErr || e, { auth: true });
           const result = await saveSyncResult(id, { error: msg });
           await writeAppLog('刷新', {
             账号: label,
@@ -461,6 +489,7 @@ async function refreshOne(id, ctx = {}) {
       }
       const msg = e?.message || String(e);
       const keepSnapshot = isTransientCursorError(e) && Boolean(member.lastSnapshot);
+      noteRefreshFailure(id, e, { auth: isCursorAuthFailure(e) });
       const result = await saveSyncResult(id, { error: msg, transient: keepSnapshot });
       await writeAppLog('刷新', {
         账号: label,
@@ -478,13 +507,32 @@ async function refreshOne(id, ctx = {}) {
 }
 
 /**
- * 是否已到自动刷新时机：同步周期到期、重置后补偿，或瞬时错误尽快再试。
- * @param {{ lastSyncedAt?: string | null, lastError?: string | null, lastSnapshot?: any }} member
+ * 记录刷新失败 hold：429 跟 Retry-After；鉴权约 1 小时；其余 5 分钟起倍增到 1 小时。
+ * 手动刷新（refreshOne 直接调用）仍会执行，hold 只挡自动扫描。
+ * @param {string} id
+ * @param {any} error
+ * @param {{ auth?: boolean }} [opts]
+ */
+function noteRefreshFailure(id, error, opts = {}) {
+  const prev = refreshHoldById.get(id);
+  const failCount = (prev?.failCount || 0) + 1;
+  const backoffMs = nextRefreshBackoffMs(failCount, {
+    auth: opts.auth === true,
+    retryAfterMs: error?.retryAfterMs,
+  });
+  refreshHoldById.set(id, { failCount, untilMs: Date.now() + backoffMs });
+}
+
+/**
+ * 是否已到自动刷新时机：同步周期到期、重置后补偿；hold 中则跳过。
+ * 瞬时错误仍尽快再试，但受账号 hold（尤其 429）约束。
+ * @param {{ id?: string, lastSyncedAt?: string | null, lastError?: string | null, lastSnapshot?: any }} member
  * @param {number} intervalSec
  * @param {number} nowMs
  */
 function isMemberDue(member, intervalSec, nowMs = Date.now()) {
-  // 瞬时错误红条尽快再试，不必等满同步周期
+  if (member?.id && isRefreshHeld(refreshHoldById.get(member.id), nowMs)) return false;
+  // 瞬时错误红条尽快再试，不必等满同步周期（仍受上方 hold 约束）
   if (member.lastError && isTransientCursorError({ message: member.lastError })) return true;
   return isMemberDueByInterval(member, intervalSec, nowMs);
 }
@@ -662,6 +710,93 @@ function setupUsagePercentArchiveSchedule() {
 
 /** 内部扫描间隔：只负责醒来检查谁到期，不是用户配置。 */
 const AUTO_REFRESH_SCAN_SEC = 30;
+/** 上个周期预加载扫描间隔（低并发补缺缓存，减轻详情页首开等待）。 */
+const PREV_CYCLE_PRELOAD_SCAN_MS = 15 * 60 * 1000;
+
+/**
+ * 单账号预加载上个周期（已缓存 / 未到收尾则跳过）。
+ * @param {string} id
+ */
+async function preloadPrevCycleForMemberId(id) {
+  if (!id || prevCyclePreloadingIds.has(id) || refreshingIds.has(id)) return null;
+  const member = await getMemberInternal(id);
+  if (!member || !prevCycleNeedsPreload(member)) return null;
+  prevCyclePreloadingIds.add(id);
+  try {
+    const data = await loadPreviousCycle(member);
+    await writeAppLog('上个周期预加载', {
+      账号: memberLogLabel(member),
+      结果: data.source === 'cursor' || data.source === 'stored' ? '成功' : '本地兜底',
+      来源: data.source,
+      周期: `${data.startIso} → ${data.endIso}`,
+      类型: data.cycleKind === 'weekly' ? '周订' : '月订',
+    });
+    return data;
+  } catch (e) {
+    await writeAppLog('上个周期预加载', {
+      账号: memberLogLabel(member),
+      结果: '失败',
+      错误: e?.message || String(e),
+    });
+    return null;
+  } finally {
+    prevCyclePreloadingIds.delete(id);
+  }
+}
+
+/**
+ * 扫描缺缓存账号并预加载上个周期。
+ * @param {{ trigger?: string }} [ctx]
+ */
+async function runPrevCyclePreloadPass(ctx = {}) {
+  const members = await getAllMembersInternal();
+  const due = members.filter(
+    (m) => !prevCyclePreloadingIds.has(m.id) && !refreshingIds.has(m.id) && prevCycleNeedsPreload(m),
+  );
+  if (!due.length) return { due: 0, done: 0, results: [] };
+  const batch = due.slice(0, 8);
+  await writeAppLog('上个周期预加载', {
+    触发: ctx.trigger || '定时扫描',
+    到期账号数: due.length,
+    更新: `开始预加载 ${batch.length} 个账号`,
+  });
+  for (const m of batch) prevCyclePreloadingIds.add(m.id);
+  try {
+    const result = await preloadDuePrevCycles(batch, { concurrency: 1, limit: batch.length });
+    const ok = result.results.filter((r) => r.ok).length;
+    await writeAppLog('上个周期预加载', {
+      触发: ctx.trigger || '定时扫描',
+      结果: '完成',
+      成功: ok,
+      失败: result.results.length - ok,
+      账号: result.results.map((r) => r.id).join('、'),
+    });
+    return result;
+  } finally {
+    for (const m of batch) prevCyclePreloadingIds.delete(m.id);
+  }
+}
+
+function setupPrevCyclePreloadSchedule() {
+  if (prevCyclePreloadTimer) {
+    clearInterval(prevCyclePreloadTimer);
+    prevCyclePreloadTimer = null;
+  }
+  console.log(
+    `上个周期预加载：每 ${Math.round(PREV_CYCLE_PRELOAD_SCAN_MS / 60000)} 分钟扫描缺缓存账号`,
+  );
+  prevCyclePreloadTimer = setInterval(() => {
+    runPrevCyclePreloadPass({ trigger: '定时扫描' }).catch((e) =>
+      console.error('上个周期预加载失败:', e?.message || e),
+    );
+  }, PREV_CYCLE_PRELOAD_SCAN_MS);
+  // 启动后稍晚跑一轮，避开与自动刷新抢 Cursor
+  setTimeout(() => {
+    runPrevCyclePreloadPass({ trigger: '启动补载' }).catch((e) =>
+      console.error('上个周期预加载启动失败:', e?.message || e),
+    );
+  }, 90_000);
+}
 
 /**
  * 定时扫描到期账号。
@@ -1313,6 +1448,43 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { logs });
     }
 
+    if (method === 'GET' && pathname === '/api/reports/previous-cycle') {
+      await assertAdmin(req);
+      const members = await getAllMembersInternal();
+      // 打开报表时用本地事件按最新口径重算已缓存摘要（纠正旧版「花费=价值」）
+      await Promise.all(
+        members.map(async (m) => {
+          try {
+            const fresh = await refreshPrevCycleSummaryFromLocal(m);
+            if (fresh) m.prevCycleSummary = fresh;
+          } catch {
+            /* 单账号失败不影响整表 */
+          }
+        }),
+      );
+      return sendJson(res, 200, buildPreviousCycleReport(members));
+    }
+
+    if (method === 'POST' && pathname === '/api/reports/previous-cycle/preload') {
+      await assertAdmin(req);
+      const result = await runPrevCyclePreloadPass({ trigger: '报表手动预加载' });
+      const members = await getAllMembersInternal();
+      await Promise.all(
+        members.map(async (m) => {
+          try {
+            const fresh = await refreshPrevCycleSummaryFromLocal(m);
+            if (fresh) m.prevCycleSummary = fresh;
+          } catch {
+            /* ignore */
+          }
+        }),
+      );
+      return sendJson(res, 200, {
+        preload: result,
+        report: buildPreviousCycleReport(members),
+      });
+    }
+
     if (method === 'GET' && pathname === '/api/reports/switches') {
       await assertAdmin(req);
       const limit = Number(url.searchParams.get('limit') || 500);
@@ -1679,9 +1851,11 @@ const server = http.createServer(async (req, res) => {
       const startMs = localDayStartMs(now);
       const endMs = now + 1;
       const model = String(url.searchParams.get('model') || '').trim();
+      const allMembers = await listMembers();
+      const freeIds = allMembers.filter((m) => isFreePlan(m)).map((m) => m.id);
       if (model) {
-        const rows = await aggregateUsageModelAccountsInRange(model, startMs, endMs);
-        const memberById = new Map((await listMembers()).map((m) => [m.id, m]));
+        const rows = await aggregateUsageModelAccountsInRange(model, startMs, endMs, freeIds);
+        const memberById = new Map(allMembers.map((m) => [m.id, m]));
         return sendJson(res, 200, {
           model,
           startMs,
@@ -1694,7 +1868,7 @@ const server = http.createServer(async (req, res) => {
             .filter((r) => r.tokens > 0),
         });
       }
-      const models = await aggregateUsageModelsInRange(startMs, endMs);
+      const models = await aggregateUsageModelsInRange(startMs, endMs, freeIds);
       return sendJson(res, 200, { startMs, endMs, models });
     }
 
@@ -1880,7 +2054,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const memberMatch = pathname.match(
-      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/previous-cycle|\/user-rules|\/switch|\/presence)?$/,
+      /^\/api\/members\/([^/]+)(\/refresh|\/usage-events|\/previous-cycle|\/cycle-range|\/user-rules|\/switch|\/presence)?$/,
     );
     if (memberMatch) {
       const id = decodeURIComponent(memberMatch[1]);
@@ -1907,9 +2081,14 @@ const server = http.createServer(async (req, res) => {
       if (method === 'GET' && !suffix) {
         const member = await getMemberInternal(id);
         if (!member) throw new Error('成员不存在');
-        return sendJson(res, 200, {
-          member: await enrichPublicMemberFromEvents(member),
-        });
+        const publicMember = await enrichPublicMemberFromEvents(member);
+        try {
+          const rows = await listBillingCycles(id, { limit: 2 });
+          publicMember.billingCycles = await resolveDetailBillingCycles(member, rows);
+        } catch {
+          publicMember.billingCycles = { current: null, previous: null };
+        }
+        return sendJson(res, 200, { member: publicMember });
       }
 
       if (method === 'GET' && suffix === '/usage-events') {
@@ -1937,6 +2116,16 @@ const server = http.createServer(async (req, res) => {
         const member = await getMemberInternal(id);
         if (!member) throw new Error('成员不存在');
         return sendJson(res, 200, await loadPreviousCycle(member));
+      }
+
+      if (method === 'GET' && suffix === '/cycle-range') {
+        const member = await getMemberInternal(id);
+        if (!member) throw new Error('成员不存在');
+        const startRaw = url.searchParams.get('start') || url.searchParams.get('from');
+        const endRaw = url.searchParams.get('end') || url.searchParams.get('to');
+        const startMs = Number(startRaw) || Date.parse(String(startRaw || ''));
+        const endMs = Number(endRaw) || Date.parse(String(endRaw || ''));
+        return sendJson(res, 200, await loadCycleRange(member, { startMs, endMs }));
       }
 
       if (method === 'GET' && suffix === '/user-rules') {
@@ -2058,6 +2247,7 @@ if (presenceReconciled) {
   console.log(`[presence] 已纠正写库 ${presenceReconciled} 条席位`);
 }
 setupServerAutoRefresh();
+setupPrevCyclePreloadSchedule();
 setupLogPruneSchedule();
 setupUsagePercentArchiveSchedule();
 setupExpiringNotifySchedule();

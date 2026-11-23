@@ -23,6 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const STORE_PATH = path.join(DATA_DIR, 'members.json');
 const USERS_PATH = path.join(DATA_DIR, 'users.json');
+const BILLING_CYCLES_PATH = path.join(DATA_DIR, 'member-billing-cycles.json');
 
 /** @type {ReturnType<typeof createSideDataApi> | null} */
 let side = null;
@@ -358,6 +359,8 @@ export async function deleteMember(id) {
   if (next.length === store.members.length) throw new Error('成员不存在');
   store.members = next;
   await writeStore(store);
+  const cycles = await readBillingCycles();
+  await writeBillingCycles(cycles.filter((r) => r.memberId !== id));
 }
 
 /** file 驱动不持久化用量事件；接口保留以免门面报错。 */
@@ -439,6 +442,7 @@ export async function saveSyncResult(id, result) {
   const idx = store.members.findIndex((m) => m.id === id);
   if (idx < 0) return;
   const member = store.members[idx];
+  const prevMember = { ...member, lastSnapshot: member.lastSnapshot, usagePercentHistory: member.usagePercentHistory };
   const now = new Date().toISOString();
   if (result.snapshot) {
     carryCycleHistory(member.lastSnapshot, result.snapshot);
@@ -471,6 +475,14 @@ export async function saveSyncResult(id, result) {
   member.updatedAt = now;
   store.members[idx] = member;
   await writeStore(store);
+  if (result.snapshot) {
+    try {
+      const { persistMemberBillingCycle } = await import('./member-billing-cycles.js');
+      await persistMemberBillingCycle(id, prevMember, result.snapshot, member.usagePercentHistory);
+    } catch (e) {
+      console.warn('[billing-cycles] 落库失败', id, e?.message || e);
+    }
+  }
   return toPublicMember(member);
 }
 
@@ -500,6 +512,98 @@ export async function setPrevCycleSummary(id, summary) {
   if (!member) return;
   member.prevCycleSummary = summary;
   await writeStore(store);
+}
+
+/** @returns {Promise<import('./member-billing-cycles.js').BillingCycleRow[]>} */
+async function readBillingCycles() {
+  try {
+    const raw = await readFile(BILLING_CYCLES_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return [];
+    throw e;
+  }
+}
+
+/** @param {import('./member-billing-cycles.js').BillingCycleRow[]} rows */
+async function writeBillingCycles(rows) {
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(BILLING_CYCLES_PATH, JSON.stringify(rows, null, 2), 'utf8');
+}
+
+/**
+ * @param {import('./member-billing-cycles.js').BillingCycleRow} row
+ */
+export async function upsertBillingCycle(row) {
+  if (!row?.memberId || !row?.startIso) return;
+  const rows = await readBillingCycles();
+  const now = row.updatedAt || new Date().toISOString();
+  if (row.status === 'current') {
+    for (const r of rows) {
+      if (r.memberId === row.memberId && r.status === 'current' && r.startIso !== row.startIso) {
+        r.status = 'closed';
+        r.updatedAt = now;
+      }
+    }
+  }
+  const idx = rows.findIndex((r) => r.memberId === row.memberId && r.startIso === row.startIso);
+  const next = {
+    ...row,
+    source: 'billing',
+    totals: row.totals ?? (idx >= 0 ? rows[idx].totals : null),
+    models: row.models ?? (idx >= 0 ? rows[idx].models : null),
+    closedAt: row.closedAt ?? (idx >= 0 ? rows[idx].closedAt : null),
+    storedAt: row.storedAt || (idx >= 0 ? rows[idx].storedAt : now),
+    updatedAt: now,
+  };
+  if (idx >= 0) rows[idx] = next;
+  else rows.push(next);
+  await writeBillingCycles(rows);
+}
+
+/**
+ * @param {string} memberId
+ * @param {import('./member-billing-cycles.js').BillingCycleRow} row
+ */
+export async function closeBillingCycle(memberId, row) {
+  await upsertBillingCycle({
+    ...row,
+    memberId,
+    status: 'closed',
+    closedAt: row.closedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** @param {string} memberId */
+export async function getCurrentBillingCycle(memberId) {
+  const rows = await readBillingCycles();
+  return (
+    rows
+      .filter((r) => r.memberId === memberId && r.status === 'current')
+      .sort((a, b) => String(b.startIso).localeCompare(String(a.startIso)))[0] || null
+  );
+}
+
+/**
+ * @param {string} memberId
+ * @param {{ limit?: number, offset?: number }} [opts]
+ */
+export async function listBillingCycles(memberId, opts = {}) {
+  const limit = Math.max(1, Math.min(100, Number(opts.limit) || 20));
+  const offset = Math.max(0, Number(opts.offset) || 0);
+  const rows = await readBillingCycles();
+  return rows
+    .filter((r) => r.memberId === memberId)
+    .sort((a, b) => String(b.startIso).localeCompare(String(a.startIso)))
+    .slice(offset, offset + limit);
+}
+
+/** @param {string} memberId */
+export async function getLatestClosedBillingCycle(memberId) {
+  const rows = await listBillingCycles(memberId, { limit: 50 });
+  return rows.find((r) => r.status === 'closed') || null;
 }
 
 /**

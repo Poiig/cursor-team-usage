@@ -19,11 +19,13 @@ import {
   formatPlanLabel,
   formatSpendPart,
   formatTokens,
+  isFreePlan,
   loadSettings,
   money,
   todayUsagePercent,
   formatOperatorLabel,
   planBadgeClass,
+  planTierRank,
   renderBarChart,
   renderHorizontalBars,
   renderLineChart,
@@ -119,15 +121,27 @@ const els = {
   btnRefreshReports: document.getElementById('btnRefreshReports'),
   chartTeamUsage: document.getElementById('chartTeamUsage'),
   chartSwitchDaily: document.getElementById('chartSwitchDaily'),
-  chartAccountUsage: document.getElementById('chartAccountUsage'),
+  chartAccountUsageMonthly: document.getElementById('chartAccountUsageMonthly'),
+  chartAccountUsageWeekly: document.getElementById('chartAccountUsageWeekly'),
   chartSwitchByUser: document.getElementById('chartSwitchByUser'),
   reportKpis: document.getElementById('reportKpis'),
   chartTeamTokens: document.getElementById('chartTeamTokens'),
   chartTeamSpend: document.getElementById('chartTeamSpend'),
   chartTeamRequests: document.getElementById('chartTeamRequests'),
-  chartAccountPace: document.getElementById('chartAccountPace'),
-  chartAccountTokens: document.getElementById('chartAccountTokens'),
+  chartAccountPaceMonthly: document.getElementById('chartAccountPaceMonthly'),
+  chartAccountPaceWeekly: document.getElementById('chartAccountPaceWeekly'),
+  chartAccountTokensMonthly: document.getElementById('chartAccountTokensMonthly'),
+  chartAccountTokensWeekly: document.getElementById('chartAccountTokensWeekly'),
   chartTodayModels: document.getElementById('chartTodayModels'),
+  prevCycleReportNote: document.getElementById('prevCycleReportNote'),
+  prevCycleReportKpis: document.getElementById('prevCycleReportKpis'),
+  prevCycleCohorts: document.getElementById('prevCycleCohorts'),
+  prevCycleDrillFilters: document.getElementById('prevCycleDrillFilters'),
+  chartPrevWeeklyTokens: document.getElementById('chartPrevWeeklyTokens'),
+  chartPrevMonthlyTokens: document.getElementById('chartPrevMonthlyTokens'),
+  chartPrevCycleModels: document.getElementById('chartPrevCycleModels'),
+  prevCycleAccountTable: document.getElementById('prevCycleAccountTable'),
+  btnPreloadPrevCycle: document.getElementById('btnPreloadPrevCycle'),
   statusFilter: document.getElementById('statusFilter'),
   userTableBody: document.getElementById('userTableBody'),
   userCount: document.getElementById('userCount'),
@@ -198,18 +212,9 @@ function isSpeedingSwitchAdminExempt() {
   return isAdmin() && serverBlockSpeedingSwitchAdminExempt;
 }
 
-/** Free 套餐：归入异常，便于从可用池里清出去。 */
+/** Free 套餐：归入异常，便于从可用池里清出去；报表也不计。 */
 function isFreePlanMember(member) {
-  const plan = String(
-    member?.planName ||
-      member?.membershipType ||
-      member?.lastSnapshot?.plan?.planName ||
-      member?.lastSnapshot?.plan?.membershipType ||
-      '',
-  )
-    .trim()
-    .toLowerCase();
-  return plan === 'free' || /\bfree\b/.test(plan);
+  return isFreePlan(member);
 }
 
 /** 额度已用尽（≥100%）→ 异常；含重置日当天 / 已过重置但尚未刷到新周期。 */
@@ -454,7 +459,8 @@ function statusBadgeHtml(member) {
   if (status === 'pending') return `${expiring}<span class="badge muted">待同步</span>`;
   const pace = computeUsagePace(member);
   if (status === 'danger') {
-    return `${expiring}<span class="badge danger" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '超速')}</span>`;
+    // 超速用黄，与异常红区分
+    return `${expiring}<span class="badge speeding" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '超速')}</span>`;
   }
   if (status === 'warn') {
     return `${expiring}<span class="badge warn" title="${escapeHtml(pace?.summary || '')}">${escapeHtml(pace?.label || '偏快')}</span>`;
@@ -481,7 +487,8 @@ function paceOnlyBadgeHtml(member) {
     if (used >= 80) return `<span class="badge warn">偏快</span>`;
     return `<span class="badge ok">充足</span>`;
   }
-  const cls = pace.status === 'danger' ? 'danger' : pace.status === 'warn' ? 'warn' : 'ok';
+  const cls =
+    pace.status === 'danger' ? 'speeding' : pace.status === 'warn' ? 'warn' : 'ok';
   return `<span class="badge ${cls}" title="${escapeHtml(pace.summary || '')}">${escapeHtml(pace.label)}</span>`;
 }
 
@@ -786,7 +793,7 @@ function renderSummary(summary) {
     </button>
     <button type="button" class="stat stat-click" id="btnFilterSpeeding" title="只看按工作日节奏预计撑不到期末的账号">
       <p class="label">超速</p>
-      <p class="value ${speedingCount > 0 ? 'danger' : ''}">${speedingCount}</p>
+      <p class="value ${speedingCount > 0 ? 'speeding' : ''}">${speedingCount}</p>
       <p class="note">节奏撑不到期末</p>
     </button>
     <button type="button" class="stat stat-click" id="btnFilterExpiring" title="只看十天内额度周期重置的账号">
@@ -872,9 +879,10 @@ function renderPeopleRank(date) {
   if (titleEl) titleEl.textContent = `${dayText}用量排行`;
   if (hintEl) hintEl.textContent = `按${dayText} tokens 从高到低；点击行可进入账号详情。`;
   if (head) {
-    head.innerHTML = `<th>#</th><th>账号</th><th>${date ? '当日 tokens' : '今日 tokens'}</th><th>今日%</th><th>状态</th><th>花费</th>`;
+    head.innerHTML = `<th>#</th><th>账号</th><th>${date ? '当日 tokens' : '今日 tokens'}</th><th class="num">今日%</th><th>状态</th><th class="num">花费</th>`;
   }
   const ranked = membersCache
+    .filter((m) => !isFreePlanMember(m))
     .map((m) => ({ m, u: usageOf(m) }))
     .sort((a, b) => b.u.tokens - a.u.tokens);
   if (!els.todayRankBody) return;
@@ -898,9 +906,9 @@ function renderPeopleRank(date) {
               ${idn.subtitle ? `<span class="rank-sub">${escapeHtml(idn.subtitle)}</span>` : ''}
             </td>
             <td class="rank-metric">${escapeHtml(formatTokens(tokens))}</td>
-            <td class="rank-metric">${escapeHtml(pctText)}</td>
-            <td class="rank-metric">${paceOnlyBadgeHtml(m)}</td>
-            <td class="rank-metric">${money(dollars)}</td>
+            <td class="num">${escapeHtml(pctText)}</td>
+            <td>${paceOnlyBadgeHtml(m)}</td>
+            <td class="num">${money(dollars)}</td>
           </tr>
         `;
       })
@@ -1064,10 +1072,13 @@ function setAccountStatusFilter(next) {
 
 /*
  * 地址路由：每个页面 / 筛选都有自己的 URL，刷新、后退、分享链接都能回到原处。
- * #/accounts[/ok|speeding|expiring|error][?sort=&q=] · #/reports · #/logs/<kind> · #/users · #/help
+ * #/accounts[/ok|speeding|expiring|error][?sort=&q=] · #/reports[/prev] · #/logs/<kind> · #/users · #/help
  */
 const ACCOUNT_FILTERS = new Set(['ok', 'speeding', 'expiring', 'error']);
 const LOG_KINDS = new Set(['switches', 'reports', 'refreshes', 'logins']);
+const REPORT_KINDS = new Set(['overview', 'prev']);
+/** @type {'overview' | 'prev'} */
+let activeReportKind = 'overview';
 
 function parseRoute() {
   const raw = location.hash.replace(/^#\/?/, '');
@@ -1112,6 +1123,7 @@ function applyRoute() {
   if (!currentUser) return;
   const { view, sub, params } = parseRoute();
   if (view === 'logs') setLogKind(LOG_KINDS.has(sub) ? sub : 'switches');
+  if (view === 'reports') setReportKind(REPORT_KINDS.has(sub) ? sub : 'overview', { silent: true });
   if (view === 'accounts') {
     accountStatusFilter = ACCOUNT_FILTERS.has(sub) ? sub : 'all';
     if (els.sortBy) {
@@ -1126,6 +1138,12 @@ function applyRoute() {
   if (shown !== view) history.replaceState(null, '', routeHash(shown));
   else if (view === 'logs' && sub !== activeLogKind) {
     history.replaceState(null, '', routeHash('logs', activeLogKind));
+  } else if (view === 'reports' && sub !== activeReportKind && !(sub === '' && activeReportKind === 'overview')) {
+    history.replaceState(
+      null,
+      '',
+      routeHash('reports', activeReportKind === 'overview' ? '' : activeReportKind),
+    );
   }
   if (shown === 'accounts') {
     // 详情页「返回账号列表」据此直达，不靠 history.back（详情内切页签会叠加多条历史）
@@ -1210,9 +1228,35 @@ function showView(view) {
   });
   syncNotifyFab(next);
   if (next === 'logs') void loadLogs();
-  if (next === 'reports' && isAdmin()) void loadReports();
+  if (next === 'reports' && isAdmin()) void loadActiveReport();
   if (next === 'users' && isAdmin()) void loadUsers();
   return next;
+}
+
+/**
+ * 报表子页：当前概览 / 上个周期。
+ * @param {'overview' | 'prev'} kind
+ * @param {{ silent?: boolean }} [opts] silent=true 只切 UI，不改 hash（由 applyRoute 调用）
+ */
+function setReportKind(kind, opts = {}) {
+  const next = kind === 'prev' && isAdmin() ? 'prev' : 'overview';
+  activeReportKind = next;
+  document.querySelectorAll('.reports-nav-item').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.report === next);
+  });
+  document.querySelectorAll('[data-report-pane]').forEach((pane) => {
+    pane.classList.toggle('hidden', pane.getAttribute('data-report-pane') !== next);
+  });
+  els.btnPreloadPrevCycle?.classList.toggle('hidden', next !== 'prev');
+  if (!opts.silent) {
+    navigate('reports', next === 'overview' ? '' : next);
+  }
+}
+
+/** 按当前报表子页加载数据。 */
+function loadActiveReport() {
+  if (activeReportKind === 'prev') return loadPreviousCycleReportPage();
+  return loadReports();
 }
 
 /** @param {'switches' | 'reports' | 'refreshes' | 'logins'} kind */
@@ -1599,13 +1643,15 @@ async function loadReports() {
       api('/api/switch-logs?limit=500'),
     ]);
     membersCache = mem.members || [];
+    // 概览报表不计 Free（列表缓存仍保留完整名单，供其它页用）
+    const reportMembers = membersCache.filter((m) => !isFreePlanMember(m));
     const operators = data.operators || [];
     const recent = switchData.logs || data.recent || [];
 
     // 团队日均用量：各账号 usagePercentHistory 按日平均
     /** @type {Map<string, { sum: number, n: number }>} */
     const byDate = new Map();
-    for (const m of membersCache) {
+    for (const m of reportMembers) {
       for (const row of m.usagePercentHistory || []) {
         if (row?.total == null || !row.date) continue;
         const cur = byDate.get(row.date) || { sum: 0, n: 0 };
@@ -1650,11 +1696,18 @@ async function loadReports() {
       return { text: formatPlanLabel(raw), className: planBadgeClass(raw) };
     };
     const tokensFmt = (v) => (v > 0 ? formatTokens(v) : '0');
+    /** 概览横向条：官方档位（Pro+/Super 优先）再按数值 */
+    const byTierThenValue = (a, b) => {
+      const ra = planTierRank(a.m?.planName || a.m?.lastSnapshot?.plan?.planName, a.m?.membershipType);
+      const rb = planTierRank(b.m?.planName || b.m?.lastSnapshot?.plan?.planName, b.m?.membershipType);
+      if (ra !== rb) return ra - rb;
+      return (Number(b.value) || 0) - (Number(a.value) || 0);
+    };
 
     // 团队每日 tokens / 花费 / 请求：各账号 spend.daily（近 30 日）按日求和
     /** @type {Map<string, { tokens: number, dollars: number, requests: number }>} */
     const teamDaily = new Map();
-    for (const m of membersCache) {
+    for (const m of reportMembers) {
       for (const d of m.lastSnapshot?.spend?.daily || []) {
         if (!d?.date) continue;
         const cur = teamDaily.get(d.date) || { tokens: 0, dollars: 0, requests: 0 };
@@ -1684,50 +1737,86 @@ async function loadReports() {
       (v) => String(Math.round(v)),
     );
 
-    // 各账号剩余用量：多的在前，便于挑号
-    const remainingRows = membersCache
-      .map((m) => ({ m, left: remainingPercent(m) }))
-      .filter((r) => r.left != null)
-      .sort((a, b) => b.left - a.left)
-      .map(({ m, left }) => ({
-        label: nameOf(m),
-        badge: planBadgeOf(m),
-        value: left,
-        color: left < 20 ? '#f26d6d' : left < 40 ? '#f0b35a' : '#5fd18b',
-      }));
-    renderHorizontalBars(els.chartAccountUsage, remainingRows, '#5fd18b', (v) => `${v.toFixed(1)}%`, {
+    const monthlyMembers = reportMembers.filter((m) => !isWeeklyMember(m));
+    const weeklyMembers = reportMembers.filter((m) => isWeeklyMember(m));
+
+    /** @param {typeof reportMembers} list */
+    const remainingOf = (list) =>
+      list
+        .map((m) => ({ m, value: remainingPercent(m) }))
+        .filter((r) => r.value != null)
+        .sort(byTierThenValue)
+        .map(({ m, value }) => ({
+          label: nameOf(m),
+          badge: planBadgeOf(m),
+          value,
+          href: `/detail.html?id=${encodeURIComponent(m.id)}`,
+          color: value < 20 ? '#f26d6d' : value < 40 ? '#f0b35a' : '#5fd18b',
+          tip: `${nameOf(m)} · 剩余 ${value.toFixed(1)}% · 点击进详情`,
+        }));
+    const remainingMonthly = remainingOf(monthlyMembers);
+    const remainingWeekly = remainingOf(weeklyMembers);
+    renderHorizontalBars(els.chartAccountUsageMonthly, remainingMonthly, '#5fd18b', (v) => `${v.toFixed(1)}%`, {
+      max: 100,
+    });
+    renderHorizontalBars(els.chartAccountUsageWeekly, remainingWeekly, '#38d6c7', (v) => `${v.toFixed(1)}%`, {
       max: 100,
     });
 
-    // 预计期末用量：按工作日节奏外推
-    const paceRows = membersCache
-      .map((m) => ({ m, pace: computeUsagePace(m) }))
-      .filter((r) => r.pace)
-      .sort((a, b) => b.pace.projectedEndPercent - a.pace.projectedEndPercent)
-      .map(({ m, pace }) => ({
-        label: nameOf(m),
-        badge: planBadgeOf(m),
-        value: pace.projectedEndPercent,
-        color: pace.projectedEndPercent >= 100 ? '#f26d6d' : pace.projectedEndPercent >= 90 ? '#f0b35a' : '#8aa2ff',
-        tip: `${nameOf(m)} · 已用 ${pace.usedPercent}% · 日均 ${pace.dailyPercent}%/工作日 · 预计期末 ${pace.projectedEndPercent}%`,
-      }));
-    const paceMax = Math.max(100, ...paceRows.map((r) => r.value));
-    renderHorizontalBars(els.chartAccountPace, paceRows, '#8aa2ff', (v) => `${v.toFixed(1)}%`, {
-      max: paceMax,
-    });
+    /** @param {typeof reportMembers} list */
+    const paceOf = (list) =>
+      list
+        .map((m) => ({ m, pace: computeUsagePace(m) }))
+        .filter((r) => r.pace)
+        .map(({ m, pace }) => ({ m, value: pace.projectedEndPercent, pace }))
+        .sort(byTierThenValue)
+        .map(({ m, pace, value }) => ({
+          label: nameOf(m),
+          badge: planBadgeOf(m),
+          value,
+          href: `/detail.html?id=${encodeURIComponent(m.id)}`,
+          color: value >= 100 ? '#f26d6d' : value >= 90 ? '#f0b35a' : '#8aa2ff',
+          tip: `${nameOf(m)} · 已用 ${pace.usedPercent}% · 日均 ${pace.dailyPercent}%/工作日 · 预计期末 ${value}% · 点击进详情`,
+        }));
+    const paceMonthly = paceOf(monthlyMembers);
+    const paceWeekly = paceOf(weeklyMembers);
+    const paceRows = [...paceMonthly, ...paceWeekly];
+    const remainingRows = [...remainingMonthly, ...remainingWeekly];
+    renderHorizontalBars(
+      els.chartAccountPaceMonthly,
+      paceMonthly,
+      '#8aa2ff',
+      (v) => `${v.toFixed(1)}%`,
+      { max: Math.max(100, ...paceMonthly.map((r) => r.value), 1) },
+    );
+    renderHorizontalBars(
+      els.chartAccountPaceWeekly,
+      paceWeekly,
+      '#c38bff',
+      (v) => `${v.toFixed(1)}%`,
+      { max: Math.max(100, ...paceWeekly.map((r) => r.value), 1) },
+    );
 
-    // 各账号近 30 日 tokens
-    const accountTokens = membersCache
-      .map((m) => ({
-        label: nameOf(m),
-        badge: planBadgeOf(m),
-        value: (m.lastSnapshot?.spend?.daily || []).reduce((s, d) => s + (Number(d.tokens) || 0), 0),
-      }))
-      .filter((r) => r.value > 0)
-      .sort((a, b) => b.value - a.value);
-    renderHorizontalBars(els.chartAccountTokens, accountTokens, '#7c9cff', tokensFmt);
+    /** @param {typeof reportMembers} list */
+    const tokensOf = (list) =>
+      list
+        .map((m) => ({
+          m,
+          value: (m.lastSnapshot?.spend?.daily || []).reduce((s, d) => s + (Number(d.tokens) || 0), 0),
+        }))
+        .filter((r) => r.value > 0)
+        .sort(byTierThenValue)
+        .map(({ m, value }) => ({
+          label: nameOf(m),
+          badge: planBadgeOf(m),
+          value,
+          href: `/detail.html?id=${encodeURIComponent(m.id)}`,
+          tip: `${nameOf(m)} · ${formatTokens(value)} · 点击进详情`,
+        }));
+    renderHorizontalBars(els.chartAccountTokensMonthly, tokensOf(monthlyMembers), '#7c9cff', tokensFmt);
+    renderHorizontalBars(els.chartAccountTokensWeekly, tokensOf(weeklyMembers), '#38d6c7', tokensFmt);
 
-    // 今日模型分布：与排行弹窗一样读落库今日窗，避免快照整窗冒充今日
+    // 今日模型分布：点条下钻到该模型各账号用量
     try {
       const todayModelData = await api('/api/usage/today-models');
       const todayModels = Array.isArray(todayModelData.models) ? todayModelData.models : [];
@@ -1735,7 +1824,8 @@ async function loadReports() {
       const modelRows = todayModels.map((r) => ({
         label: r.model,
         value: Number(r.tokens) || 0,
-        tip: `${r.model} · ${formatTokens(r.tokens)} · ${modelTotal ? ((Number(r.tokens) / modelTotal) * 100).toFixed(1) : 0}%`,
+        drill: r.model,
+        tip: `${r.model} · ${formatTokens(r.tokens)} · ${modelTotal ? ((Number(r.tokens) / modelTotal) * 100).toFixed(1) : 0}% · 点击下钻账号`,
       }));
       renderHorizontalBars(els.chartTodayModels, modelRows, '#c38bff', (v) =>
         `${formatTokens(v)} · ${modelTotal ? ((v / modelTotal) * 100).toFixed(1) : 0}%`,
@@ -1776,6 +1866,275 @@ async function loadReports() {
     renderHorizontalBars(els.chartSwitchByUser, byUser, '#ffb86b', (v) => String(Math.round(v)));
   } catch (e) {
     toast(e.message || String(e));
+  }
+}
+
+/** 上个周期报表页专用加载。 */
+async function loadPreviousCycleReportPage() {
+  if (!isAdmin()) return;
+  try {
+    const report = await api('/api/reports/previous-cycle');
+    renderPreviousCycleReport(report);
+  } catch (e) {
+    if (els.prevCycleReportNote) {
+      els.prevCycleReportNote.textContent = `上个周期报表加载失败：${e.message || e}`;
+    }
+    toast(e.message || String(e));
+  }
+}
+
+/**
+ * @param {any} a
+ * @param {any} b
+ * @param {(row: any) => string} nameOf
+ */
+function comparePrevCycleAccounts(a, b, nameOf) {
+  const kindRank = { weekly: 0, monthly: 1 };
+  const ka = kindRank[a.cycleKind] ?? 9;
+  const kb = kindRank[b.cycleKind] ?? 9;
+  if (ka !== kb) return ka - kb;
+  const ra = planTierRank(a.planName, a.membershipType);
+  const rb = planTierRank(b.planName, b.membershipType);
+  if (ra !== rb) return ra - rb;
+  const la = formatPlanLabel(a.planName || a.membershipType || 'unknown');
+  const lb = formatPlanLabel(b.planName || b.membershipType || 'unknown');
+  if (la !== lb) return la.localeCompare(lb, 'zh');
+  const ta = Number(a.totals?.totalTokens) || 0;
+  const tb = Number(b.totals?.totalTokens) || 0;
+  if (tb !== ta) return tb - ta;
+  return nameOf(a).localeCompare(nameOf(b), 'zh');
+}
+
+/** @type {any | null} */
+let prevCycleReportCache = null;
+/** @type {string | null} 分群下钻：pro / pro_plus / xai / other */
+let prevCycleDrillCohort = null;
+
+/**
+ * 报表：上个周期 KPI / 分群对比 / 柱图下钻 / 账号表。
+ * @param {any} report
+ */
+function renderPreviousCycleReport(report) {
+  if (!report) return;
+  prevCycleReportCache = report;
+  if (els.prevCycleReportNote) {
+    const p = report.preload || {};
+    els.prevCycleReportNote.textContent = `${report.note || ''} 缓存 ${p.cached || 0}/${p.total || 0}；缺缓存 ${p.missing || 0}；收尾等待中 ${p.settling || 0}。`;
+  }
+
+  const fmtBucket = (b) => {
+    const t = b?.totals || {};
+    return {
+      label: b?.label || '',
+      cached: Number(b?.cachedCount) || 0,
+      total: Number(b?.accountCount) || 0,
+      tokens: Number(t.totalTokens) || 0,
+      dollars: Number(t.dollars) || 0,
+      billedDollars: Number(t.billedDollars) || 0,
+      requests: Number(t.requests) || 0,
+    };
+  };
+  const weekly = fmtBucket(report.weekly);
+  const monthly = fmtBucket(report.monthly);
+  if (els.prevCycleReportKpis) {
+    els.prevCycleReportKpis.innerHTML = `
+      <article class="stat"><p class="label">周订 · Tokens</p><p class="value">${escapeHtml(formatTokens(weekly.tokens))}</p><p class="note">${weekly.cached}/${weekly.total} 已缓存 · 价值 ${escapeHtml(money(weekly.dollars))} · 按量 ${escapeHtml(money(weekly.billedDollars))}</p></article>
+      <article class="stat"><p class="label">月订 · Tokens</p><p class="value">${escapeHtml(formatTokens(monthly.tokens))}</p><p class="note">${monthly.cached}/${monthly.total} 已缓存 · 价值 ${escapeHtml(money(monthly.dollars))} · 按量 ${escapeHtml(money(monthly.billedDollars))}</p></article>
+      <article class="stat"><p class="label">周订请求</p><p class="value">${weekly.requests}</p><p class="note">上一周额度窗合计</p></article>
+      <article class="stat"><p class="label">月订请求</p><p class="value">${monthly.requests}</p><p class="note">上一自然月账单窗合计</p></article>
+      <article class="stat"><p class="label">预加载进度</p><p class="value">${report.preload?.cached ?? 0}<span class="muted">/${report.preload?.total ?? 0}</span></p><p class="note">缺 ${report.preload?.missing ?? 0} · 等待收尾 ${report.preload?.settling ?? 0}</p></article>
+    `;
+  }
+
+  renderPrevCycleCohorts(report);
+  renderPrevCycleChartsAndTable(report);
+}
+
+/**
+ * Pro / Pro+ / XAI 分群对比卡；点击下钻过滤明细表。
+ * @param {any} report
+ */
+function renderPrevCycleCohorts(report) {
+  if (!els.prevCycleCohorts) return;
+  const order = ['pro', 'pro_plus', 'xai', 'other'];
+  const cohorts = report.cohorts || {};
+  els.prevCycleCohorts.innerHTML = order
+    .map((id) => {
+      const c = cohorts[id];
+      if (!c || !c.accountCount) return '';
+      const t = c.totals || {};
+      const active = prevCycleDrillCohort === id ? ' active' : '';
+      const avg =
+        c.avgUsagePercent == null ? '—' : `${Number(c.avgUsagePercent).toFixed(1)}%`;
+      return `<button type="button" class="prev-cohort-card${active}" data-cohort="${escapeHtml(id)}">
+        <span class="prev-cohort-label">${escapeHtml(c.label || id)}</span>
+        <span class="prev-cohort-blurb">${escapeHtml(c.blurb || '')}</span>
+        <span class="prev-cohort-metrics">
+          <span><b>${c.cachedCount || 0}</b>/${c.accountCount || 0} 已缓存</span>
+          <span>Tokens <b>${escapeHtml(formatTokens(t.totalTokens || 0))}</b></span>
+          <span>价值 <b>${escapeHtml(money(t.dollars))}</b></span>
+          <span>按量 <b>${escapeHtml(money(t.billedDollars))}</b></span>
+          <span>均收尾用量 <b>${escapeHtml(avg)}</b></span>
+        </span>
+      </button>`;
+    })
+    .filter(Boolean)
+    .join('');
+
+  els.prevCycleCohorts.querySelectorAll('[data-cohort]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-cohort');
+      prevCycleDrillCohort = prevCycleDrillCohort === id ? null : id;
+      if (prevCycleReportCache) {
+        renderPrevCycleCohorts(prevCycleReportCache);
+        renderPrevCycleChartsAndTable(prevCycleReportCache);
+      }
+    });
+  });
+}
+
+/**
+ * 柱图 + 明细表（受分群下钻过滤）。
+ * @param {any} report
+ */
+function renderPrevCycleChartsAndTable(report) {
+  const nameOf = (a) => (a.displayName || a.email || a.id || '—').trim();
+  const detailHref = (a) =>
+    a.detailHref || `/detail.html?id=${encodeURIComponent(a.id)}`;
+  const inDrill = (a) => !prevCycleDrillCohort || a.cohort === prevCycleDrillCohort;
+
+  if (els.prevCycleDrillFilters) {
+    if (prevCycleDrillCohort) {
+      const label =
+        report.cohorts?.[prevCycleDrillCohort]?.label || prevCycleDrillCohort;
+      els.prevCycleDrillFilters.hidden = false;
+      els.prevCycleDrillFilters.innerHTML = `
+        <span class="badge ok">下钻：${escapeHtml(label)}</span>
+        <button type="button" class="btn" id="btnClearPrevDrill">清除筛选</button>`;
+      els.prevCycleDrillFilters.querySelector('#btnClearPrevDrill')?.addEventListener('click', () => {
+        prevCycleDrillCohort = null;
+        if (prevCycleReportCache) renderPreviousCycleReport(prevCycleReportCache);
+      });
+    } else {
+      els.prevCycleDrillFilters.hidden = true;
+      els.prevCycleDrillFilters.innerHTML = '';
+    }
+  }
+
+  const filterBucket = (bucket) => {
+    if (!bucket) return bucket;
+    if (!prevCycleDrillCohort) return bucket;
+    const accounts = (bucket.accounts || []).filter(inDrill);
+    return { ...bucket, accounts };
+  };
+
+  const tokenRows = (bucket) =>
+    (bucket?.accounts || [])
+      .filter((a) => a.cached && Number(a.totals?.totalTokens) > 0)
+      .slice()
+      .sort((a, b) => comparePrevCycleAccounts(a, b, nameOf))
+      .map((a) => ({
+        label: nameOf(a),
+        badge: {
+          text: formatPlanLabel(a.planName || a.membershipType || 'unknown'),
+          className: planBadgeClass(a.planName || a.membershipType || 'unknown'),
+        },
+        value: Number(a.totals.totalTokens) || 0,
+        href: detailHref(a),
+        tip: `${nameOf(a)} · ${formatPlanLabel(a.planName || a.membershipType || '')} · 价值 ${money(a.totals?.dollars)} · 按量 ${money(a.totals?.billedDollars)} · 点击进详情`,
+      }));
+
+  renderHorizontalBars(
+    els.chartPrevWeeklyTokens,
+    tokenRows(filterBucket(report.weekly)),
+    '#38d6c7',
+    (v) => (v > 0 ? formatTokens(v) : '0'),
+  );
+  renderHorizontalBars(
+    els.chartPrevMonthlyTokens,
+    tokenRows(filterBucket(report.monthly)),
+    '#7c9cff',
+    (v) => (v > 0 ? formatTokens(v) : '0'),
+  );
+
+  const modelTotal = (report.teamModels || []).reduce((s, r) => s + (Number(r.tokens) || 0), 0);
+  renderHorizontalBars(
+    els.chartPrevCycleModels,
+    (report.teamModels || []).map((r) => ({
+      label: r.model,
+      value: Number(r.tokens) || 0,
+      tip: `${r.model} · ${formatTokens(r.tokens)} · ${money(r.dollars)}`,
+    })),
+    '#c38bff',
+    (v) =>
+      `${formatTokens(v)}${modelTotal ? ` · ${((v / modelTotal) * 100).toFixed(1)}%` : ''}`,
+  );
+
+  if (els.prevCycleAccountTable) {
+    const statusLabel = (s) =>
+      s === 'cached' ? '已缓存' : s === 'settling' ? '收尾中' : s === 'no-window' ? '无周期' : '待预加载';
+    const statusClass = (s) =>
+      s === 'cached' ? 'ok' : s === 'settling' ? 'muted' : s === 'missing' ? 'warn' : 'muted';
+    const kindLabel = (k) => (k === 'weekly' ? '周订' : k === 'monthly' ? '月订' : '—');
+    const sorted = (report.accounts || [])
+      .filter(inDrill)
+      .slice()
+      .sort((a, b) => comparePrevCycleAccounts(a, b, nameOf));
+    /** @type {string[]} */
+    const rowHtml = [];
+    let lastGroup = '';
+    for (const a of sorted) {
+      const planLabel = formatPlanLabel(a.planName || a.membershipType || 'unknown');
+      const groupKey = `${a.cycleKind || 'na'}::${planLabel}`;
+      if (groupKey !== lastGroup) {
+        lastGroup = groupKey;
+        const kind = kindLabel(a.cycleKind);
+        rowHtml.push(
+          `<tr class="prev-plan-group"><td colspan="10">${escapeHtml(kind)} · ${escapeHtml(planLabel)}</td></tr>`,
+        );
+      }
+      const fp = a.finalPercents?.total;
+      const href = detailHref(a);
+      rowHtml.push(`<tr class="prev-account-row" data-href="${escapeHtml(href)}" tabindex="0" role="link">
+          <td><a href="${escapeHtml(href)}">${escapeHtml(nameOf(a))}</a></td>
+          <td><span class="badge ${planBadgeClass(a.planName || a.membershipType || '')}">${escapeHtml(planLabel)}</span></td>
+          <td>${escapeHtml(kindLabel(a.cycleKind))}</td>
+          <td><span class="badge ${statusClass(a.status)}">${escapeHtml(statusLabel(a.status))}</span></td>
+          <td class="num">${a.cached ? escapeHtml(formatTokens(a.totals?.totalTokens || 0)) : '—'}</td>
+          <td class="num">${a.cached ? a.totals?.requests ?? 0 : '—'}</td>
+          <td class="num" title="套餐内估值 + 按量">${a.cached ? escapeHtml(money(a.totals?.dollars)) : '—'}</td>
+          <td class="num" title="仅 USAGE_BASED 实付">${a.cached ? escapeHtml(money(a.totals?.billedDollars)) : '—'}</td>
+          <td class="num">${fp == null ? '—' : `${Number(fp).toFixed(1)}%`}</td>
+          <td class="muted">${a.startIso ? escapeHtml(`${formatDateTime(a.startIso) || ''} → ${formatDateTime(a.endIso) || ''}`) : '—'}</td>
+        </tr>`);
+    }
+    els.prevCycleAccountTable.innerHTML = `
+      <table class="data-table rank-table">
+        <thead>
+          <tr>
+            <th>账号</th><th>套餐</th><th>周期类型</th><th>缓存</th>
+            <th>Tokens</th><th>请求</th><th>用量价值</th><th>按量花费</th><th>收尾用量%</th><th>窗口</th>
+          </tr>
+        </thead>
+        <tbody>${rowHtml.join('') || '<tr><td colspan="10" class="muted">暂无账号</td></tr>'}</tbody>
+      </table>`;
+
+    els.prevCycleAccountTable.querySelectorAll('tr.prev-account-row').forEach((tr) => {
+      const go = () => {
+        const href = tr.getAttribute('data-href');
+        if (href) location.href = href;
+      };
+      tr.addEventListener('click', (ev) => {
+        if (ev.target.closest('a')) return;
+        go();
+      });
+      tr.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          go();
+        }
+      });
+    });
   }
 }
 
@@ -2498,7 +2857,15 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
   btn.addEventListener('click', () => {
     const tab = btn.dataset.tab;
     if (!tab) return;
-    navigate(tab, tab === 'logs' ? activeLogKind : '');
+    const sub =
+      tab === 'logs'
+        ? activeLogKind
+        : tab === 'reports'
+          ? activeReportKind === 'overview'
+            ? ''
+            : activeReportKind
+          : '';
+    navigate(tab, sub);
   });
 });
 
@@ -2515,7 +2882,28 @@ els.btnRestartGuide?.addEventListener('click', () => openOnboarding());
 els.btnAdd?.addEventListener('click', () => openMemberDialog());
 els.btnEmptyAdd?.addEventListener('click', () => openMemberDialog());
 els.btnRefreshLogs?.addEventListener('click', () => loadLogs());
-els.btnRefreshReports?.addEventListener('click', () => loadReports());
+els.btnRefreshReports?.addEventListener('click', () => loadActiveReport());
+els.btnPreloadPrevCycle?.addEventListener('click', async () => {
+  if (!isAdmin()) return;
+  setBusy(els.btnPreloadPrevCycle, true);
+  try {
+    const data = await api('/api/reports/previous-cycle/preload', { method: 'POST', body: '{}' });
+    const done = data?.preload?.done ?? 0;
+    const ok = (data?.preload?.results || []).filter((r) => r.ok).length;
+    toast(done ? `已预加载 ${ok}/${done} 个账号` : '当前没有需要预加载的账号');
+    if (data?.report) renderPreviousCycleReport(data.report);
+    else await loadPreviousCycleReportPage();
+  } catch (e) {
+    toast(e.message || String(e));
+  } finally {
+    setBusy(els.btnPreloadPrevCycle, false);
+  }
+});
+document.querySelector('.reports-nav')?.addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-report]');
+  if (!btn) return;
+  setReportKind(/** @type {'overview' | 'prev'} */ (btn.dataset.report || 'overview'));
+});
 document.querySelector('.logs-nav')?.addEventListener('click', (event) => {
   const btn = event.target.closest('button[data-log]');
   if (!btn) return;
@@ -2758,6 +3146,17 @@ for (const box of [els.chartTeamTokens, els.chartTeamSpend, els.chartTeamRequest
     if (date) openDayRank(date);
   });
 }
+// 今日模型分布：下钻到该模型账号排行弹窗
+els.chartTodayModels?.addEventListener('click', (e) => {
+  const row = e.target.closest('[data-drill]');
+  const model = row?.getAttribute('data-drill');
+  if (!model) return;
+  todayRankDate = null;
+  todayRankMode = 'model';
+  todayRankModel = model;
+  renderDayRank();
+  els.todayRankDialog?.showModal();
+});
 const replaceAccountRoute = () =>
   navigate('accounts', accountStatusFilter === 'all' ? '' : accountStatusFilter, accountRouteParams(), {
     replace: true,
