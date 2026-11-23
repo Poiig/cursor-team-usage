@@ -24,6 +24,10 @@ services:
       # 容器内必须监听所有接口，覆盖 .env 里的 127.0.0.1
       HOST: "0.0.0.0"
       PORT: "3780"
+      # 出站 HTTP 代理（也可写在 .env，由 env_file 注入）。Node fetch 需镜像内 undici 适配。
+      # HTTP_PROXY: "http://192.168.100.200:3128"
+      # HTTPS_PROXY: "http://192.168.100.200:3128"
+      # NO_PROXY: "127.0.0.1,localhost,192.168.6.39"
       # 改用 Postgres 时取消下行与 postgres 服务注释
       # STORE_DRIVER: postgres
       # DATABASE_URL: postgresql://postgres:postgres@postgres:5432/cursor_team_usage

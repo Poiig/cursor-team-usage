@@ -14,7 +14,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test test/unit.test.js",
+    "test": "node --test test/unit.test.js test/http-proxy.test.js",
     "ext:install": "npm install --prefix extension",
     "ext:compile": "npm run compile --prefix extension",
     "ext:watch": "npm run watch --prefix extension",
@@ -27,6 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "pg": "^8.23.0",
-    "sql.js": "^1.14.2"
+    "sql.js": "^1.14.2",
+    "undici": "^6.21.0"
   }
 }

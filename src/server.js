@@ -2034,6 +2034,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 await loadAppConfig();
+// .env 加载后再挂代理，否则容器内 HTTP_PROXY 进不了 process.env
+const { applyHttpProxyFromEnv } = await import('./http-proxy.js');
+const httpProxyInfo = applyHttpProxyFromEnv();
 ({ host: HOST, port: PORT } = getListenConfig());
 if (
   !['127.0.0.1', '::1', 'localhost'].includes(HOST) &&
@@ -2062,6 +2065,14 @@ setupExpiringNotifySchedule();
 server.listen(PORT, HOST, async () => {
   console.log(`cursor-team-usage → http://${HOST}:${PORT}`);
   console.log(`存储：${getStoreDriver()}`);
+  if (httpProxyInfo.enabled) {
+    console.log(
+      `出站代理：${httpProxyInfo.httpsProxy || httpProxyInfo.httpProxy}` +
+        (httpProxyInfo.noProxy ? `（NO_PROXY=${httpProxyInfo.noProxy}）` : ''),
+    );
+  } else {
+    console.log('出站代理：未配置（直连）');
+  }
   console.log(
     `插件上报鉴权：${isAccessKeyConfigured() ? '已启用 Access Key' : '未配置（/api/agent/report 不可用）'}`,
   );
@@ -2069,6 +2080,9 @@ server.listen(PORT, HOST, async () => {
   await writeAppLog('启动', {
     地址: `http://${HOST}:${PORT}`,
     存储: getStoreDriver(),
+    出站代理: httpProxyInfo.enabled
+      ? httpProxyInfo.httpsProxy || httpProxyInfo.httpProxy
+      : '直连',
     自动刷新秒: getServerAutoRefreshSec(),
     日志保留天: getLogRetentionDays(),
     插件鉴权: isAccessKeyConfigured() ? '已启用' : '未配置',
