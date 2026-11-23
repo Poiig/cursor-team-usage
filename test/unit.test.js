@@ -1032,24 +1032,41 @@ test('isCursorAuthFailure / probeCursorSessionAuth 区分吊销与网络抖动',
   assert.equal(isCursorAuthFailure({ status: 500, message: 'boom' }), false);
 
   const realFetch = globalThis.fetch;
+  const cookie = buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s');
   try {
     globalThis.fetch = async () => {
       const err = new Error('not_authenticated (HTTP 401): https://cursor.com/api/auth/me');
       err.status = 401;
       throw err;
     };
-    assert.equal(
-      await probeCursorSessionAuth(buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s')),
-      false,
-    );
+    assert.equal(await probeCursorSessionAuth(cookie), false);
+
+    // 连续网络失败 → 重试耗尽仍未知
+    let resetCalls = 0;
     globalThis.fetch = async () => {
+      resetCalls += 1;
       throw new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } });
     };
-    assert.equal(
-      await probeCursorSessionAuth(buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s')),
-      null,
-    );
-    const cookie = buildCookieValue('user_probe', 'h.eyJzdWIiOiJhdXRoMHx1c2VyX3Byb2JlIn0.s');
+    assert.equal(await probeCursorSessionAuth(cookie), null);
+    assert.equal(resetCalls, 3);
+
+    // 前两次超时，第三次成功
+    let flaky = 0;
+    globalThis.fetch = async () => {
+      flaky += 1;
+      if (flaky < 3) {
+        const err = new Error('The operation was aborted due to timeout');
+        err.name = 'TimeoutError';
+        err.code = 'UND_ERR_CONNECT_TIMEOUT';
+        throw err;
+      }
+      return new Response(JSON.stringify({ membershipType: 'pro', billingCycleStart: '2026-10-01' }), {
+        status: 200,
+      });
+    };
+    assert.equal(await probeCursorSessionAuth(cookie), true);
+    assert.equal(flaky, 3);
+
     globalThis.fetch = async () => new Response(null, { status: 204 });
     assert.equal(await probeCursorSessionAuth(cookie), false);
     globalThis.fetch = async () => new Response('', { status: 200 });

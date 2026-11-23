@@ -35,7 +35,7 @@ function sleep(ms) {
 }
 
 const TRANSIENT_ERROR_RE =
-  /UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|UND_ERR_SOCKET|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EAI_AGAIN|EPIPE|ENOTFOUND|fetch failed|请求超时|terminated|other side closed|socket hang up/i;
+  /UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|UND_ERR_SOCKET|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EAI_AGAIN|EPIPE|ENOTFOUND|fetch failed|请求超时|terminated|other side closed|socket hang up|AbortError|TimeoutError|aborted due to timeout/i;
 
 /**
  * 短暂网络/限流失败：可重试，且有旧快照时不要写成看板上的红条。
@@ -107,6 +107,7 @@ export function probeResultLabel(probe) {
 /**
  * 上报前向用量接口确认会话。true=可用，false=未认证或空响应，null=网络未知。
  * 不用 /api/auth/me：吊销 Token 那里返回 204 空体，会被当成已登录。
+ * 网络/5xx 与 fetchJson 同口径重试（最多 3 次）；401/403/空体立即判定失效不重试。
  * @param {string} cookieValue
  * @returns {Promise<boolean | null>}
  */
@@ -114,31 +115,43 @@ export async function probeCursorSessionAuth(cookieValue) {
   const session = sessionFromCookie(cookieValue);
   if (!session) return false;
   const url = 'https://cursor.com/api/usage-summary';
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        ...BROWSER_HEADERS,
-        Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
-      },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (res.status === 401 || res.status === 403 || res.status === 204) return false;
-    if (!res.ok) return null;
-    const text = await res.text();
-    if (!text.trim()) return false;
-    let data;
+  const maxRetries = 2;
+  for (let attempt = 0; ; attempt++) {
     try {
-      data = JSON.parse(text);
-    } catch {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          ...BROWSER_HEADERS,
+          Cookie: `WorkosCursorSessionToken=${session.cookieValue}`,
+        },
+        // 后续尝试略放宽，给偶发慢连留时间
+        signal: AbortSignal.timeout(attempt === 0 ? 12000 : 18000),
+      });
+      if (res.status === 401 || res.status === 403 || res.status === 204) return false;
+      if (!res.ok) {
+        const retryable = res.status === 408 || res.status === 425 || res.status === 429 || res.status >= 500;
+        if (retryable && attempt < maxRetries) {
+          await sleep(retryDelayMs({ status: res.status }, attempt));
+          continue;
+        }
+        return null;
+      }
+      const text = await res.text();
+      if (!text.trim()) return false;
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return false;
+      }
+      if (!data || typeof data !== 'object') return false;
+      if (data.membershipType || data.billingCycleStart || data.individualUsage) return true;
       return false;
+    } catch (error) {
+      if (isCursorAuthFailure(error)) return false;
+      if (attempt >= maxRetries || !isTransientCursorError(error)) return null;
+      await sleep(retryDelayMs(error, attempt));
     }
-    if (!data || typeof data !== 'object') return false;
-    if (data.membershipType || data.billingCycleStart || data.individualUsage) return true;
-    return false;
-  } catch (error) {
-    if (isCursorAuthFailure(error)) return false;
-    return null;
   }
 }
 
@@ -150,11 +163,13 @@ function isRetryableError(error) {
 /** 连接超时要多等一会儿，250ms 时对端往往还没恢复。 */
 function retryDelayMs(error, attempt) {
   if (error?.retryAfterMs) return error.retryAfterMs;
-  const slow = /TIMEOUT|ETIMEDOUT|ENETUNREACH|UND_ERR_CONNECT/i.test(
-    String(error?.code || error?.cause?.code || error?.message || ''),
+  const slow = /TIMEOUT|ETIMEDOUT|ENETUNREACH|UND_ERR_CONNECT|AbortError|aborted/i.test(
+    String(error?.code || error?.cause?.code || error?.name || error?.message || ''),
   );
-  if (attempt === 0) return slow ? 1000 : 250;
-  return slow ? 3000 : 750;
+  // 6.80 到 cursor.com 偶发连不上，多歇一会再撞
+  if (attempt === 0) return slow ? 1500 : 250;
+  if (attempt === 1) return slow ? 4000 : 750;
+  return slow ? 6000 : 1500;
 }
 
 /**
@@ -220,7 +235,8 @@ async function fetchJsonOnce(url, options, timeoutMs) {
  * @param {number} [timeoutMs]
  */
 async function fetchJson(url, options, timeoutMs = 20000) {
-  const maxRetries = 2;
+  // 3 次尝试：应对 6.80→cursor.com 偶发连接超时
+  const maxRetries = 3;
   for (let attempt = 0; ; attempt++) {
     try {
       return await fetchJsonOnce(url, options, timeoutMs);
@@ -1888,17 +1904,22 @@ export async function fetchMemberUsageEvents(cookieValue, opts = {}) {
 }
 
 /**
- * 整次快照再补一轮：单接口已重试仍可能整组 Promise.all 一起失败。
+ * 整次快照外层再重试：单接口已重试仍可能整组 Promise.all 一起失败。
  * @param {string} cookieValue
  */
 export async function fetchMemberSnapshotWithRetry(cookieValue) {
-  try {
-    return await fetchMemberSnapshot(cookieValue);
-  } catch (e) {
-    if (!isTransientCursorError(e)) throw e;
-    await sleep(2000);
-    return await fetchMemberSnapshot(cookieValue);
+  const maxRetries = 2;
+  let lastError;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchMemberSnapshot(cookieValue);
+    } catch (e) {
+      lastError = e;
+      if (attempt >= maxRetries || !isTransientCursorError(e)) throw e;
+      await sleep(retryDelayMs(e, attempt));
+    }
   }
+  throw lastError;
 }
 
 /**
