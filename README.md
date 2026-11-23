@@ -36,7 +36,7 @@
 ```bash
 cp .env.example .env   # Windows: copy .env.example .env
 npm install
-npm start
+npm start              # 或 ./up.sh；热重载：npm run dev / ./up.sh --dev
 ```
 
 浏览器打开 http://127.0.0.1:3780 ，用 `admin` / `admin` 登录并立刻改密。之后可在「用户」页添加普通用户。
@@ -171,7 +171,8 @@ src/                 服务端与 Cursor API
 public/              列表 / 详情 / 登录页
 extension/           Reporter 扩展（打 VSIX）
 .env.example         配置模板 → 复制为 .env
-docker-compose.yml   拉取 ghcr.io/poiig/cursor-team-usage
+up.sh                本机 Node 启动（./up.sh / --dev）
+docker-compose.yml   拉取 ghcr.io/poiig/cursor-team-usage（部署机）
 scripts/             扩展安装脚本、本机读写 state.vscdb
 docs/screenshots/    README 截图
 data/                运行时数据（app.sqlite、log/ 操作日志，勿提交）
